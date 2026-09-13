@@ -47,9 +47,13 @@ jobs:
       - name: Verify sync output is committed (no drift)
         run: git diff --exit-code
       - name: Tokenize fixtures
+        # Written rather than `pnpm init`ed: pnpm 11's init writes a
+        # devEngines block pinned to `^<current>` with `onFail: download`, so
+        # the next command would fetch whatever 11.x is newest and run this
+        # check on a pnpm the setup step did not pin.
         run: |
           mkdir -p /tmp/tokdeps
-          pnpm --dir /tmp/tokdeps init
+          printf '{"name":"poly-tokdeps","private":true}\n' > /tmp/tokdeps/package.json
           pnpm --dir /tmp/tokdeps add vscode-textmate vscode-oniguruma
           node tools/tokenize-check.mjs /tmp/tokdeps/node_modules
       - name: Package VSIX

@@ -137,11 +137,19 @@ editor: ## Typecheck, test, build and package poly-editor
 # The tokenizer deps go to /tmp rather than into the repo: they are two
 # packages this repo does not otherwise depend on, and pnpm has them cached
 # after the first run.
+#
+# The manifest is written rather than `pnpm init`ed. pnpm 11 writes a
+# `devEngines.packageManager` block pinned to `^<the version that ran init>`
+# with `onFail: download`, so the very next pnpm command in that directory
+# fetches whatever 11.x is newest and runs the check on a pnpm nothing here
+# pinned -- and when that download is half-written, the failure is
+# `pnpm: line 1: This: command not found`, which names neither pnpm nor this
+# target. Two keys are all `pnpm add` needs.
 grammars: ## Generated syntax files match sources.json; grammars tokenize
 	python3 tools/grammar-sync.py --check
 	@mkdir -p /tmp/poly-tokdeps
 	@test -d /tmp/poly-tokdeps/node_modules/vscode-textmate || ( \
-		pnpm --dir /tmp/poly-tokdeps init >/dev/null && \
+		printf '{"name":"poly-tokdeps","private":true}\n' > /tmp/poly-tokdeps/package.json && \
 		pnpm --dir /tmp/poly-tokdeps add vscode-textmate vscode-oniguruma >/dev/null )
 	node tools/tokenize-check.mjs /tmp/poly-tokdeps/node_modules
 
