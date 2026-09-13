@@ -28,6 +28,10 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - 輸出標準 TextMate scope，**任何現有 color theme 直接生效**，不自帶配色。
 - 部分語言改採比內建更好的社群文法（如 rust 用 dustypomerleau/rust-syntax）。
 - 文法一律以 pinned commit 從上游 repo／marketplace VSIX 同步，不手改。
+- **markdown 清單按 Enter 自動接續**下一項（`-`／`*`／`+`、`1.`／`1)`、`- [ ]`、`>`），
+  VSCode 內建沒有這個行為。同一份規則也套用在 `SKILL.md`、`*.prompt.md`、
+  `*.instructions.md`、`.claude/agents/**`、`.claude/rules/**` 這些 VSCode 1.120 起
+  不再算 `markdown` 的檔案上。有序清單接出來的是 `1.`（`poly fmt` 保留這種寫法）。
 - **零執行期程式碼**，不佔 extension host 資源。
 
 ### poly-lsp — 編輯器整合
@@ -88,6 +92,14 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **`Poly: Toggle Bold` ／ `Toggle Italic`**：`cmd/ctrl+b`、`cmd/ctrl+i`，只在
   markdown 檔生效。產生 `**bold**` 與 `_italic_`——就是 `poly fmt` 正規化出來的那兩種，
   不會被下一次存檔改掉。
+- **清單接續**：在清單項目上按 Enter 接出下一項，**有序清單號碼遞增**（整份寫成 `1.` 的
+  清單維持 `1.`），任務項接出 `- [ ]`，**空的項目按 Enter 結束清單**（往外退一層，最外層
+  就清掉 marker）。markdown 家族與 yaml 都有，yaml 只認 sequence 的破折號——`>` 在那裡是
+  folded block scalar。
+- **清單縮排**：游標在清單項目的內容起點或更左邊時，`tab` 進一層、`shift+tab` 退一層。
+  一層是上一項內容開始的那一欄——`- x` 的內容在第 2 欄、`1. x` 在第 3 欄，也就是
+  `poly fmt` 正規化出來的縮排，不是 `editor.tabSize`。游標已經在文字裡、有選取、補全清單
+  開著、Copilot 的 inline suggestion 等著被接受時，Tab 原樣還給編輯器。
 - **Postfix completion**：`err.if` 展開成 `if err != nil { }`（Go）、`if (err) { }`
   （TS）、`if err:`（Python）。go／rust／swift／ts／js／python／lua／c／cpp 都有。這是
   文字重排不是分析——poly 只讀 `.` 左邊那串字元塞進模板，不知道 `err` 是什麼型別，也正

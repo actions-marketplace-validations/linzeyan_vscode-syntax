@@ -43,6 +43,42 @@ VSCode 的側邊欄開關）。沒有選取時作用於游標所在的單字。
 產生的是 `**bold**` 與 `_italic_`——正是 `poly fmt` 對 markdown 正規化出來的那兩種，
 所以按下去的結果不會被下一次存檔改掉。
 
+「markdown 檔」指的是整個 markdown 家族：`markdown`，加上 VSCode 1.120 的
+`prompt-basics` 從它分出去的 `skill`／`prompt`／`instructions`／`chatagent`
+（`SKILL.md`、`*.prompt.md`、`*.instructions.md`、`.claude/agents/**`、
+`.claude/rules/**` 等）。`Insert Table of Contents` 認的也是這一組。
+
+### Enter：清單接續
+
+在清單項目上按 Enter 接出下一項，**有序清單的號碼會遞增**（`1.` → `2.`）。整份都寫成 `1.`
+的清單維持 `1.`——CommonMark 本來就把它算成 1、2、3，`poly fmt` 兩種寫法都保留，改寫別人選
+的風格不是 Enter 的事。巢狀清單各數各的。任務項不管原本打勾沒有，接出來的都是 `- [ ]`。
+
+**空的項目按 Enter 是結束清單**：往外退一層，退到最外層就把 marker 清掉。這是所有人本來就
+在用的「連按兩次 Enter」，少了它每次都要自己回頭刪一個 marker。
+
+yaml 也接管，但只認 sequence 的破折號：`>` 在 yaml 是 folded block scalar、`1.` 只是字串，
+照 markdown 的規矩接下去會弄壞檔案。
+
+poly-syntax-highlight 用語言設定檔也做了一份接續（`onEnterRules`）。裝了 poly-editor 的話
+Enter 由這裡接管，那份是單獨安裝 syntax 時的退路——它接不出遞增的號碼，也結束不了清單，因為
+語言設定檔只能接一段固定文字。順帶一提，那份還有一個這裡沒有的毛病：`onEnterRules` 在該行
+還沒 tokenize 完之前會被整條跳過，所以大檔剛開啟的那一瞬間按 Enter 是沒有接續的。
+
+### Tab ／ Shift+Tab：清單縮排
+
+游標停在清單項目的內容起點或更左邊時，`tab` 把整項推進一層，`shift+tab` 退回上一層。
+一旦游標已經在文字裡，Tab 就還給打字——這條界線跟 markdown-all-in-one 的一樣。
+
+**一層不是一個 tab stop，是上一項內容開始的那一欄**：`- x` 的內容在第 2 欄、`1. x` 在第
+3 欄、`10. x` 在第 4 欄。這正是 `poly fmt` 正規化出來的縮排（實測：`1.` 底下縮四格的子項
+會被改成三格），所以按出來的層級不會被下一次存檔改掉——跟粗體選 `**` 是同一條理由。用
+`editor.tabSize` 就會兩邊打架。
+
+界線之外的每一種情況都原封不動轉發給內建的 `tab`／`outdent`：不是清單、有選取、
+補全清單開著、snippet 進行中、inline suggestion 等著被接受（Copilot 的 Tab 不會被搶走）。
+清單的第一項也一樣——它沒有可以縮進去的上一層，硬縮只會產生一段 `poly fmt` 會清掉的空白。
+
 ### 引用計數 CodeLens
 
 每個宣告上方一行 `11 refs`／`1 ref`／`no refs`，點下去開引用清單。interface 與它的

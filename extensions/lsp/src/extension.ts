@@ -22,6 +22,15 @@ const LANGUAGES = [
   "json",
   "jsonc",
   "markdown",
+  // The ids `prompt-basics` takes off markdown -- SKILL.md, *.prompt.md,
+  // *.instructions.md, .claude/rules/**, .claude/agents/**. They are `.md`
+  // files, so `poly fmt` already formats them from the CLI by path; leaving
+  // them out of the selector is what made the editor and the CLI disagree
+  // about the same file.
+  "prompt",
+  "instructions",
+  "chatagent",
+  "skill",
   "toml",
   "css",
   "scss",

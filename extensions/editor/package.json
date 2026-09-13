@@ -153,6 +153,21 @@
         "command": "poly.revertAndSave",
         "title": "Revert Selected Changes and Save",
         "category": "Poly"
+      },
+      {
+        "command": "poly.continueList",
+        "title": "Continue List",
+        "category": "Poly"
+      },
+      {
+        "command": "poly.indentListItem",
+        "title": "Indent List Item",
+        "category": "Poly"
+      },
+      {
+        "command": "poly.outdentListItem",
+        "title": "Outdent List Item",
+        "category": "Poly"
       }
     ],
     "views": {
@@ -176,6 +191,20 @@
           "when": "view == polyTodos",
           "group": "navigation"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "poly.continueList",
+          "when": "false"
+        },
+        {
+          "command": "poly.indentListItem",
+          "when": "false"
+        },
+        {
+          "command": "poly.outdentListItem",
+          "when": "false"
+        }
       ]
     },
     "keybindings": [
@@ -183,13 +212,28 @@
         "command": "poly.toggleBold",
         "key": "ctrl+b",
         "mac": "cmd+b",
-        "when": "editorTextFocus && !editorReadonly && editorLangId == markdown"
+        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill)$/"
       },
       {
         "command": "poly.toggleItalic",
         "key": "ctrl+i",
         "mac": "cmd+i",
-        "when": "editorTextFocus && !editorReadonly && editorLangId == markdown"
+        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill)$/"
+      },
+      {
+        "command": "poly.continueList",
+        "key": "enter",
+        "when": "editorTextFocus && !editorReadonly && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inSnippetMode && !inlineSuggestionVisible && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill|yaml)$/"
+      },
+      {
+        "command": "poly.indentListItem",
+        "key": "tab",
+        "when": "editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inSnippetMode && !inlineSuggestionVisible && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill)$/"
+      },
+      {
+        "command": "poly.outdentListItem",
+        "key": "shift+tab",
+        "when": "editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inSnippetMode && !inlineSuggestionVisible && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill)$/"
       },
       {
         "command": "poly.nextChangedFile",

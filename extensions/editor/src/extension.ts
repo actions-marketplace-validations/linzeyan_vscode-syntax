@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import { nextChangedFile } from "./changes";
 import { imageReferences } from "./images";
 import { indentSpans } from "./indent";
+import { Dialect, enterAction, indentTarget, listItem, outdentTarget } from "./list";
 import { toc, TOC_END, TOC_START } from "./markdown";
 import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } from "./postfix";
 import { REFACTOR_KIND, refactorChoices, Refactoring } from "./refactors";
@@ -115,6 +116,112 @@ async function toggleEmphasis(
   });
 }
 
+/**
+ * The language ids that are markdown, whatever VSCode calls them.
+ *
+ * `prompt-basics` takes `SKILL.md`, `*.prompt.md`, `*.instructions.md`,
+ * `.claude/rules/**`, `.claude/agents/**` and friends away from the `markdown`
+ * id, and it contributes no list behaviour of its own. Anything keyed on
+ * `markdown` alone silently stops working in exactly the files that are most
+ * often edited as markdown. The same list is spelled out in the `when` clauses
+ * in package.json, which cannot read this one.
+ */
+const MARKDOWN_LANGUAGES = new Set([
+  "markdown",
+  "prompt",
+  "instructions",
+  "chatagent",
+  "skill",
+]);
+
+/**
+ * The list dialect each language id speaks.
+ *
+ * The markdown family shares one. yaml is its own: `>` opens a folded block
+ * scalar there and `1.` is just a string, so continuing either the way
+ * markdown does would corrupt the file.
+ */
+const DIALECTS = new Map<string, Dialect>([
+  ...[...MARKDOWN_LANGUAGES].map((id): [string, Dialect] => [id, "markdown"]),
+  ["yaml", "yaml"],
+]);
+
+/**
+ * Enter inside a list item.
+ *
+ * Bound to Enter, so -- like the Tab commands -- every path it does not handle
+ * forwards to what the key already did, and the `when` clause keeps it away
+ * from the widgets that own Enter (suggestions, snippets, inline suggestions).
+ *
+ * It exists because a language-configuration `onEnterRules` can only append a
+ * fixed string: it cannot count an ordered list up, and it cannot end one. A
+ * side effect worth having is that this does not depend on tokenization, while
+ * `onEnterRules` is skipped outright until the line has been tokenized -- which
+ * is why continuation used to fail for the first moment after a large file
+ * opened.
+ */
+async function continueList(editor: vscode.TextEditor): Promise<void> {
+  const document = editor.document;
+  const cursor = editor.selection.active;
+  const line = document.lineAt(cursor.line);
+  const dialect = DIALECTS.get(document.languageId);
+  const item = dialect ? listItem(line.text, dialect) : undefined;
+  // Left of the content there is no item to continue yet, only a marker being
+  // typed -- and inserting one there would push the marker into its own line.
+  const action = dialect && item && editor.selection.isEmpty
+      && cursor.character >= item.contentColumn
+    ? enterAction(document.getText().split(/\r?\n/), cursor.line, dialect)
+    : undefined;
+  if (!action) {
+    await vscode.commands.executeCommand("type", { text: "\n" });
+    return;
+  }
+  await editor.edit((builder) => {
+    if (action.kind === "continue") {
+      builder.insert(cursor, `\n${action.text}`);
+    } else {
+      builder.replace(line.range, action.text);
+    }
+  });
+}
+
+/**
+ * Tab and Shift+Tab over a list item.
+ *
+ * Bound to Tab, so every case this does not handle has to behave exactly as if
+ * it were not bound at all -- hence the fallback to the built-in command
+ * rather than an early return. It takes over only while the cursor is still at
+ * or left of the item's content: once there is text being typed past the
+ * marker, Tab belongs to typing.
+ */
+async function shiftListItem(
+  editor: vscode.TextEditor,
+  direction: "indent" | "outdent",
+): Promise<void> {
+  const fallback = direction === "indent" ? "tab" : "outdent";
+  const document = editor.document;
+  const cursor = editor.selection.active;
+  const item = MARKDOWN_LANGUAGES.has(document.languageId) && editor.selection.isEmpty
+    ? listItem(document.lineAt(cursor.line).text)
+    : undefined;
+  const target = item && cursor.character <= item.contentColumn
+    ? (direction === "indent" ? indentTarget : outdentTarget)(
+      document.getText().split(/\r?\n/),
+      cursor.line,
+    )
+    : undefined;
+  if (target === undefined || !item) {
+    await vscode.commands.executeCommand(fallback);
+    return;
+  }
+  await editor.edit((builder) => {
+    builder.replace(
+      new vscode.Range(cursor.line, 0, cursor.line, item.indent.length),
+      target,
+    );
+  });
+}
+
 /** The block a previous run wrote, or why there is no usable one. */
 function tocRange(
   document: vscode.TextDocument,
@@ -135,7 +242,7 @@ function tocRange(
 
 async function insertToc(editor: vscode.TextEditor): Promise<void> {
   const document = editor.document;
-  if (document.languageId !== "markdown") {
+  if (!MARKDOWN_LANGUAGES.has(document.languageId)) {
     vscode.window.showWarningMessage(
       `Poly: Insert Table of Contents needs a markdown file (this one is ${document.languageId})`,
     );
@@ -835,6 +942,33 @@ export function activate(context: vscode.ExtensionContext) {
         "Inline Variable",
         (editor) => runRefactor(editor, "inline", "inline-variable refactoring"),
       ),
+    ],
+    [
+      "poly.continueList",
+      async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+          await continueList(editor);
+        }
+      },
+    ],
+    [
+      "poly.indentListItem",
+      async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+          await shiftListItem(editor, "indent");
+        }
+      },
+    ],
+    [
+      "poly.outdentListItem",
+      async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+          await shiftListItem(editor, "outdent");
+        }
+      },
     ],
     ["poly.nextChangedFile", () => stepChangedFile(1)],
     ["poly.previousChangedFile", () => stepChangedFile(-1)],

@@ -201,6 +201,22 @@
         "configuration": "./language-configuration/ssh-config.json"
       },
       {
+        "id": "prompt",
+        "configuration": "./language-configuration/markdown.json"
+      },
+      {
+        "id": "instructions",
+        "configuration": "./language-configuration/markdown.json"
+      },
+      {
+        "id": "chatagent",
+        "configuration": "./language-configuration/markdown.json"
+      },
+      {
+        "id": "skill",
+        "configuration": "./language-configuration/markdown.json"
+      },
+      {
         "id": "vue",
         "extensions": [
           ".vue"

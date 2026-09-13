@@ -295,14 +295,21 @@ def build_contributes(sources: dict, lock: dict) -> tuple[list, list]:
             # for the same id is how a file type ends up depending on load
             # order. An `extensions` list here is a claim that the built-in
             # does not have these, and the rationale is where that gets argued.
-            entry = {"id": lang["id"]}
-            if cfg.get("extensions"):
-                entry["extensions"] = cfg["extensions"]
-            if cfg.get("configuration"):
-                entry["configuration"] = (
-                    f"./language-configuration/{cfg['configuration']}"
-                )
-            languages.append(entry)
+            #
+            # `alsoFor` shares one configuration across the sibling ids a single
+            # upstream extension declares (prompt-basics splits markdown into
+            # four). Only the configuration is shared: file associations belong
+            # to the id that owns them, and copying them is the load-order bug
+            # above.
+            for language_id in [lang["id"], *cfg.get("alsoFor", [])]:
+                entry = {"id": language_id}
+                if cfg.get("extensions") and language_id == lang["id"]:
+                    entry["extensions"] = cfg["extensions"]
+                if cfg.get("configuration"):
+                    entry["configuration"] = (
+                        f"./language-configuration/{cfg['configuration']}"
+                    )
+                languages.append(entry)
         for f in lang["files"]:
             g = {}
             if f.get("language"):
