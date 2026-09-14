@@ -1,12 +1,15 @@
 name: Grammar Sync
 
-# Weekly upstream refresh: bump pinned shas, re-sync grammars, verify
+# Monthly upstream refresh: bump pinned shas, re-sync grammars, verify
 # fixtures still tokenize, open a PR with the diff. Note: PRs opened with
 # GITHUB_TOKEN do not trigger CI — close/reopen the PR (or push to its
 # branch) to run checks before merging.
 on:
   schedule:
-    - cron: "0 6 * * 1"
+    # 06:00 UTC on the 1st. Grammars are pinned, so nothing drifts between
+    # runs -- the cadence only sets how stale a pin gets before anyone looks,
+    # and every run still costs a PR to review.
+    - cron: "0 6 1 * *"
   workflow_dispatch:
 
 permissions:
@@ -44,9 +47,13 @@ jobs:
           fi
       - name: Tokenize fixtures
         if: steps.diff.outputs.changed == 'true'
+        # Written rather than `pnpm init`ed: pnpm 11's init writes a
+        # devEngines block pinned to `^<current>` with `onFail: download`, so
+        # the next command would fetch whatever 11.x is newest and run this
+        # check on a pnpm the setup step did not pin.
         run: |
           mkdir -p /tmp/tokdeps
-          pnpm --dir /tmp/tokdeps init
+          printf '{"name":"poly-tokdeps","private":true}\n' > /tmp/tokdeps/package.json
           pnpm --dir /tmp/tokdeps add vscode-textmate vscode-oniguruma
           node tools/tokenize-check.mjs /tmp/tokdeps/node_modules | tee /tmp/tokenize.log
       - name: Open PR
@@ -70,7 +77,7 @@ jobs:
             exit 1
           fi
           {
-            echo "Automated weekly grammar sync. Tokenize check passed on this runner:"
+            echo "Automated monthly grammar sync. Tokenize check passed on this runner:"
             echo
             echo '```'
             tail -30 /tmp/tokenize.log
@@ -78,7 +85,7 @@ jobs:
             echo
             echo "CI does not auto-run on token-created PRs — close/reopen to trigger."
           } > /tmp/pr-body.md
-          if ! gh pr create --title "grammar-sync: weekly upstream refresh" \
+          if ! gh pr create --title "grammar-sync: monthly upstream refresh" \
                --body-file /tmp/pr-body.md --base main --head "$BRANCH"; then
             if ! gh pr edit "$BRANCH" --body-file /tmp/pr-body.md; then
               echo "::error title=pr create failed::Branch $BRANCH is pushed, but opening the PR failed — 'Allow GitHub Actions to create and approve pull requests' defaults to off in Settings > Actions > General"
