@@ -33,7 +33,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
-	version grammars bump control clean
+	version grammars tokdeps grammar-diff editor-diff bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -145,13 +145,34 @@ editor: ## Typecheck, test, build and package poly-editor
 # pinned -- and when that download is half-written, the failure is
 # `pnpm: line 1: This: command not found`, which names neither pnpm nor this
 # target. Two keys are all `pnpm add` needs.
-grammars: ## Generated syntax files match sources.json; grammars tokenize
+grammars: tokdeps ## Generated syntax files match sources.json; grammars tokenize
 	python3 tools/grammar-sync.py --check
+	node tools/tokenize-check.mjs /tmp/poly-tokdeps/node_modules
+
+tokdeps:
 	@mkdir -p /tmp/poly-tokdeps
 	@test -d /tmp/poly-tokdeps/node_modules/vscode-textmate || ( \
 		printf '{"name":"poly-tokdeps","private":true}\n' > /tmp/poly-tokdeps/package.json && \
 		pnpm --dir /tmp/poly-tokdeps add vscode-textmate vscode-oniguruma >/dev/null )
-	node tools/tokenize-check.mjs /tmp/poly-tokdeps/node_modules
+
+# The two differential audits. Neither is in `gates`, and the reason is the same
+# for both: they compare poly against software this repo does not ship. One
+# needs a VSCode installation to read the built-in grammars out of, the other
+# downloads the replaced extensions from the marketplace. A gate that goes red
+# because somebody upgraded their editor is a gate people learn to ignore.
+#
+# What they answer is the question no fixture can: `tokenize-check` and
+# poly-editor's unit tests both only ever ask poly what it thinks. These ask the
+# thing poly replaced the same question and compare the two answers.
+#
+# VSCODE_EXTENSIONS overrides which installation is the reference; running it
+# against two versions is how an upstream improvement is told apart from a
+# regression, because a real regression survives both.
+grammar-diff: tokdeps ## poly's grammars against the built-ins they take over
+	node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
+
+editor-diff: ## poly-editor against the extensions it replaces (downloads them)
+	node tools/editor-diff/run.js
 
 # Given the binary as well, so this asks the same question CI asks: not just
 # whether the files agree with each other, but whether the thing users run
