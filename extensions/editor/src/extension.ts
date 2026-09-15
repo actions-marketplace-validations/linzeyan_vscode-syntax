@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import { nextChangedFile } from "./changes";
 import { imageReferences } from "./images";
 import { indentSpans } from "./indent";
-import { Dialect, enterAction, indentTarget, listItem, outdentTarget } from "./list";
+import { Dialect, enterAction, indentTarget, listItem, outdentTarget, renumberedTail } from "./list";
 import { toc, TOC_END, TOC_START } from "./markdown";
 import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } from "./postfix";
 import { REFACTOR_KIND, refactorChoices, Refactoring } from "./refactors";
@@ -78,6 +78,80 @@ function surrounding(
     : undefined;
 }
 
+/** One replacement, and how far it moves a cursor that was inside it. */
+interface Emphasis {
+  start: number;
+  end: number;
+  text: string;
+  /** Markers added before the caret shift it right; removed ones, left. */
+  inner: number;
+}
+
+/** What toggling `marker` does to `range`, as offsets into the document. */
+function emphasisEdit(
+  document: vscode.TextDocument,
+  range: vscode.Range,
+  marker: string,
+): Emphasis {
+  const text = document.getText(range);
+  const start = document.offsetAt(range.start);
+  if (wrapped(text, marker)) {
+    return {
+      start,
+      end: document.offsetAt(range.end),
+      text: text.slice(marker.length, text.length - marker.length),
+      inner: -marker.length,
+    };
+  }
+  const outer = surrounding(document, range, marker);
+  if (outer) {
+    return {
+      start: document.offsetAt(outer.start),
+      end: document.offsetAt(outer.end),
+      text,
+      inner: -marker.length,
+    };
+  }
+  return {
+    start,
+    end: document.offsetAt(range.end),
+    text: `${marker}${text}${marker}`,
+    inner: marker.length,
+  };
+}
+
+/**
+ * Where `offset` ends up once every edit has been applied.
+ *
+ * A caret inside the text being wrapped has to travel with the character it was
+ * on, or bolding a word leaves the caret two columns from where its owner put
+ * it and the next keystroke lands in the wrong place. Boundaries deliberately
+ * do not travel: a selection of the whole word still contains the whole word,
+ * markers and all.
+ */
+function movedBy(offset: number, edits: Emphasis[]): number {
+  let shift = 0;
+  for (const edit of edits) {
+    // An edit with nothing between its ends is a pair of markers opened where
+    // the caret was -- Ctrl+B on an empty line. Both rules below claim that
+    // offset, and "after the edit" is the wrong winner: it leaves the caret
+    // past the closing marker, so the word it was about to bold is not bolded.
+    if (edit.start === edit.end && offset === edit.start) {
+      return offset + edit.inner + shift;
+    }
+    if (offset >= edit.end) {
+      shift += edit.text.length - (edit.end - edit.start);
+    } else if (offset > edit.start) {
+      const inside = Math.min(
+        Math.max(offset + edit.inner, edit.start),
+        edit.start + edit.text.length,
+      );
+      return inside + shift;
+    }
+  }
+  return offset + shift;
+}
+
 /**
  * Wrap or unwrap every selection with `marker`.
  *
@@ -98,22 +172,31 @@ async function toggleEmphasis(
         ?? new vscode.Range(selection.active, selection.active)
       : new vscode.Range(selection.start, selection.end)
   );
+  const edits = targets
+    .map((range) => emphasisEdit(document, range, marker))
+    .sort((a, b) => a.start - b.start);
+  // Captured as offsets before the edit, because the Position objects are about
+  // to describe a document that no longer exists.
+  const carets = editor.selections.map((selection) => ({
+    anchor: document.offsetAt(selection.anchor),
+    active: document.offsetAt(selection.active),
+  }));
 
   await editor.edit((builder) => {
-    for (const range of targets) {
-      const text = document.getText(range);
-      if (wrapped(text, marker)) {
-        builder.replace(range, text.slice(marker.length, text.length - marker.length));
-        continue;
-      }
-      const outer = surrounding(document, range, marker);
-      if (outer) {
-        builder.replace(outer, text);
-        continue;
-      }
-      builder.replace(range, `${marker}${text}${marker}`);
+    for (const edit of edits) {
+      builder.replace(
+        new vscode.Range(document.positionAt(edit.start), document.positionAt(edit.end)),
+        edit.text,
+      );
     }
   });
+
+  editor.selections = carets.map(({ anchor, active }) =>
+    new vscode.Selection(
+      document.positionAt(movedBy(anchor, edits)),
+      document.positionAt(movedBy(active, edits)),
+    )
+  );
 }
 
 /**
@@ -168,19 +251,29 @@ async function continueList(editor: vscode.TextEditor): Promise<void> {
   const item = dialect ? listItem(line.text, dialect) : undefined;
   // Left of the content there is no item to continue yet, only a marker being
   // typed -- and inserting one there would push the marker into its own line.
+  const lines = document.getText().split(/\r?\n/);
   const action = dialect && item && editor.selection.isEmpty
       && cursor.character >= item.contentColumn
-    ? enterAction(document.getText().split(/\r?\n/), cursor.line, dialect)
+    ? enterAction(lines, cursor.line, dialect)
     : undefined;
   if (!action) {
     await vscode.commands.executeCommand("type", { text: "\n" });
     return;
   }
+  // Every range below is a position in the document as it is now, because a
+  // single edit() applies them all against that one snapshot -- which is why
+  // the renumbering is computed from the same `lines` the action was.
+  const renumbers = action.kind === "continue" && dialect
+    ? renumberedTail(lines, cursor.line, dialect)
+    : [];
   await editor.edit((builder) => {
     if (action.kind === "continue") {
       builder.insert(cursor, `\n${action.text}`);
     } else {
       builder.replace(line.range, action.text);
+    }
+    for (const r of renumbers) {
+      builder.replace(new vscode.Range(r.line, r.start, r.line, r.end), r.text);
     }
   });
 }

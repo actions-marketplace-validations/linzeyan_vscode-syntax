@@ -1,11 +1,13 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Dialect, enterAction, indentTarget, listItem, outdentTarget } from "./list";
+import { Dialect, enterAction, indentTarget, listItem, outdentTarget, renumberedTail } from "./list";
 
 const lines = (text: string) => text.split("\n");
 const indent = (text: string, index: number) => indentTarget(lines(text), index);
 const outdent = (text: string, index: number) => outdentTarget(lines(text), index);
+/** `[line, marker]` pairs, which is all a renumbering is. */
+const renumbers = (text: string, index: number) => renumberedTail(lines(text), index).map((r) => [r.line, r.text]);
 
 /** `>` continues the list, `|` ends it -- the two shapes Enter can produce. */
 const enter = (text: string, index: number, dialect: Dialect = "markdown") => {
@@ -137,4 +139,28 @@ test("yaml continues a sequence and nothing else", () => {
   assert.equal(enter("key: value", 0, "yaml"), undefined);
   // No task boxes in yaml: the brackets are a flow sequence.
   assert.equal(enter("  - [ ] a", 0, "yaml"), ">  - ");
+});
+
+test("inserting into an ordered list renumbers what comes after it", () => {
+  // The case the differential found: poly wrote `3.` in front of an existing
+  // `3.` and left both, which `poly fmt` then renumbered on the next save.
+  assert.deepEqual(renumbers("1. a\n2. b\n3. c", 1), [[2, "4."]]);
+  assert.deepEqual(renumbers("1. a\n2. b\n3. c\n4. d", 1), [[2, "4."], [3, "5."]]);
+  assert.deepEqual(renumbers("1. a\n2. b", 1), []);
+  // A loose list keeps counting across its own blank lines, and an item's
+  // wrapped content and children are not siblings.
+  assert.deepEqual(renumbers("1. a\n\n2. b\n\n3. c", 2), [[4, "4."]]);
+  assert.deepEqual(renumbers("1. a\n   more\n2. b", 0), [[2, "3."]]);
+  assert.deepEqual(renumbers("1. a\n   1. x\n2. b", 0), [[2, "3."]]);
+});
+
+test("renumbering stops where the list does", () => {
+  // A paragraph, a shallower item, and a different delimiter each end it.
+  assert.deepEqual(renumbers("1. a\n2. b\n\nprose\n\n5. c", 0), [[1, "3."]]);
+  assert.deepEqual(renumbers("  1. a\n  2. b\n1. outer", 0), [[1, "3."]]);
+  assert.deepEqual(renumbers("1. a\n2. b\n3) c", 0), [[1, "3."]]);
+  // Bullets do not count, and neither does the all-`1.` style: in both cases
+  // the marker Enter writes is the one already there.
+  assert.deepEqual(renumbers("- a\n- b", 0), []);
+  assert.deepEqual(renumbers("1. a\n1. b\n1. c", 1), []);
 });

@@ -193,6 +193,76 @@ function nextMarker(
     : `${number + 1}${ordered[2]}`;
 }
 
+/** A marker to rewrite, as a column span on one line. */
+export interface Renumber {
+  line: number;
+  start: number;
+  end: number;
+  text: string;
+}
+
+/**
+ * The trailing siblings that stop being right once an item is inserted after
+ * line `index`.
+ *
+ * Inserting `3.` in front of an existing `3.` leaves two of them. CommonMark
+ * renders the list 1, 2, 3, 4 either way, so nothing looks wrong until `poly
+ * fmt` runs and renumbers -- and a keystroke whose work the formatter undoes is
+ * exactly what this module exists not to do.
+ *
+ * A list written entirely as `1.` renumbers to nothing, because there is
+ * nothing counting: `nextMarker` keeps that style and so does the formatter.
+ */
+export function renumberedTail(
+  lines: readonly string[],
+  index: number,
+  dialect: Dialect = "markdown",
+): Renumber[] {
+  const item = listItem(lines[index], dialect);
+  if (!item) {
+    return [];
+  }
+  const marker = nextMarker(lines, index, item, dialect);
+  const inserted = ORDERED.exec(marker);
+  // Unordered, or the all-`1.` style where the marker did not move.
+  if (!inserted || marker === item.marker) {
+    return [];
+  }
+  let number = Number(inserted[1]);
+  const out: Renumber[] = [];
+  for (let i = index + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      continue; // a loose list keeps counting across the blank lines in it
+    }
+    const indent = /^[ \t]*/.exec(line)![0].length;
+    if (indent > item.indent.length) {
+      continue; // this item's own wrapped content, or a child list
+    }
+    const sibling = listItem(line, dialect);
+    const ordered = sibling && ORDERED.exec(sibling.marker);
+    // Anything else ends the list: a paragraph, a shallower item, or a bullet
+    // where the numbers were -- that is a different list, not this one's tail.
+    if (
+      !sibling || !ordered || sibling.indent.length !== item.indent.length
+      || ordered[2] !== inserted[2]
+    ) {
+      break;
+    }
+    number++;
+    const text = `${number}${ordered[2]}`;
+    if (text !== sibling.marker) {
+      out.push({
+        line: i,
+        start: sibling.indent.length,
+        end: sibling.indent.length + sibling.marker.length,
+        text,
+      });
+    }
+  }
+  return out;
+}
+
 /**
  * What Enter should do at the end of line `index`, or none to leave Enter
  * alone.
