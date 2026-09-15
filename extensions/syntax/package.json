@@ -679,13 +679,13 @@
       },
       {
         "language": "cpp",
-        "scopeName": "source.cpp",
-        "path": "./syntaxes/cpp.tmLanguage.json"
+        "scopeName": "source.cpp.embedded.macro",
+        "path": "./syntaxes/cpp.embedded.macro.tmLanguage.json"
       },
       {
         "language": "cpp",
-        "scopeName": "source.cpp.embedded.macro",
-        "path": "./syntaxes/cpp.embedded.macro.tmLanguage.json"
+        "scopeName": "source.cpp",
+        "path": "./syntaxes/cpp.tmLanguage.json"
       },
       {
         "scopeName": "source.c.platform",
@@ -836,6 +836,9 @@
         "path": "./syntaxes/shell-unix-bash.tmLanguage.json",
         "unbalancedBracketScopes": [
           "meta.scope.case-pattern.shell"
+        ],
+        "balancedBracketScopes": [
+          "*"
         ]
       },
       {
@@ -880,17 +883,6 @@
         "path": "./syntaxes/go-raw.go-template.tmLanguage.json",
         "injectTo": [
           "source.go"
-        ]
-      },
-      {
-        "scopeName": "text.injection.go-template",
-        "path": "./syntaxes/injection.go-template.tmLanguage.json",
-        "injectTo": [
-          "source.css",
-          "source.js",
-          "source.json",
-          "text.html.derivative",
-          "text.xml"
         ]
       },
       {
@@ -1570,20 +1562,14 @@
         "scopeName": "vue.directives",
         "path": "./syntaxes/vue-directives.tmLanguage.json",
         "injectTo": [
-          "text.html.vue",
-          "text.html.markdown",
-          "text.html.derivative",
-          "text.pug"
+          "text.html.vue"
         ]
       },
       {
         "scopeName": "vue.interpolations",
         "path": "./syntaxes/vue-interpolations.tmLanguage.json",
         "injectTo": [
-          "text.html.vue",
-          "text.html.markdown",
-          "text.html.derivative",
-          "text.pug"
+          "text.html.vue"
         ]
       },
       {

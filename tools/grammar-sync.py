@@ -31,7 +31,12 @@ EXT = ROOT / "extensions" / "syntax"
 SYNTAXES = EXT / "syntaxes"
 UA = {"User-Agent": "poly-grammar-sync"}
 # Grammar contribution keys copied verbatim from upstream (see contributesFrom).
-GRAMMAR_META = ("embeddedLanguages", "tokenTypes", "unbalancedBracketScopes")
+GRAMMAR_META = (
+    "embeddedLanguages",
+    "tokenTypes",
+    "unbalancedBracketScopes",
+    "balancedBracketScopes",
+)
 
 
 def fetch(url: str) -> bytes:

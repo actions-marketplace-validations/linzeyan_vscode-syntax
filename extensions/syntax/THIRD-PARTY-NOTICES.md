@@ -16,7 +16,7 @@ grammars/sources.lock.json.
 - https://github.com/tamasfe/taplo (MIT) @ 08f343be02ce
   files: toml.tmLanguage.json
 - https://github.com/jinliming2/vscode-go-template (MIT) @ 1ddab7c2d3ef
-  files: go-double.go-template.tmLanguage.json, go-raw.go-template.tmLanguage.json, go-template.tmLanguage.json, injection.go-template.tmLanguage.json, markdown.go-template.tmLanguage.json
+  files: go-double.go-template.tmLanguage.json, go-raw.go-template.tmLanguage.json, go-template.tmLanguage.json, markdown.go-template.tmLanguage.json
 - https://github.com/mikestead/vscode-dotenv (MIT) @ ad506a66ede7
   files: env.tmLanguage.json
 - https://github.com/zxh0/vscode-proto3 (MIT) @ 5563d58bc593

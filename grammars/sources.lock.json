@@ -188,6 +188,9 @@
       "source.shell": {
         "unbalancedBracketScopes": [
           "meta.scope.case-pattern.shell"
+        ],
+        "balancedBracketScopes": [
+          "*"
         ]
       },
       "source.js": {
@@ -407,7 +410,6 @@
       "syntaxes/go-template.tmLanguage.json": "3a28b1ca84bf42e4",
       "syntaxes/go-double.go-template.tmLanguage.json": "70957e9ea61ed144",
       "syntaxes/go-raw.go-template.tmLanguage.json": "eb8dc8f7c2917047",
-      "syntaxes/injection.go-template.tmLanguage.json": "ac05e22fb33e5dac",
       "syntaxes/markdown.go-template.tmLanguage.json": "c1fc9ca5c1464d9f"
     }
   },
