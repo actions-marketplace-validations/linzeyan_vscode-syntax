@@ -5,7 +5,16 @@ import * as vscode from "vscode";
 import { nextChangedFile } from "./changes";
 import { imageReferences } from "./images";
 import { indentSpans } from "./indent";
-import { Dialect, enterAction, indentTarget, listItem, outdentTarget, renumberedTail } from "./list";
+import {
+  Dialect,
+  enterAction,
+  indentTarget,
+  listItem,
+  outdentTarget,
+  renumberedAfterMove,
+  renumberedTail,
+  Rewrite,
+} from "./list";
 import { toc, TOC_END, TOC_START } from "./markdown";
 import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } from "./postfix";
 import { REFACTOR_KIND, refactorChoices, Refactoring } from "./refactors";
@@ -254,7 +263,7 @@ async function continueList(editor: vscode.TextEditor): Promise<void> {
   const lines = document.getText().split(/\r?\n/);
   const action = dialect && item && editor.selection.isEmpty
       && cursor.character >= item.contentColumn
-    ? enterAction(lines, cursor.line, dialect)
+    ? enterAction(lines, cursor.line, dialect, cursor.character)
     : undefined;
   if (!action) {
     await vscode.commands.executeCommand("type", { text: "\n" });
@@ -263,19 +272,27 @@ async function continueList(editor: vscode.TextEditor): Promise<void> {
   // Every range below is a position in the document as it is now, because a
   // single edit() applies them all against that one snapshot -- which is why
   // the renumbering is computed from the same `lines` the action was.
-  const renumbers = action.kind === "continue" && dialect
-    ? renumberedTail(lines, cursor.line, dialect)
-    : [];
+  const rewrites = action.kind === "continue" && dialect
+    ? [...action.also, ...renumberedTail(lines, cursor.line, dialect)]
+    : action.also;
   await editor.edit((builder) => {
     if (action.kind === "continue") {
       builder.insert(cursor, `\n${action.text}`);
     } else {
       builder.replace(line.range, action.text);
     }
-    for (const r of renumbers) {
-      builder.replace(new vscode.Range(r.line, r.start, r.line, r.end), r.text);
-    }
+    apply(builder, rewrites);
   });
+}
+
+/** Every span, as ranges in the document the edit is being built against. */
+function apply(builder: vscode.TextEditorEdit, rewrites: readonly Rewrite[]): void {
+  for (const rewrite of rewrites) {
+    builder.replace(
+      new vscode.Range(rewrite.line, rewrite.start, rewrite.line, rewrite.end),
+      rewrite.text,
+    );
+  }
 }
 
 /**
@@ -297,21 +314,28 @@ async function shiftListItem(
   const item = MARKDOWN_LANGUAGES.has(document.languageId) && editor.selection.isEmpty
     ? listItem(document.lineAt(cursor.line).text)
     : undefined;
-  const target = item && cursor.character <= item.contentColumn
-    ? (direction === "indent" ? indentTarget : outdentTarget)(
-      document.getText().split(/\r?\n/),
-      cursor.line,
-    )
+  // Read once and only when the key is this command's to take: every other Tab
+  // press in a markdown file reaches here too, and splitting the document to
+  // decide it is not is work nobody asked for.
+  const mine = item !== undefined && cursor.character <= item.contentColumn;
+  const lines = mine ? document.getText().split(/\r?\n/) : [];
+  const target = mine
+    ? (direction === "indent" ? indentTarget : outdentTarget)(lines, cursor.line)
     : undefined;
   if (target === undefined || !item) {
     await vscode.commands.executeCommand(fallback);
     return;
   }
+  // Moving an item between two levels leaves both of the ordered lists it
+  // touched counting wrong, and they are rewritten in the same edit so the
+  // whole move is one undo.
+  const renumbers = renumberedAfterMove(lines, cursor.line, target);
   await editor.edit((builder) => {
     builder.replace(
       new vscode.Range(cursor.line, 0, cursor.line, item.indent.length),
       target,
     );
+    apply(builder, renumbers);
   });
 }
 

@@ -1,7 +1,15 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Dialect, enterAction, indentTarget, listItem, outdentTarget, renumberedTail } from "./list";
+import {
+  Dialect,
+  enterAction,
+  indentTarget,
+  listItem,
+  outdentTarget,
+  renumberedAfterMove,
+  renumberedTail,
+} from "./list";
 
 const lines = (text: string) => text.split("\n");
 const indent = (text: string, index: number) => indentTarget(lines(text), index);
@@ -10,13 +18,21 @@ const outdent = (text: string, index: number) => outdentTarget(lines(text), inde
 const renumbers = (text: string, index: number) => renumberedTail(lines(text), index).map((r) => [r.line, r.text]);
 
 /** `>` continues the list, `|` ends it -- the two shapes Enter can produce. */
-const enter = (text: string, index: number, dialect: Dialect = "markdown") => {
-  const action = enterAction(lines(text), index, dialect);
+const enter = (text: string, index: number, dialect: Dialect = "markdown", column?: number) => {
+  const action = enterAction(lines(text), index, dialect, column);
   if (!action) {
     return undefined;
   }
   return `${action.kind === "continue" ? ">" : "|"}${action.text}`;
 };
+
+/** The same pairs, for the renumbering Tab and Shift+Tab set off. */
+const moved = (text: string, index: number, indent: string) =>
+  renumberedAfterMove(lines(text), index, indent).map((r) => [r.line, r.text]);
+
+/** What else the same keystroke rewrites, as `[line, text]` pairs. */
+const also = (text: string, index: number, column?: number) =>
+  (enterAction(lines(text), index, "markdown", column)?.also ?? []).map((r) => [r.line, r.text]);
 
 test("a marker needs whitespace or the end of the line after it", () => {
   assert.equal(listItem("- a")?.marker, "-");
@@ -119,9 +135,24 @@ test("an empty item ends the list instead of breeding another", () => {
   assert.equal(enter("- a\n- ", 1), "|");
   assert.equal(enter("1. a\n2. ", 1), "|");
   assert.equal(enter("- a\n- [ ] ", 1), "|");
-  assert.equal(enter("> a\n> ", 1), "|");
   // A bare marker with no space is still empty.
   assert.equal(enter("- a\n-", 1), "|");
+});
+
+test("a blank line inside a quote is content, so it takes two Enters to leave", () => {
+  // `> a` / `>` / `> b` is one quote holding two paragraphs, which is why the
+  // first Enter writes the blank quoted line instead of ending the block.
+  assert.equal(enter("> a\n> ", 1), "|>\n> ");
+  assert.equal(enter("> a\n>\n> ", 2), "|");
+  // Nothing above it to quote: the marker was typed and thought better of.
+  assert.equal(enter("> ", 0), "|");
+  assert.equal(enter("prose\n> ", 1), "|");
+});
+
+test("leaving a quote takes the blank line it stepped through with it", () => {
+  assert.deepEqual(also("> a\n>\n> ", 2), [[1, ""]]);
+  // Nothing to clean up when the quote was never entered.
+  assert.deepEqual(also("> ", 0), []);
 });
 
 test("an empty nested item steps out one level at a time", () => {
@@ -163,4 +194,50 @@ test("renumbering stops where the list does", () => {
   // the marker Enter writes is the one already there.
   assert.deepEqual(renumbers("- a\n- b", 0), []);
   assert.deepEqual(renumbers("1. a\n1. b\n1. c", 1), []);
+});
+
+test("the content column survives a marker that got wider", () => {
+  // `9.  item` puts its content at column 4 and so does `10. `. Copying the two
+  // spaces would put the next item's content at 5, one column off the list it
+  // is in -- and that column is where a child of the item would start.
+  assert.equal(enter("9.  a", 0), ">10. ");
+  assert.equal(enter("1.  a", 0), ">2.  ");
+  assert.equal(enter("99.  a", 0), ">100. ");
+  // Never below one space: `100.` is already wider than the column allows.
+  assert.equal(enter("9. a", 0), ">10. ");
+});
+
+test("a checkbox goes with its words when Enter moves all of them", () => {
+  // Enter in front of the text leaves an empty item behind, and an empty item
+  // is not the thing that was finished.
+  assert.equal(enter("- [x] item", 0, "markdown", 6), ">- [x] ");
+  assert.deepEqual(also("- [x] item", 0, 6), [[0, "[ ]"]]);
+  // Splitting within the text is different: both halves have words, the first
+  // keeps the box it earned and the second is new work.
+  assert.equal(enter("- [x] item", 0, "markdown", 8), ">- [ ] ");
+  assert.deepEqual(also("- [x] item", 0, 8), []);
+  // At the end of the line nothing moves down at all.
+  assert.equal(enter("- [x] item", 0, "markdown", 10), ">- [ ] ");
+  assert.deepEqual(also("- [x] item", 0, 10), []);
+  // Splitting inside the box itself is not a box moving anywhere.
+  assert.equal(enter("- [x] item", 0, "markdown", 3), ">- [ ] ");
+  assert.deepEqual(also("- [x] item", 0, 3), []);
+});
+
+test("Tab renumbers both the list it left and the list it joined", () => {
+  // The differential's case: `2. test` becomes the third item of the nested
+  // list, and the item under it stops being that list's first.
+  assert.deepEqual(
+    moved("1. a\n   1. x\n   2. y\n2. b\n   1. z", 3, "   "),
+    [[3, "3."], [4, "4."]],
+  );
+  // Nothing above it at the new level, so it starts the list it just made.
+  assert.deepEqual(moved("1. a\n2. b", 1, "   "), [[1, "1."]]);
+  // Outdenting splits the old list: the item joins the outer one, and what
+  // followed it is now nested under it and starts over.
+  assert.deepEqual(moved("1. a\n   1. x\n   3. y\n   4. z", 2, ""), [[2, "2."], [3, "1."]]);
+  // A bullet belongs to no numbering on either side of the move.
+  assert.deepEqual(moved("- a\n  - x\n- b", 2, "  "), []);
+  // The all-`1.` style is a style, not a list that lost count.
+  assert.deepEqual(moved("1. a\n   1. x\n   1. y\n2. b", 3, "   "), [[3, "1."]]);
 });

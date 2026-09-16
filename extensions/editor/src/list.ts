@@ -46,7 +46,7 @@ const ITEM: Record<Dialect, RegExp> = {
   yaml: /^([ \t]*)(-)([ \t]+(?=\S)|[ \t]*$)(.*)$/,
 };
 
-const TASK = /^\[[ xX]\](?:[ \t]+(?=\S)|[ \t]*$)(.*)$/;
+const TASK = /^(\[[ xX]\])(?:[ \t]+(?=\S)|[ \t]*$)(.*)$/;
 const ORDERED = /^(\d{1,9})([.)])$/;
 
 export function listItem(
@@ -70,19 +70,19 @@ export function listItem(
 }
 
 /**
- * The list item `index` hangs off, or none.
+ * The line above `index` that decides what `index` is part of, or -1.
  *
  * Scanning up skips blank lines (a loose list has them between items) and any
- * line indented past this one -- those are somebody else's wrapped content,
- * not a sibling. A less-indented line that is not a list item ends the search:
- * the item is the first of its list, and a first item has no level to move to.
+ * line indented past `atMost` -- those are somebody else's wrapped content, not
+ * a sibling. The first line at or left of that column is the answer whether or
+ * not it is a list item: a paragraph there ends the search, because the item is
+ * the first of its list and a first item has no level to move to.
  */
-function anchor(
+function anchorIndex(
   lines: readonly string[],
   index: number,
   atMost: number,
-  dialect: Dialect,
-): ListItem | undefined {
+): number {
   for (let i = index - 1; i >= 0; i--) {
     const line = lines[i];
     if (line.trim() === "") {
@@ -91,9 +91,20 @@ function anchor(
     if (/^[ \t]*/.exec(line)![0].length > atMost) {
       continue;
     }
-    return listItem(line, dialect);
+    return i;
   }
-  return undefined;
+  return -1;
+}
+
+/** The list item `index` hangs off, or none. */
+function anchor(
+  lines: readonly string[],
+  index: number,
+  atMost: number,
+  dialect: Dialect,
+): ListItem | undefined {
+  const at = anchorIndex(lines, index, atMost);
+  return at < 0 ? undefined : listItem(lines[at], dialect);
 }
 
 /**
@@ -143,10 +154,16 @@ export function outdentTarget(
   return parent ? parent.indent : "";
 }
 
-/** Continue the list on a new line, or rewrite this line to end it. */
+/**
+ * Continue the list on a new line, or rewrite this line to end it.
+ *
+ * `also` is whatever else on neighbouring lines has to move in the same edit --
+ * a checkbox the text took with it, a blank quoted line the quote no longer
+ * needs. One edit rather than two, so one Ctrl+Z takes the whole keystroke back.
+ */
 export type EnterAction =
-  | { kind: "continue"; text: string }
-  | { kind: "replace"; text: string };
+  | { kind: "continue"; text: string; also: Rewrite[] }
+  | { kind: "replace"; text: string; also: Rewrite[] };
 
 /**
  * The nearest sibling's number, if this item has one at the same level.
@@ -193,12 +210,76 @@ function nextMarker(
     : `${number + 1}${ordered[2]}`;
 }
 
-/** A marker to rewrite, as a column span on one line. */
-export interface Renumber {
+/** A span on one line to rewrite, as columns. */
+export interface Rewrite {
   line: number;
   start: number;
   end: number;
   text: string;
+}
+
+/**
+ * The gap between `marker` and the content that follows it.
+ *
+ * Taken from the column the content starts at rather than copied verbatim,
+ * because the marker being written is not always as wide as the one it follows:
+ * after `9.  item` the next marker is `10.`, and copying two spaces would put
+ * its content at column 5 where the list's is at 4. That column is where a
+ * child of the item begins, so a list whose items disagree about it is a list
+ * Tab cannot nest under consistently.
+ */
+function gap(item: ListItem, marker: string): string {
+  return " ".repeat(
+    Math.max(1, item.contentColumn - item.indent.length - marker.length),
+  );
+}
+
+/**
+ * Renumber the ordered siblings at `indent`, from line `index` on, counting
+ * from `first`.
+ *
+ * Stops at the first line that is not one of them: a paragraph, a shallower
+ * item, a bullet where the numbers were, or a different delimiter -- each of
+ * those is a different list, not this one's tail.
+ */
+function renumberRun(
+  lines: readonly string[],
+  index: number,
+  indent: number,
+  delimiter: string,
+  first: number,
+  dialect: Dialect,
+): Rewrite[] {
+  const out: Rewrite[] = [];
+  let number = first;
+  for (let i = index; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      continue; // a loose list keeps counting across the blank lines in it
+    }
+    if (/^[ \t]*/.exec(line)![0].length > indent) {
+      continue; // an item's own wrapped content, or a child list
+    }
+    const sibling = listItem(line, dialect);
+    const ordered = sibling && ORDERED.exec(sibling.marker);
+    if (
+      !sibling || !ordered || sibling.indent.length !== indent
+      || ordered[2] !== delimiter
+    ) {
+      break;
+    }
+    const text = `${number}${delimiter}`;
+    if (text !== sibling.marker) {
+      out.push({
+        line: i,
+        start: sibling.indent.length,
+        end: sibling.indent.length + sibling.marker.length,
+        text,
+      });
+    }
+    number++;
+  }
+  return out;
 }
 
 /**
@@ -217,7 +298,7 @@ export function renumberedTail(
   lines: readonly string[],
   index: number,
   dialect: Dialect = "markdown",
-): Renumber[] {
+): Rewrite[] {
   const item = listItem(lines[index], dialect);
   if (!item) {
     return [];
@@ -228,39 +309,115 @@ export function renumberedTail(
   if (!inserted || marker === item.marker) {
     return [];
   }
-  let number = Number(inserted[1]);
-  const out: Renumber[] = [];
-  for (let i = index + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() === "") {
-      continue; // a loose list keeps counting across the blank lines in it
-    }
-    const indent = /^[ \t]*/.exec(line)![0].length;
-    if (indent > item.indent.length) {
-      continue; // this item's own wrapped content, or a child list
-    }
-    const sibling = listItem(line, dialect);
-    const ordered = sibling && ORDERED.exec(sibling.marker);
-    // Anything else ends the list: a paragraph, a shallower item, or a bullet
-    // where the numbers were -- that is a different list, not this one's tail.
-    if (
-      !sibling || !ordered || sibling.indent.length !== item.indent.length
-      || ordered[2] !== inserted[2]
-    ) {
-      break;
-    }
-    number++;
-    const text = `${number}${ordered[2]}`;
-    if (text !== sibling.marker) {
-      out.push({
-        line: i,
-        start: sibling.indent.length,
-        end: sibling.indent.length + sibling.marker.length,
-        text,
-      });
+  return renumberRun(
+    lines,
+    index + 1,
+    item.indent.length,
+    inserted[2],
+    Number(inserted[1]) + 1,
+    dialect,
+  );
+}
+
+/**
+ * The markers that stop being right once line `index` is re-indented to
+ * `indent`.
+ *
+ * Tab and Shift+Tab move an item between two lists, and both of them then count
+ * wrong: the one it left is short an item, and the one it joined has a number
+ * from somewhere else in it. `poly fmt` renumbers both, so leaving them is the
+ * same defect `renumberedTail` exists to avoid -- a keystroke the formatter
+ * undoes.
+ *
+ * The spans are in the coordinates of `lines` as given, so the caller can apply
+ * them in the same edit as the indentation change.
+ */
+export function renumberedAfterMove(
+  lines: readonly string[],
+  index: number,
+  indent: string,
+  dialect: Dialect = "markdown",
+): Rewrite[] {
+  const before = listItem(lines[index], dialect);
+  if (!before) {
+    return [];
+  }
+  // Every decision below is about the document the move produces, not the one
+  // it starts from: which items are siblings is exactly what the move changes.
+  const after = lines.slice();
+  after[index] = indent + lines[index].slice(before.indent.length);
+  const item = listItem(after[index], dialect);
+  const ordered = item && ORDERED.exec(item.marker);
+  if (!item || !ordered) {
+    return []; // a bullet belongs to no numbering, on either side of the move
+  }
+  const out: Rewrite[] = [];
+
+  // The list it joins. A sibling above means counting on from it; anything else
+  // -- the new parent, a paragraph, the top of the file -- makes this the first
+  // item of its own list, which starts at 1.
+  const intoIndex = anchorIndex(after, index, item.indent.length);
+  const into = intoIndex < 0 ? undefined : listItem(after[intoIndex], dialect);
+  const sibling = into && into.indent.length === item.indent.length ? into : undefined;
+  const siblingOrdered = sibling && ORDERED.exec(sibling.marker);
+  let marker = `1${ordered[2]}`;
+  let counting = true;
+  if (sibling && siblingOrdered && siblingOrdered[2] === ordered[2]) {
+    const number = Number(siblingOrdered[1]);
+    if (siblingNumber(after, intoIndex, sibling, dialect) === number) {
+      // The all-`1.` style, same as `nextMarker` reads it: the list is not
+      // counting, so joining it means writing what it writes.
+      marker = sibling.marker;
+      counting = false;
+    } else {
+      marker = `${number + 1}${ordered[2]}`;
     }
   }
-  return out;
+  if (marker !== item.marker) {
+    out.push({
+      line: index,
+      start: item.indent.length,
+      end: item.indent.length + item.marker.length,
+      text: marker,
+    });
+  }
+  if (counting) {
+    out.push(...renumberRun(
+      after,
+      index + 1,
+      item.indent.length,
+      ordered[2],
+      Number(ORDERED.exec(marker)![1]) + 1,
+      dialect,
+    ));
+  }
+
+  // The list it leaves. The search starts at the moved line rather than above
+  // it, because after the move that line is the barrier: an item outdented past
+  // its old siblings splits them into two lists, and the second one starts over.
+  const from = before.indent.length;
+  if (from !== item.indent.length) {
+    const left = anchorIndex(after, index + 1, from);
+    const last = left < 0 ? undefined : listItem(after[left], dialect);
+    const lastOrdered = last && last.indent.length === from
+      ? ORDERED.exec(last.marker)
+      : null;
+    out.push(...renumberRun(
+      after,
+      index + 1,
+      from,
+      ordered[2],
+      lastOrdered && lastOrdered[2] === ordered[2] ? Number(lastOrdered[1]) + 1 : 1,
+      dialect,
+    ));
+  }
+
+  // The moved line is the one place `after` and `lines` disagree about columns.
+  return out.map((rewrite) =>
+    rewrite.line === index
+      ? { ...rewrite, start: from, end: from + item.marker.length }
+      : rewrite
+  );
 }
 
 /**
@@ -276,16 +433,18 @@ export function enterAction(
   lines: readonly string[],
   index: number,
   dialect: Dialect,
+  column: number = lines[index].length,
 ): EnterAction | undefined {
   const item = listItem(lines[index], dialect);
   if (!item) {
     return undefined;
   }
-  // A task checkbox is part of the marker as far as continuing goes, and an
-  // unticked box is what the next item starts with whichever way this one went.
+  // A task checkbox is part of the marker as far as continuing goes.
   const task = dialect === "markdown" ? TASK.exec(item.content) : null;
-  const box = task ? "[ ] " : "";
-  if ((task ? task[1] : item.content) === "") {
+  if ((task ? task[2] : item.content) === "") {
+    if (dialect === "markdown" && item.marker === ">") {
+      return quoteAction(lines, index, item);
+    }
     // The enclosing item, not `outdentTarget`: Shift+Tab falls back to the left
     // margin because an over-indented orphan is what it exists to fix, but here
     // no enclosing item means this *is* the outermost level, and the way out of
@@ -297,13 +456,74 @@ export function enterAction(
     return parent
       ? {
         kind: "replace",
-        text: `${parent.indent}${item.marker}${item.spacing || " "}${box}`,
+        text: `${parent.indent}${item.marker}${item.spacing || " "}${task ? "[ ] " : ""}`,
+        also: [],
       }
-      : { kind: "replace", text: "" };
+      : { kind: "replace", text: "", also: [] };
   }
   const marker = nextMarker(lines, index, item, dialect);
+  // A checkbox describes the text next to it. Enter in front of that text
+  // leaves an empty item above and moves every word of it down, so the box goes
+  // too and the empty half is a fresh, unticked item -- the other way round
+  // marks a line with nothing on it done and un-does the task the author
+  // actually finished. Splitting *within* the text is a different gesture: both
+  // halves have words in them, the first one keeps the box, and the second is
+  // new work.
+  const boxEnd = item.contentColumn + item.content.length - (task ? task[2].length : 0);
+  const moving = task !== null && column >= boxEnd
+    && lines[index].slice(boxEnd, column).trim() === ""
+    && lines[index].slice(column).trim() !== "";
+  const box = task ? `${moving ? task[1] : "[ ]"} ` : "";
   return {
     kind: "continue",
-    text: `${item.indent}${marker}${item.spacing || " "}${box}`,
+    text: `${item.indent}${marker}${gap(item, marker)}${box}`,
+    also: moving && task![1] !== "[ ]"
+      ? [{
+        line: index,
+        start: item.contentColumn,
+        end: item.contentColumn + task![1].length,
+        text: "[ ]",
+      }]
+      : [],
+  };
+}
+
+/**
+ * Enter at the end of an empty `>`.
+ *
+ * A blockquote is the one block where an empty line is content: `> a` / `>` /
+ * `> b` is one quote holding two paragraphs, and `poly fmt` keeps it that way.
+ * So the first Enter writes the blank quoted line and stays inside the quote,
+ * and it takes a second one -- on a line whose predecessor is already blank --
+ * to leave. Leaving clears both, because the blank line only existed as a step
+ * on the way out.
+ *
+ * An empty `>` with no quote above it is somebody who typed the marker and
+ * changed their mind, so that one leaves immediately.
+ */
+function quoteAction(
+  lines: readonly string[],
+  index: number,
+  item: ListItem,
+): EnterAction {
+  const above = index > 0 ? listItem(lines[index - 1], "markdown") : undefined;
+  const quoted = above !== undefined && above.marker === ">"
+    && above.indent === item.indent;
+  if (quoted && above.content !== "") {
+    // The whole line is rewritten rather than inserted after, so that the space
+    // this line no longer needs goes with it: `> ` with nothing following the
+    // marker is trailing whitespace.
+    return {
+      kind: "replace",
+      text: `${item.indent}>\n${item.indent}>${item.spacing || " "}`,
+      also: [],
+    };
+  }
+  return {
+    kind: "replace",
+    text: "",
+    also: quoted
+      ? [{ line: index - 1, start: 0, end: lines[index - 1].length, text: "" }]
+      : [],
   };
 }
