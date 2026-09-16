@@ -33,7 +33,8 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
-	version grammars tokdeps grammar-diff grammar-corpus editor-diff bump control clean
+	version grammars tokdeps grammar-diff grammar-corpus editor-diff engine-diff \
+	lsp-fmt-diff bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -185,6 +186,29 @@ grammar-corpus: tokdeps ## grammar-diff over VSCode's own colorize fixtures (dow
 
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 	node tools/editor-diff/run.js
+
+# The third differential, and the only one where poly does not replace the
+# upstream so much as swallow it: `poly check` links its linters in as
+# libraries. Every test in this repo therefore asks the engine a question
+# through poly, and none of them can tell "poly drives it the way its CLI does"
+# apart from "poly drives it some other way and no fixture noticed".
+#
+# Out of `gates` for the same reason as the other two, plus one of its own: it
+# clones the engine's repository at the tag its pin names, so it is the only
+# target here that a GitHub outage can turn red.
+engine-diff: build ## poly's embedded linters against the CLIs they embed (clones them)
+	python3 tools/engine-diff.py $(POLY)
+
+# The fourth, and the only one with nothing to download and no table of allowed
+# differences: both sides are this binary. poly-lsp's whole promise is that the
+# editor and CI give one answer, and every other test here asks only one of the
+# two paths -- `smoke` drives the daemon, `dogfood` drives the CLI, and neither
+# would notice them drifting apart.
+#
+# Not in `gates` only because that list mirrors ci.yml's jobs; unlike the other
+# three this one would run anywhere, and belongs in both once added.
+lsp-fmt-diff: build ## `poly lsp` formatting against `poly fmt`, over this repo
+	python3 tools/lsp-fmt-diff.py $(POLY)
 
 # Given the binary as well, so this asks the same question CI asks: not just
 # whether the files agree with each other, but whether the thing users run

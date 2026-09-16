@@ -1419,6 +1419,15 @@ fn formatted_text(uri: &Url, text: &str) -> Result<Option<String>> {
     // Rediscover per call: an upward stat chain is cheap (<1ms) and picks up
     // poly.toml edits without a watcher.
     let config = poly_core::Config::discover(&path).unwrap_or_else(|_| poly_core::Config::empty());
+    // `[format] exclude` is the project saying another program owns these
+    // bytes — a lockfile, generated output, a byte-exact fixture. `poly fmt`
+    // honours it and so does the lint side below, so format-on-save has to as
+    // well: without this, opening one of those files and saving rewrites on the
+    // spot exactly what CI is required never to touch, and `pnpm install
+    // --frozen-lockfile` fails on a file nobody edited.
+    if config.excluded(&path, poly_core::Scope::Format) {
+        return Ok(None);
+    }
     let Some(lang) = config.language(&path) else {
         return Ok(None);
     };
@@ -2186,6 +2195,44 @@ fn full_range(text: &str) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[format] exclude` has to reach format-on-save, not just `poly fmt`.
+    ///
+    /// The list is how a project says another program owns a file's bytes: a
+    /// lockfile, generated output, a byte-exact fixture. Honouring it in the
+    /// batch path alone means CI leaves the file alone and the editor rewrites
+    /// it the moment somebody opens and saves — the editor/CI split A4 exists
+    /// to prevent, and a `pnpm install --frozen-lockfile` failure on a file
+    /// nobody edited. Found by `tools/lsp-fmt-diff.py`, which asks both paths
+    /// about the same file; this repo's own poly.toml excludes
+    /// `extensions/*/pnpm-lock.yaml` for exactly that reason.
+    #[test]
+    fn format_on_save_honours_the_format_exclude_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("poly.toml"),
+            "[format]\nexclude = [\"vendor/**\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.join("vendor")).unwrap();
+        let messy = "a:   1\n";
+
+        let excluded = Url::from_file_path(root.join("vendor").join("a.yaml")).unwrap();
+        assert_eq!(
+            formatted_text(&excluded, messy).unwrap(),
+            None,
+            "an excluded file must come back with no edits"
+        );
+
+        // The control: without it this test would pass on a formatter that had
+        // stopped working at all.
+        let ordinary = Url::from_file_path(root.join("a.yaml")).unwrap();
+        assert!(
+            formatted_text(&ordinary, messy).unwrap().is_some(),
+            "a file outside the list still formats"
+        );
+    }
 
     /// The hierarchy follow-ups are routable only because their item names a
     /// file. Without this the request falls through to poly, which answers

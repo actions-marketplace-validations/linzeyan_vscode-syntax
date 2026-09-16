@@ -28,12 +28,22 @@ pub fn formattable(lang: &str) -> bool {
         )
 }
 
-/// Does this file use CRLF? Prettier's rule: whichever ending the *first* line
-/// uses wins, so one stray ending in a large file does not flip the verdict.
-fn is_crlf(text: &str) -> bool {
-    match text.find('\n') {
-        Some(i) => i > 0 && text.as_bytes()[i - 1] == b'\r',
-        None => false,
+/// Which line ending does this file use? Prettier's rule: whichever ending the
+/// *first* line uses wins, so one stray ending in a large file does not flip
+/// the verdict.
+///
+/// A lone `\r` is the classic Mac ending. Nothing writes it any more, but
+/// files carrying it still exist, and every formatter poly dispatches to reads
+/// it as a line break and answers in `\n` — so leaving it out of this function
+/// does not mean "poly ignores those files", it means poly silently rewrites
+/// every line of one. A file with no line break at all is `\n` because the
+/// answer cannot matter.
+fn line_ending(text: &str) -> &'static str {
+    match text.find(['\n', '\r']) {
+        Some(i) if text.as_bytes()[i] == b'\n' => "\n",
+        Some(i) if text[i..].starts_with("\r\n") => "\r\n",
+        Some(_) => "\r",
+        None => "\n",
     }
 }
 
@@ -50,17 +60,21 @@ pub fn format_text(
     text: &str,
     config: &poly_core::Config,
 ) -> Result<Option<String>> {
-    if !is_crlf(text) {
+    let eol = line_ending(text);
+    if eol == "\n" {
         return dispatch(lang, path, text, config);
     }
-    let lf = text.replace("\r\n", "\n");
+    // Both replacements, in this order: a file whose first line ends in a lone
+    // \r can still hold a CRLF further down, and replacing the bare \r first
+    // would turn each of those into two line breaks.
+    let lf = text.replace("\r\n", "\n").replace('\r', "\n");
     let Some(formatted) = dispatch(lang, path, &lf, config)? else {
         return Ok(None);
     };
     // Safe as a blanket replace: the formatter saw LF-only input, so any \n it
     // emitted is a bare one. Mixed-ending files get normalized to the dominant
     // ending, which is what git would do on the next commit anyway.
-    let restored = formatted.replace('\n', "\r\n");
+    let restored = formatted.replace('\n', eol);
     Ok((restored != text).then_some(restored))
 }
 

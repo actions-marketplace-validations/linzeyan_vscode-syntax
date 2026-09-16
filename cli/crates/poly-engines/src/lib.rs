@@ -11,7 +11,7 @@ mod workflow;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use poly_core::FormatOptions;
 
 /// Language ids (poly-core detection) with an embedded formatter.
@@ -505,7 +505,62 @@ fn format_jupyter(path: &Path, text: &str, opts: FormatOptions) -> Result<Option
         .write(&mut result)
         .map_err(|e| anyhow!("writing {}: {e}", path.display()))?;
     let result = String::from_utf8(result).map_err(|_| anyhow!("notebook output not UTF-8"))?;
+    let result =
+        with_sorted_keys(&result).with_context(|| format!("writing {}", path.display()))?;
     Ok((result != text).then_some(result))
+}
+
+/// Re-emit a notebook with every JSON object's keys in alphabetical order.
+///
+/// This is what `ruff_notebook`'s own writer means to do, and cannot here. It
+/// sorts by round-tripping through `serde_json::Value`, which is a `BTreeMap`
+/// only while `serde_json` is built *without* `preserve_order`. rumdl asks for
+/// that feature and cargo unifies features across the whole tree, so inside
+/// poly a `Value` is an `IndexMap` — and the order it faithfully preserves is
+/// the insertion order of the `#[serde(flatten)] HashMap` that holds every
+/// metadata key ruff does not name, which Rust randomises per process.
+///
+/// The symptom is not a wrong byte but an unstable one: five `poly fmt` runs
+/// over one notebook wrote two different files, so `poly fmt --check` could
+/// fail in CI on a notebook nobody had touched, and every save produced a diff
+/// in `kernelspec`. Found by `tools/lsp-fmt-diff.py`, which asked the daemon
+/// and the CLI about the same notebook and got different answers because they
+/// are different processes.
+fn with_sorted_keys(text: &str) -> Result<String> {
+    use serde::Serialize;
+
+    let mut value: serde_json::Value = serde_json::from_str(text)?;
+    sort_keys(&mut value);
+
+    let mut out = Vec::new();
+    // The shape ruff_notebook writes, kept byte for byte: one space of indent
+    // (black's choice, which nbformat follows) and the trailing newline only
+    // if the notebook it just wrote had one.
+    let mut serializer = serde_json::Serializer::with_formatter(
+        &mut out,
+        serde_json::ser::PrettyFormatter::with_indent(b" "),
+    );
+    value.serialize(&mut serializer)?;
+    let mut out = String::from_utf8(out).map_err(|_| anyhow!("notebook output not UTF-8"))?;
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn sort_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = std::mem::take(map).into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (_, nested) in &mut entries {
+                sort_keys(nested);
+            }
+            *map = entries.into_iter().collect();
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sort_keys),
+        _ => {}
+    }
 }
 
 /// ruff's own Display ends in "at byte range 6..7", which no editor and no
@@ -718,6 +773,82 @@ fn format_dockerfile(path: &Path, text: &str, opts: FormatOptions) -> Result<Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A notebook must format to the same bytes every time it is formatted.
+    ///
+    /// Not a style preference: unsorted output here is *unstable* output. See
+    /// `with_sorted_keys` for why ruff_notebook's own sort stops working
+    /// inside poly. Before the fix, five `poly fmt` runs over one notebook
+    /// wrote two different files, so `poly fmt --check` could fail in CI on a
+    /// notebook nobody had touched.
+    ///
+    /// Asserting the keys are sorted rather than running it twice and hoping
+    /// the orders differ: a `HashMap`'s order is random, so a two-run test
+    /// passes about half the time on the broken code.
+    #[test]
+    fn a_notebook_formats_to_stable_bytes() {
+        // Metadata keys deliberately out of alphabetical order, and one cell
+        // that needs formatting so there is something to write back at all.
+        let source = r#"{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": ["x = ( 1 )"]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "version": "3.12.0",
+   "name": "python",
+   "pygments_lexer": "ipython3",
+   "nbconvert_exporter": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+"#;
+        let formatted = format_file(Path::new("n.ipynb"), source)
+            .expect("notebook must format")
+            .expect("the cell needs formatting, so there must be output");
+
+        fn assert_sorted(value: &serde_json::Value, where_: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let keys: Vec<_> = map.keys().cloned().collect();
+                    let mut want = keys.clone();
+                    want.sort();
+                    assert_eq!(keys, want, "keys out of order at {where_}");
+                    for (key, nested) in map {
+                        assert_sorted(nested, &format!("{where_}.{key}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        assert_sorted(item, &format!("{where_}[{i}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_sorted(&serde_json::from_str(&formatted).unwrap(), "");
+
+        // And the other half of stable: formatting the result again is a no-op
+        // rather than another rewrite.
+        assert_eq!(
+            format_file(Path::new("n.ipynb"), &formatted).unwrap(),
+            None,
+            "an already-formatted notebook must not be rewritten"
+        );
+    }
 
     #[test]
     fn formats_each_language() {
