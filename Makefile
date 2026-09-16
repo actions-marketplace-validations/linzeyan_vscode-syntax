@@ -33,7 +33,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
-	version grammars tokdeps grammar-diff editor-diff bump control clean
+	version grammars tokdeps grammar-diff grammar-corpus editor-diff bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -170,6 +170,18 @@ tokdeps:
 # regression, because a real regression survives both.
 grammar-diff: tokdeps ## poly's grammars against the built-ins they take over
 	node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
+
+# The same comparison over VSCode's own colorize fixtures -- the files it
+# tokenizes in its own tests, most of them named for the issue number of a
+# highlighting bug somebody reported. Its own target because this one needs the
+# network, where `grammar-diff` needs only an installed editor.
+#
+# It earned the extra target on its first run: two fixtures it flagged were the
+# comparison's fault rather than poly's, and fixing that found a case the
+# repo's own fixtures could not reach.
+grammar-corpus: tokdeps ## grammar-diff over VSCode's own colorize fixtures (downloads them)
+	POLY_DIFF_CORPUS="$$(node tools/colorize-corpus.mjs)" \
+		node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
 
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 	node tools/editor-diff/run.js

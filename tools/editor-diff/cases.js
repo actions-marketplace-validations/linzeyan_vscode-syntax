@@ -19,6 +19,14 @@
 // fails silently and intercepts nothing, poly's own calls included. Screenshots
 // are what is left, and the two palettes differ by design, so only something
 // structural ("which columns are tinted") would mean anything. 08 §3.
+//
+// One more thing this cannot see: both extensions hand the cases they decline
+// back to the editor's own `tab` and `outdent`, and those do nothing when they
+// are invoked as commands rather than pressed as keys -- measured, on both
+// sides, by `tab/not-a-list-at-all`. So a case where both fall through reads as
+// "identical" because both did nothing, which is true but is not the same
+// statement as "the key does the same thing". Cases that turn on the fallback
+// say so.
 
 /** `|` marks the cursor, `«`...`»` a selection; both are stripped before opening. */
 const CASES = [
@@ -147,6 +155,11 @@ const CASES = [
   {
     id: "shift-tab/orphan-at-left-edge",
     language: "markdown",
+    // An over-indented item with nothing to be a child of is what Shift+Tab is
+    // for. poly takes it to the margin itself and markdown-all-in-one hands it
+    // to `editor.action.outdentLines`, and the two land in the same place --
+    // the second half of that only being true because the editor's own outdent
+    // stops at column 0.
     text: "    - |orphan\n",
     original: "markdown.extension.onShiftTabKey",
     poly: "poly.outdentListItem",
@@ -288,11 +301,14 @@ const CASES = [
     id: "tab/first-item-has-nothing-to-nest-under",
     language: "markdown",
     // A list's first item has no sibling above it, so there is no level to
-    // become a child of. markdown-all-in-one indents it anyway, to four
-    // spaces, and four spaces at the top of a document is an indented code
-    // block -- the item stops being a list item at all. poly leaves Tab to do
-    // what Tab does, which is what its `when` clause promises: every case the
-    // command does not handle behaves as if nothing were bound to the key.
+    // become a child of, and poly leaves Tab to do what Tab does -- which is
+    // what its `when` clause promises: every case the command does not handle
+    // behaves as if nothing were bound to the key. markdown-all-in-one indents
+    // it anyway, to four spaces, and four spaces at the top of a document is an
+    // indented code block -- the item stops being a list item at all.
+    //
+    // Both halves of this case need the editor's own Tab to have fired; see the
+    // note at the top about when it does not.
     text: "- |alpha\n- beta\n",
     original: "markdown.extension.onTabKey",
     poly: "poly.indentListItem",
@@ -413,6 +429,75 @@ const CASES = [
     reads: "clipboard",
     expect:
       "a selection ending at column 0 does not reach that line, so poly writes `:2` where the original writes `2~3`",
+  },
+
+  // ── Enter and Tab: the shapes the upstream suite does not cover ──────────
+  // Everything here is next to a case markdown-all-in-one's own tests already
+  // ask (`tools/editor-diff/corpus.js`), one step further out: the same
+  // question with a wider marker, a deeper quote, or a list on both sides of
+  // the move.
+  {
+    id: "enter/split-a-checked-item",
+    language: "markdown",
+    // Their suite splits at the start of the text; this one splits inside the
+    // word, where "the box goes with the words" has to mean the same thing.
+    text: "- [x] al|pha\n",
+    original: "markdown.extension.onEnterKey",
+    poly: "poly.continueList",
+    expect: "same",
+  },
+  {
+    id: "enter/marker-gets-wider",
+    language: "markdown",
+    // `99.  alpha` has its content at column 5 and `100. ` is the only way to
+    // keep it there. Their suite stops at the two-to-three digit step.
+    text: "99.  alpha|\n",
+    original: "markdown.extension.onEnterKey",
+    poly: "poly.continueList",
+    expect: "same",
+  },
+  {
+    id: "enter/blank-line-in-a-nested-quote",
+    language: "markdown",
+    // One `>` deep is the case their suite has. Two is where a blockquote and
+    // a list item stop looking alike: the second `>` is content, not a level.
+    text: "> > alpha\n> > |\n",
+    original: "markdown.extension.onEnterKey",
+    poly: "poly.continueList",
+    expect: "same",
+  },
+  {
+    id: "tab/renumbers-both-lists",
+    language: "markdown",
+    // Indenting an item takes it out of one ordered list and puts it in
+    // another, and both of them are then counting wrong. `poly fmt` renumbers
+    // both, so a Tab that leaves them is a keystroke the formatter undoes.
+    text: "1. alpha\n   1. one\n   2. two\n2. |beta\n   1. three\n",
+    original: "markdown.extension.onTabKey",
+    poly: "poly.indentListItem",
+    expect: "same",
+  },
+  {
+    id: "tab/into-an-all-ones-list",
+    language: "markdown",
+    // A list written entirely as `1.` is a style, not a list that lost count:
+    // `poly fmt` keeps it (measured) and so does poly's Enter, which is the
+    // same difference `enter/ordered-all-ones` records. Joining such a list
+    // therefore means writing what it writes.
+    text: "1. alpha\n   1. one\n   1. two\n2. |beta\n",
+    original: "markdown.extension.onTabKey",
+    poly: "poly.indentListItem",
+    expect: "poly keeps the all-`1.` style the list is written in, as it does on Enter (08 §9)",
+  },
+  {
+    id: "shift-tab/renumbers-after-outdent",
+    language: "markdown",
+    // The mirror of the case above: what followed the outdented item is now
+    // nested under it and starts over at 1.
+    text: "1. alpha\n   1. one\n   2. |two\n   3. three\n",
+    original: "markdown.extension.onShiftTabKey",
+    poly: "poly.outdentListItem",
+    expect: "same",
   },
 
   // ── table of contents ────────────────────────────────────────────────────

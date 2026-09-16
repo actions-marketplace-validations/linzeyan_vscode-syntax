@@ -58,6 +58,13 @@ const CASES = {
   "sample.c": ["source.c", ["keyword"]],
   "sample.cpp": ["source.cpp", ["keyword"]],
   "sample.xml": ["text.xml", ["entity.name.tag"]],
+  // XSLT is a second grammar inside the xml extension, and `.xsl` is the only
+  // way into it: every scope it produces is xml's, so what this proves is that
+  // the grammar loads and hands over, not that it names anything of its own.
+  "sample.xsl": [
+    "text.xml.xsl",
+    ["meta.tag.preprocessor.xml", "entity.name.tag.namespace.xml", "string.quoted.double.xml"],
+  ],
   "sample.yaml": ["source.yaml", ["entity.name.tag.yaml", "string"]],
   "sample.toml": ["source.toml", ["support.type.property-name", "string"]],
   "sample.md": [
@@ -68,6 +75,20 @@ const CASES = {
       "meta.embedded.block.graphql",
       "meta.embedded.math.markdown",
       "markup.math.inline",
+    ],
+  ],
+  // The markdown family VSCode 1.120 split out of `markdown`: `SKILL.md`,
+  // `*.instructions.md` and `*.agent.md` get their own language ids and their
+  // own grammar file, which is a copy of markdown's with frontmatter added.
+  // Nothing else in this table reaches it, and poly-editor's list behaviour is
+  // keyed on those same ids.
+  "SKILL.md": [
+    "text.html.markdown.prompt",
+    [
+      "meta.embedded.block.frontmatter",
+      "meta.embedded.block.shellscript",
+      "markup.fenced_code.block.markdown",
+      "markup.quote.markdown",
     ],
   ],
   "sample.sql": ["source.sql", ["keyword"]],

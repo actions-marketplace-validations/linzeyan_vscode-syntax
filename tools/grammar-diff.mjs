@@ -106,7 +106,7 @@ function side(manifests, painted) {
     },
     getInjections: (scopeName) => injections.get(scopeName) ?? [],
   });
-  return { grammars, languages, scopeOfLanguage, registry };
+  return { grammars, languages, scopeOfLanguage, injections, registry };
 }
 
 const polyManifests = [
@@ -183,6 +183,80 @@ function sameGrammarFile(scopeName) {
   } catch {
     return false; // a plist on the built-in side: treat as "cannot prove same"
   }
+}
+
+/**
+ * Every other grammar `scopeName` can pull rules from, transitively.
+ *
+ * A grammar reaches another two ways, and only one of them is visible in the
+ * output. `<style>` pushes source.css onto the scope stack, so a token says it
+ * was there; `"include": "source.cpp#function-call"` borrows a rule and pushes
+ * nothing, so the borrowed grammar colours the line while leaving no trace of
+ * having done so. Reading the includes is the only way to see the second kind.
+ */
+/**
+ * The scopes one grammar file names directly, memoised.
+ *
+ * Only this is cached, and the reason is a bug that was here: caching the
+ * transitive answer and returning it on a hit gave the *first* caller the whole
+ * closure and everyone after it the direct children only. That made the
+ * classification depend on which fixture ran first -- sample.agent.md expanded
+ * text.html.markdown.prompt into its 97 reachable scopes, and
+ * sample.instructions.md then got one, so the rust grammar underneath a code
+ * fence was never compared and a known repaint was reported as a packaging
+ * defect. Memoising the file read leaves the walk itself to run every time,
+ * which is the part that has to see everything.
+ */
+const DIRECT = new Map();
+function directScopes(scopeName) {
+  const cached = DIRECT.get(scopeName);
+  if (cached) return cached;
+  const entry = poly.grammars.get(scopeName) ?? builtin.grammars.get(scopeName);
+  const direct = new Set();
+  if (entry) {
+    try {
+      const raw = readFileSync(entry.path, "utf8");
+      // `"include": "source.x"` or `"source.x#rule"`. A leading `#` or `$` is a
+      // rule in this same grammar and reaches nothing new.
+      for (const [, scope] of raw.matchAll(/"include"\s*:\s*"([A-Za-z][\w.+-]*)(?:#[^"]*)?"/g)) {
+        direct.add(scope);
+      }
+    } catch {
+      // Unreadable here means "cannot prove anything about it", which the
+      // caller already treats as not-identical.
+    }
+  }
+  DIRECT.set(scopeName, direct);
+  return direct;
+}
+
+function referencedScopes(scopeName, into = new Set()) {
+  if (into.has(scopeName)) return into; // grammars include each other in cycles
+  into.add(scopeName);
+  for (const scope of directScopes(scopeName)) referencedScopes(scope, into);
+  return into;
+}
+
+/**
+ * Whether every grammar that could have coloured this document is the same file
+ * on both sides -- not just the one the language is bound to.
+ *
+ * The root is only where a document starts. `<style>` hands the rest of the
+ * line to source.css and a `#define` body to source.cpp.embedded.macro, each
+ * pinned at its own sha. Comparing the root alone reported two of VSCode's own
+ * colorize fixtures as poly's packaging changing the answer, when what had
+ * moved was a grammar underneath: test.cu is scoped by source.cpp, which
+ * cuda-cpp borrows rules from without ever naming it in the output.
+ */
+function sameGrammarFiles(scopeName, seen) {
+  if (!sameGrammarFile(scopeName)) return false;
+  const involved = new Set([...seen, ...referencedScopes(scopeName)]);
+  for (const scope of involved) {
+    if (scope === scopeName) continue;
+    if (!poly.grammars.has(scope) || !builtin.grammars.has(scope)) continue;
+    if (!sameGrammarFile(scope)) return false;
+  }
+  return true;
 }
 
 // ── token comparison ───────────────────────────────────────────────────────
@@ -407,22 +481,37 @@ let repainted = 0;
 let declared = 0;
 const polyOnly = [];
 const unclaimed = [];
+/** Languages a fixture actually opened, so the rest can be named at the end. */
+const exercised = new Set();
 
-// `fixtures/` holds one representative file per language, which is what
-// tokenize-check walks. `fixtures/edge/` holds the constructs that only matter
+// `fixtures/` holds one representative file per language, and the ones with a
+// grammar nothing else reaches are also tokenize-check's inputs.
+// `fixtures/edge/` holds the constructs that only matter
 // when two grammars are compared -- a `{{` inside a JSON string reaches five
 // languages through one injection, and no representative sample contains one.
 // They are a second directory rather than more of the first because
 // tokenize-check would fail them: several are deliberately dull as documents.
+//
+// POLY_DIFF_CORPUS points at a third set that this repo does not own:
+// VSCode's own colorize fixtures, most of them named for the issue number of a
+// highlighting bug somebody reported. They are better edge cases than anything
+// written here, because a grammar maintainer chose each one after it broke.
+// Not committed -- `tools/colorize-corpus.mjs` fetches them at a pinned sha.
+const CORPUS = process.env.POLY_DIFF_CORPUS;
 const FIXTURE_FILES = [
   ...readdirSync(FIXTURES).filter((n) => statSync(join(FIXTURES, n)).isFile()).map((n) => [n, join(FIXTURES, n)]),
   ...readdirSync(EDGE).map((n) => [`edge/${n}`, join(EDGE, n)]),
+  ...(CORPUS && existsSync(CORPUS)
+    ? readdirSync(CORPUS).filter((n) => statSync(join(CORPUS, n)).isFile()).map((
+      n,
+    ) => [`corpus/${n}`, join(CORPUS, n)])
+    : []),
 ].sort(([a], [b]) => a.localeCompare(b));
 
 for (const [name, path] of FIXTURE_FILES) {
   const text = readFileSync(path, "utf8");
   const lines = text.split("\n");
-  const base = name.replace(/^edge\//, "");
+  const base = name.replace(/^(edge|corpus)\//, "");
   const langId = languageOf(builtin, base) ?? languageOf(poly, base);
   if (!langId) {
     // Not a failure: a fixture is named for a human, and several are named so
@@ -442,6 +531,7 @@ for (const [name, path] of FIXTURE_FILES) {
     polyOnly.push(`${name} (${langId})`);
     continue;
   }
+  exercised.add(langId);
   const [mine, theirs] = await Promise.all([
     scopesPerChar(poly.registry, polyScope, lines),
     scopesPerChar(builtin.registry, builtinScope, lines),
@@ -464,7 +554,24 @@ for (const [name, path] of FIXTURE_FILES) {
     }
   }
   const repo = repoOfScope.get(polyScope) ?? "(unknown)";
-  const identicalFile = polyScope === builtinScope && sameGrammarFile(polyScope);
+  const contributing = new Set();
+  for (const side_ of [mine, theirs]) {
+    for (const line of side_) {
+      for (const chars of line) {
+        for (const scope of chars) contributing.add(scope);
+      }
+    }
+  }
+  const identicalFile = polyScope === builtinScope
+    && sameGrammarFiles(polyScope, contributing);
+  // Grammars poly injects into this root that the built-in does not. This is
+  // the wiring rather than the grammars, so it stays decisive however far any
+  // upstream has drifted -- and it is the thing that went wrong four times:
+  // an injection shipped to everyone because one upstream aimed it at the
+  // people who chose to install it.
+  const extraInjections = (poly.injections.get(polyScope) ?? []).filter(
+    (scope) => !(builtin.injections.get(builtinScope) ?? []).includes(scope),
+  );
   const expected = EXPECTED[name];
   if (expected && (painted.length > 0 || lost.length > 0)) {
     sawExpected.add(name);
@@ -476,7 +583,19 @@ for (const [name, path] of FIXTURE_FILES) {
   if (painted.length > 0) {
     // A repaint under a stock theme is the difference a user sees, so it is
     // reported whatever the scopes did -- including when the scopes agreed.
-    if (identicalFile) {
+    //
+    // An injection poly adds and the built-in does not is decided first,
+    // because it explains the repaint on its own: the extra grammar took text
+    // the built-in had already coloured. Leaving this to `identicalFile` made
+    // the check miss it for html and markdown, whose grammars borrow from css
+    // and js, which drift -- exactly the languages the injections reach.
+    if (extraInjections.length > 0) {
+      failed++;
+      console.log(
+        `FAIL ${name}: ${langId} -- repainted by injections the built-in does not have: `
+          + extraInjections.join(", "),
+      );
+    } else if (identicalFile) {
       failed++;
       console.log(`FAIL ${name}: ${langId} -- same grammar as the built-in, different colors`);
     } else {
@@ -516,6 +635,34 @@ for (const [name, path] of FIXTURE_FILES) {
     console.log(`         only built-in: ${d.lost.join(" | ")}`);
   }
 }
+
+// ── which takeovers no fixture ever opened ─────────────────────────────────
+//
+// Every line above is about a file that exists. This is the other half of the
+// answer, and the one a summary leaves out: a language poly takes over from a
+// built-in that no fixture in any of the three sets is named to reach has been
+// compared by nobody. Saying which ones those are is the difference between
+// "checked" and "not known to be broken".
+//
+// Not a failure, and split in two because only one half is a gap somebody could
+// close. `markdown-math` and `cpp_embedded_latex` have no file association at
+// all -- they exist to be embedded in another grammar, and no file name reaches
+// them -- so they are named as out of reach rather than as untested. The
+// associations are read off the built-in side because that is where they are
+// declared: poly contributes the grammar for these ids and nothing else.
+const overridden = [...poly.scopeOfLanguage.keys()].filter((l) => builtin.scopeOfLanguage.has(l));
+const openable = (id) => {
+  const both = [poly.languages.get(id), builtin.languages.get(id)];
+  return both.some((l) => (l?.extensions?.length ?? 0) + (l?.filenames?.length ?? 0) + (l?.patterns?.length ?? 0) > 0);
+};
+const untested = overridden.filter((l) => !exercised.has(l)).sort();
+const missing = untested.filter(openable);
+const embedded = untested.filter((l) => !openable(l));
+console.log(
+  `\n${overridden.length - untested.length}/${overridden.length} overridden languages had a fixture`
+    + (missing.length > 0 ? `; no file opened: ${missing.join(", ")}` : "")
+    + (embedded.length > 0 ? `; no file can: ${embedded.join(", ")}` : ""),
+);
 
 // ── which grammar a language ends up bound to ──────────────────────────────
 //

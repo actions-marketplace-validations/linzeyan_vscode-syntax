@@ -6,12 +6,24 @@
 // the thing it replaced, and it is the only thing in this repo that needs the
 // marketplace. poly-editor's own tests stay where 08 §9 put them -- pure
 // modules under node's test runner.
-const { writeFileSync } = require("node:fs");
+const { existsSync, readFileSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 
 const vscode = require("vscode");
 
 const { CASES } = require("./cases.js");
+
+/**
+ * This repo's table, then markdown-all-in-one's own, fetched and parsed by
+ * run.js because the host has no network. Theirs carry `marks` instead of a
+ * marked-up string: their tests already say where the cursor is, and
+ * round-tripping that through `|` would only invent a way to get it wrong.
+ */
+function allCases() {
+  const corpus = process.env.POLY_DIFF_CORPUS;
+  if (!corpus || !existsSync(corpus)) return CASES;
+  return [...CASES, ...JSON.parse(readFileSync(corpus, "utf8"))];
+}
 
 const REQUIRED = [
   "ricky.poly-editor",
@@ -120,8 +132,11 @@ async function run() {
   }
 
   const results = [];
-  for (const test of CASES) {
-    const marks = parseMarkers(test.text);
+  const cases = allCases();
+  for (const test of cases) {
+    const marks = test.marks
+      ? { text: test.text, ...test.marks }
+      : parseMarkers(test.text);
     const file = vscode.Uri.joinPath(folder, `${test.id.replace(/\W+/g, "-")}.md`);
     await vscode.workspace.fs.writeFile(file, Buffer.from(marks.text, "utf8"));
     let doc = await vscode.workspace.openTextDocument(file);
@@ -209,6 +224,20 @@ async function run() {
     }
   }
   console.log(`\n${results.length} cases, ${unexpected} unexpected`);
+  // Both extensions hand the cases they decline back to the editor's own Tab,
+  // and `CoreEditingCommands.Tab` is guarded by `editorTextFocus` -- so if this
+  // window lost focus while the suite ran, every one of those cases quietly
+  // compares "neither side did anything" and agrees for the wrong reason. One
+  // run of this suite did exactly that. `tab/not-a-list-at-all` is the probe:
+  // nothing in poly or the original handles it, so the editor's own Tab is the
+  // only thing that can have changed it.
+  const probe = results.find((r) => r.id === "tab/not-a-list-at-all");
+  if (probe && !probe.poly.text.includes("plain  ")) {
+    console.log(
+      "WARNING: the editor's own Tab never fired (window not focused?), so every"
+        + " case that falls through to it proved nothing this run",
+    );
+  }
   if (unexpected) {
     // Both directions are a finding: a case that should agree and does not is a
     // defect, and a case that should differ and does not means poly gave up an

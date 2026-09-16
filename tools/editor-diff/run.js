@@ -16,6 +16,7 @@ const { pathToFileURL } = require("node:url");
 const ROOT = resolve(__dirname, "..", "..");
 const EDITOR = join(ROOT, "extensions", "editor");
 const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
+const { writeCorpus } = require("./corpus.js");
 
 // publisher, name -- the replaced extensions whose answers are the reference.
 const ORIGINALS = [
@@ -27,6 +28,18 @@ const SCRATCH = join(tmpdir(), "poly-editor-diff");
 
 function install(publisher, name) {
   const vsix = join(SCRATCH, `${name}.vsix`);
+  const extensions = join(SCRATCH, "extensions");
+  const target = join(extensions, `${publisher}.${name}`);
+  // The cache lives under TMPDIR, which macOS prunes by file age while leaving
+  // the directories behind. An unpacked extension that has lost its manifest
+  // and its bundle still passes an `existsSync` on the directory, and the host
+  // then fails with `Cannot find module .../dist/node/main.js` -- which names
+  // the extension but not the reason. Ask for the manifest instead, and start
+  // that copy over when it is not there.
+  if (existsSync(target) && !existsSync(join(target, "package.json"))) {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(vsix, { force: true });
+  }
   if (!existsSync(vsix)) {
     const url = "https://marketplace.visualstudio.com/_apis/public/gallery/"
       + `publishers/${publisher}/vsextensions/${name}/latest/vspackage`;
@@ -34,8 +47,6 @@ function install(publisher, name) {
     // --compressed is one flag against a stream to decode by hand.
     execFileSync("curl", ["-sSL", "--compressed", "-A", "poly-editor-diff", "-o", vsix, url]);
   }
-  const extensions = join(SCRATCH, "extensions");
-  const target = join(extensions, `${publisher}.${name}`);
   if (!existsSync(target)) {
     const staging = mkdtempSync(join(SCRATCH, "unzip-"));
     execFileSync("unzip", ["-q", vsix, "extension/*", "-d", staging]);
@@ -71,6 +82,13 @@ async function main() {
   // poly-editor is loaded from source, so its bundle has to exist first.
   execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
 
+  // The extension host has no network, so the upstream test corpus is fetched
+  // and parsed out here and handed over as a file.
+  const corpus = join(SCRATCH, "maio-corpus.json");
+  console.log(
+    `${writeCorpus(join(SCRATCH, "maio-tests"), corpus)} cases from ${"yzhang-gh/vscode-markdown"}'s own tests`,
+  );
+
   const workspace = mkdtempSync(join(tmpdir(), "poly-editor-diff-ws-"));
   const cache = join(ROOT, "extensions", "lsp", ".vscode-test");
   const cached = existsSync(cache)
@@ -88,7 +106,10 @@ async function main() {
   await runTests({
     extensionDevelopmentPath: EDITOR,
     extensionTestsPath: resolve(__dirname, "suite.js"),
-    extensionTestsEnv: { POLY_DIFF_OUT: join(ROOT, ".logs", "audit", "editor-diff.json") },
+    extensionTestsEnv: {
+      POLY_DIFF_OUT: join(ROOT, ".logs", "audit", "editor-diff.json"),
+      POLY_DIFF_CORPUS: corpus,
+    },
     // A stable download names the binary `Code`; an Insiders or Electron build
     // names it something else, so read the directory rather than guessing.
     ...(cachedExecutable ? { vscodeExecutablePath: cachedExecutable } : {}),
