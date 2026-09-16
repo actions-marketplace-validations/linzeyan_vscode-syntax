@@ -206,7 +206,7 @@
     {
       "id": "dotenv",
       "override": false,
-      "rationale": "mikestead/vscode-dotenv: clean MIT, self-contained plist grammar (converted to JSON by sync).",
+      "rationale": "mikestead/vscode-dotenv: clean MIT, self-contained plist grammar (converted to JSON by sync). The language-configuration is ours, and it carries the built-in's five auto-closing pairs rather than the two upstream ships: a .env value is full of ${VAR} and $(cmd), and taking over the id used to mean nobody got a closing brace for them. Keeping the whole set is what makes the takeover invisible, which is the rule for every override here.",
       "repo": "mikestead/vscode-dotenv",
       "license": "MIT",
       "language": { "extensions": [".env"], "filenamePatterns": [".env*", "**/.env.*"], "aliases": ["dotenv"], "configuration": "dotenv.json" },

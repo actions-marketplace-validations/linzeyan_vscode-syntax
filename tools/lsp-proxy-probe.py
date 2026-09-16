@@ -433,10 +433,13 @@ CASES = [
         call_line=4,
         call_character=16,  # inside `greet` on the call line
         hover_needle="greet",
-        # No typeDefinition and no selectionRange; it is the only server here
-        # that has declaration but not selectionRange.
-        registers=(FULL - {"typeDefinition"})
-        | {"declaration", "inlayHint"}
+        # Had neither typeDefinition nor selectionRange when this was first
+        # measured (2026-08-29); the Xcode toolchain's sourcekit-lsp registers
+        # both as of 2026-09-16. Recorded rather than pinned: the table is a
+        # record of what the servers do, and poly's side of it is that whatever
+        # they register is what reaches the editor.
+        registers=FULL
+        | {"declaration", "inlayHint", "selectionRange"}
         | HIERARCHY
         | COMMANDS
         | LENS
@@ -1361,15 +1364,25 @@ def run(case, logs=True, graceful=True):
         # outside kills the probe -- which is a worse failure than the bug.
         # poly answers every request, so the hover always comes back, and any
         # publish sent on the way lands in INBOX before it does.
+        #
+        # The budget is wall clock, not a number of round trips, and that is the
+        # whole of a flake this had: poly answers the hover in milliseconds, so
+        # six attempts finished in a few of them while lua-language-server was
+        # still building its index, and CI went red saying poly had stopped
+        # merging. What the server needs is time; a round trip is what it does
+        # not. Same deadline and same sleep as `settle`, for the same reason,
+        # and the same early exit -- a server that is ready costs one pass.
         both = []
-        for attempt in range(6):
+        deadline = time.time() + 120
+        attempt = 0
+        while True:
             both = [
                 published
                 for published in diagnostics_for(uri)
                 if any(d.get("source") == case.merged_source for d in published)
                 and any(d.get("source") != case.merged_source for d in published)
             ]
-            if both:
+            if both or time.time() > deadline:
                 break
             # A save with no change lints nothing: poly skips a document whose
             # content hash has not moved, so each attempt has to move it.
@@ -1390,9 +1403,14 @@ def run(case, logs=True, graceful=True):
                     "params": {"textDocument": {"uri": uri}},
                 }
             )
-            ask(20 + attempt, "textDocument/hover", at_call)
+            # Clear of every fixed id above and of `settle`, which starts under
+            # a hundred and adds a hundred a try for at most this same 120s.
+            ask(900000 + attempt, "textDocument/hover", at_call)
+            time.sleep(0.5)
+            attempt += 1
         assert both, (
-            f"no publish carried both {case.merged_source} and {case.server}: "
+            f"no publish carried both {case.merged_source} and {case.server} "
+            f"in {attempt} tries over 120s: "
             f"{[[d.get('source') for d in p] for p in diagnostics_for(uri)]}"
         )
         sources = sorted({d.get("source") for d in both[-1]})

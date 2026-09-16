@@ -108,7 +108,12 @@ const CASES = {
   ],
   "sample.csv": ["source.csv", ["rainbow1", "rainbow2", "rainbow3", "punctuation.separator.comma"]],
   "sample.tsv": ["source.tsv", ["rainbow1", "rainbow2", "punctuation.separator.tab"]],
-  "sample.ssh_config": [
+  // Named `ssh_config` rather than `sample.ssh_config`, because the language
+  // claims exact filenames and no extension: the sample name matched nothing,
+  // so every tool that resolves a fixture the way VSCode would -- grammar-diff
+  // among them -- skipped it, and the skip looked exactly like a missing
+  // association.
+  "ssh_config": [
     "source.ssh-config",
     [
       "keyword.control.ssh-config",
