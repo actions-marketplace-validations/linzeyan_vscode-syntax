@@ -33,7 +33,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
-	version grammars tokdeps grammar-diff grammar-corpus editor-diff engine-diff \
+	version grammars tokdeps grammar-diff grammar-corpus editor-diff mermaid-diff engine-diff \
 	lsp-fmt-diff bump control clean
 
 help: ## List targets
@@ -186,6 +186,16 @@ grammar-corpus: tokdeps ## grammar-diff over VSCode's own colorize fixtures (dow
 
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 	node tools/editor-diff/run.js
+
+# The one differential whose reference ships inside the editor rather than
+# beside it: from 1.135 VSCode draws mermaid fences itself, and poly's renderer
+# exists for the versions before that. It launches one extension host twice --
+# once with the built-in in charge, once with it disabled -- and compares what
+# reached the page, so "the same document renders the same on either side of
+# 1.135" is measured rather than asserted. Needs a 1.135+ build in
+# extensions/lsp/.vscode-test, which `make e2e` downloads.
+mermaid-diff: ## poly-editor's mermaid rendering against VSCode's built-in
+	node tools/mermaid-diff/run.js
 
 # The third differential, and the only one where poly does not replace the
 # upstream so much as swallow it: `poly check` links its linters in as

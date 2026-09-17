@@ -43,7 +43,35 @@ test("a local inside a function gets nothing", () => {
       symbol("out", VARIABLE, [symbol("deeper", VARIABLE)]),
     ]),
   ];
-  assert.deepEqual(lensTargets(file, 100).map((t) => t.symbol.name), ["main", "out"]);
+  assert.deepEqual(lensTargets(file, 100).map((t) => t.symbol.name), ["main"]);
+});
+
+test("a local inside an arrow function gets nothing either", () => {
+  // TypeScript reports `export const arrow = (n) => { const inner = ... }` as a
+  // Variable holding a Variable, so "do not descend into functions" by kind
+  // would let `inner` through -- which is why descent is an allow-list of the
+  // kinds that hold declarations rather than a deny-list of the ones that hold
+  // code.
+  const file = [symbol("arrow", VARIABLE, [symbol("inner", VARIABLE)])];
+  assert.deepEqual(lensTargets(file, 100).map((t) => t.symbol.name), ["arrow"]);
+});
+
+test("a method still gets one, whichever kind its type is spelled as", () => {
+  // The other half of the same change: an allow-list that forgot a language's
+  // container would silently take the lens off every method in it. `Object` is
+  // rust-analyzer's `impl` block -- descended into, and not itself counted,
+  // because "how many references does `impl Scraper` have" is not a question.
+  const OBJECT = 18;
+  const CLASS = 4;
+  const file = [
+    symbol("impl Scraper", OBJECT, [symbol("fetch", METHOD)]),
+    symbol("Config", CLASS, [symbol("load", METHOD)]),
+  ];
+  assert.deepEqual(lensTargets(file, 100).map((t) => t.symbol.name), [
+    "fetch",
+    "Config",
+    "load",
+  ]);
 });
 
 test("fields are not counted", () => {

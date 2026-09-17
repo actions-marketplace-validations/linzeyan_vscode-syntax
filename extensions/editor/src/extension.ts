@@ -16,6 +16,7 @@ import {
   Rewrite,
 } from "./list";
 import { toc, TOC_END, TOC_START } from "./markdown";
+import { mermaidPlugin } from "./markdownIt";
 import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } from "./postfix";
 import { REFACTOR_KIND, refactorChoices, Refactoring } from "./refactors";
 import { countElsewhere, implLabel, lensTargets, refLabel } from "./references";
@@ -1018,12 +1019,57 @@ async function runRefactor(
   }
 }
 
+/**
+ * VSCode's own mermaid renderer, which has existed since 1.135.
+ *
+ * Asked for by id rather than compared against `vscode.version`: the question
+ * is "is something else already drawing these fences", and an extension that
+ * is present answers it whether it arrived as a built-in, as a later rename, or
+ * as bierner.markdown-mermaid — the upstream all three share. Two renderers on
+ * one fence is not twice as good; the first one to replace the element wins and
+ * the second one draws into a node nobody is looking at.
+ */
+const BUILT_IN_MERMAID = "vscode.mermaid-markdown-features";
+
+/**
+ * Whether poly draws the diagrams in this preview.
+ *
+ * Asked per render rather than once, for two reasons: the setting can be turned
+ * off while a preview is open, and the built-in this stands down for can be
+ * enabled or disabled without the extension host restarting.
+ */
+function rendersMermaid(): boolean {
+  return vscode.workspace
+    .getConfiguration("poly")
+    .get<boolean>("markdownMermaid.enabled", true)
+    && vscode.extensions.getExtension(BUILT_IN_MERMAID) === undefined;
+}
+
+/**
+ * The preview's markdown-it instance, taught both diagram shapes.
+ *
+ * Returned from `activate` because that is the only way in;
+ * `contributes["markdown.markdownItPlugins"]` is what makes the preview ask.
+ */
+const extendMarkdownIt = mermaidPlugin(rendersMermaid);
+
 export function activate(context: vscode.ExtensionContext) {
   tintIndentation(context);
   previewImages(context);
   countReferencesInGutter(context);
   completePostfixes(context);
   registerTodoTree(context);
+
+  // The fence rule reads the setting on every render, so turning the diagrams
+  // off only has to reach previews that are already open. Same command the
+  // built-in uses for its own settings.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("poly.markdownMermaid")) {
+        void vscode.commands.executeCommand("markdown.preview.refresh");
+      }
+    }),
+  );
 
   const commands: [string, () => Promise<void>][] = [
     [
@@ -1105,6 +1151,10 @@ export function activate(context: vscode.ExtensionContext) {
   for (const [id, handler] of commands) {
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
   }
+
+  // The markdown preview reads this off the activation result; there is no
+  // `register…` call for it.
+  return { extendMarkdownIt };
 }
 
 export function deactivate() {}

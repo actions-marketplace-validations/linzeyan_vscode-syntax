@@ -1,8 +1,10 @@
 # The extension ships only the esbuild bundle; sources and deps stay out.
 node_modules/**
 src/**
-tsconfig.json
-tsconfig.test.json
+# Glob rather than one line each: `tsconfig.preview.json` shipped inside the
+# VSIX the first time a third config appeared, and nothing failed -- a file that
+# leaks into the package is invisible until someone unzips it.
+tsconfig*.json
 out/**
 pnpm-lock.yaml
 pnpm-workspace.yaml

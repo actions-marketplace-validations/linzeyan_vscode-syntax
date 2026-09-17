@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The preview script is the one file here that runs in a browser rather
+    // than in node, and it is bundled by esbuild rather than resolved by node
+    // at run time -- so it gets the DOM, and it resolves mermaid the way the
+    // bundler does. mermaid 12 is ESM-only with an `exports` map, which
+    // `Node16` would refuse to import from a CommonJS-emitting file.
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler"
+  },
+  "include": ["src/preview"],
+  "exclude": []
+}

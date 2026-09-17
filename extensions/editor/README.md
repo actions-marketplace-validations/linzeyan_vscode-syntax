@@ -101,6 +101,13 @@ TypeScript 有這個 lens，其他語言都沒有。
 - 只算**檔案自己的宣告與它們的方法**，函式裡的區域變數不算：那些的引用本來就在畫面上，
   一個區域變數一條 lens 只會把真正該看的埋掉。struct field 也不算——「誰寫這個欄位」
   跟「這個型別到底有沒有人用」是兩個問題。
+  - **2026-09-17 修正：深度不足以表達上面那句話。** 在真的 extension host 裡量過：
+    Pylance 把函式的**參數與區域變數**當成該函式的 `Variable` 子符號回報（`def helper(value)`
+    的 `value`、函式裡的 `total`、`obj` 全都是深度 2），TypeScript 則把 arrow function 的
+    local 掛在那個 arrow 所指派到的 `Variable` 底下。兩邊都會拿到一條 `N refs`。現在改成
+    **只往「裝得下宣告」的容器裡面走**（Module／Namespace／Package／Class／Enum／Interface／
+    Object／Struct），而不是照深度一律往下——`Object` 是 rust-analyzer 的 `impl` 區塊，
+    漏掉它會讓 Rust 的每個方法都失去 lens。
 - 數字**不含宣告自己**。`executeReferenceProvider` 是帶 `includeDeclaration: true` 問的，
   不扣掉的話沒人用的東西會顯示成 `1 ref`——而那正是這個計數最該讓人看見的一種。
 - 點下去開 peek 還是開 References 面板，由 VSCode 自己的
@@ -188,6 +195,51 @@ VSCode 內建的 **Go to Next/Previous Change**（`workbench.action.editor.nextC
 `workbench.colorCustomizations` 蓋 `poly.indentLevel1`～`4` 與 `poly.indentPartial`。
 
 只畫**可見範圍**——整份檔案的每一層縮排是幾千個 range，而沒有人在看它們。
+
+### markdown preview 的 mermaid 圖表
+
+markdown preview 裡的 ```mermaid fence 畫成圖，配色與字型都從編輯器主題推導。
+
+**這一項是有條件的：VSCode 1.135 起內建就有 `mermaid-markdown-features`，那時候 poly
+會整個讓開。** 判定的方式是問 extension 在不在（`vscode.mermaid-markdown-features`），
+不是比對版本號——問題本來就是「有沒有別人已經在畫這些 fence」，而一顆 fence 被兩個
+renderer 畫不會比較好看：先替換掉元素的那個贏，後到的畫進一個沒人在看的節點。所以
+poly 的 `engines.vscode` 是 `^1.85.0`，而這個功能實際生效的區間是 **1.85 到 1.134**。
+
+- **fence 的判定跟內建同一條規則**：`\bmermaid\b`、大小寫不敏感。所以 ```mermaid-example
+  也會被畫——那是 mermaid 官方文件用來「講解」圖表原始碼的 fence，照理不該畫。**明知有
+  這個毛病還是照抄**：poly 在這裡是內建的替身，同一份文件在你升上 1.135 的前後必須畫出
+  一樣的東西，升級之後才不會有 fence 突然不見。
+- **主題不是 mermaid 內建的那幾套**：從 preview 的 `--vscode-*` CSS 變數推出 mermaid
+  `base` 主題的變數——背景、線條、節點、註記、錯誤色與圖表色盤，還有
+  `--vscode-font-family`／`--vscode-font-size`——對應表跟內建同一份。字型不只是外觀：
+  mermaid 會量它排出來的文字，同一張圖用 Trebuchet 16px 和用編輯器字型畫，**大小不一樣**。
+- **跟內建對照跑過差分**（`make mermaid-diff`）：74 個案例——**mermaid 11.17 註冊的 37 種
+  圖表全部各一個**（不是挑的，是從它 `registerLazyLoadedDiagrams` 的清單反出來）、fence 與
+  `:::mermaid` 容器的各種寫法、跳脫與 `%%{init}%%` 設定。markdown 這一層（容器數、容器裡的
+  原始碼、其他語言的 fence class）**全等**，37 種圖表裡 poly 畫得出 36 種、寬高到像素一致。
+  差異只剩三筆：zenuml（見下）、`layout: elk`（見下），以及 `info` 圖——那張圖畫的內容
+  就是 mermaid 版本號，兩邊分別是 11.17.0 與 11.17.2。
+- **`zenuml` 是唯一畫不出來的類型**：它不是 mermaid 本體的圖表，是內建額外註冊的
+  external diagram（`@mermaid-js/mermaid-zenuml`）。沒有跟進的理由是它相依 `@zenuml/core`
+  ——9.7 MB，而且會把 React、antlr4、highlight.js、marked 一整串拉進 preview bundle，
+  而整個 poly-editor VSIX 現在是 963 KB。
+- **圖表原始碼是當成文字塞進 DOM 的**，`&`／`<`／`>`／`"` 在 extension host 這側就escape
+  掉。preview 的 CSP 是 `default-src 'none'`、script 只認 nonce，但一張圖能不能寫 HTML
+  進 preview 不該賭在 CSP 上。
+- **畫不出來的時候原始碼留在畫面上**，錯誤訊息接在下面。mermaid 自己的作法是把圖換成一顆
+  炸彈圖示，那比「哪一行不合法」說得少（`suppressErrorRendering` 關掉它）。
+- 渲染在 webview 裡（`markdown.previewScripts`），因為 mermaid 要量它排出來的文字，
+  而 extension host 沒有 DOM。代價是 VSIX 多了 mermaid.js 那一份 bundle（3.5 MB，
+  打包後約 1 MB）。
+- **mermaid 釘在 `^11`，不是最新的 12**：12.0.0 把 `elkjs` 變成直接相依，而 elkjs 是
+  EPL-2.0——poly 對出貨物的授權 allowlist 上沒有它。實測把它排除掉（`--external:` 或
+  alias 成 stub）會讓**每一張圖**都畫不出來，因為 mermaid 在 render 路徑上就會碰到那個
+  模組；11.x 則根本沒有這個相依，而且對沒註冊的排版演算法是 warn 後退回 dagre。所以
+  `layout: elk` 的圖在這裡會用 dagre 畫出來，不會失敗。內建另外註冊的 `tidy-tree` 排版
+  **有跟進**（`@mermaid-js/layout-tidy-tree`，MIT、242 KB、只相依已經在 bundle 裡的 d3），
+  畫出來跟內建一模一樣；擋住的只有 elk 一個，理由是授權不是體積。
+- `poly.markdownMermaid.enabled` 可關，關掉會順手 refresh 已經開著的 preview。
 
 ### Gutter 圖片預覽
 

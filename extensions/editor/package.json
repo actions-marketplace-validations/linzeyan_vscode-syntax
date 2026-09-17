@@ -16,6 +16,10 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "markdown.markdownItPlugins": true,
+    "markdown.previewScripts": [
+      "./dist/preview.js"
+    ],
     "configuration": {
       "title": "Poly Editor",
       "properties": {
@@ -33,6 +37,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show a reference count above each declaration, and an implementation count above each interface and interface method, in every language whose reference provider can answer. Both counts come from whatever providers the language already has; poly analyses nothing. Whether clicking one opens the peek or the References panel is controlled by references.preferredLocation."
+        },
+        "poly.markdownMermaid.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render ```mermaid fences as diagrams in the markdown preview. Ignored on VSCode 1.135 and later, which ships the same renderer as a built-in (mermaid-markdown-features): poly stands down rather than draw a second diagram over the first."
         },
         "poly.postfixCompletion.enabled": {
           "type": "boolean",
@@ -267,8 +276,8 @@
     ]
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
-    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify && esbuild src/preview/mermaid.ts --bundle --outfile=dist/preview.js --format=iife --platform=browser --minify",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.preview.json --noEmit",
     "test": "tsc -p tsconfig.test.json && node --test out/*.test.js"
   },
   "devDependencies": {
@@ -277,5 +286,9 @@
     "esbuild": "^0.28.1",
     "typescript": "^5.4.0"
   },
-  "packageManager": "pnpm@11.5.3"
+  "packageManager": "pnpm@11.5.3",
+  "dependencies": {
+    "@mermaid-js/layout-tidy-tree": "^1.0.0",
+    "mermaid": "^11.17.2"
+  }
 }

@@ -75,11 +75,37 @@ const INTERFACE = 10;
 /**
  * How deep a declaration can sit and still get a lens.
  *
- * The file's own declarations, and the methods on them. A local inside a
- * function is deeper than that and gets nothing: its references are already on
- * screen, and a lens per local would bury the ones worth reading.
+ * The file's own declarations, and the methods on them.
  */
 const MAX_DEPTH = 2;
+
+/**
+ * The kinds whose children are declarations rather than code.
+ *
+ * Depth alone was the rule until 2026-09-17, and depth alone is not enough:
+ * measured in a real extension host, Pylance reports a function's parameters
+ * and locals as `Variable` children of the function (`value`, `total`, `obj`
+ * are all depth 2), and TypeScript reports the locals of an arrow function the
+ * same way -- as children of the `Variable` the arrow is assigned to, which is
+ * why refusing to descend into functions by kind would still have missed them.
+ * Every one of those got a `N refs` lens, which is the noise this file's own
+ * comment said it was avoiding.
+ *
+ * So descent is an allow-list: a type can hold declarations another file names,
+ * a function body holds code. `Object` is here for rust-analyzer's `impl`
+ * blocks, which is where a Rust type's methods live; leaving it out would take
+ * the lens off every method in the language.
+ */
+const CONTAINER_KINDS: ReadonlySet<number> = new Set([
+  1, // Module
+  2, // Namespace
+  3, // Package
+  4, // Class
+  9, // Enum
+  10, // Interface
+  18, // Object
+  22, // Struct
+]);
 
 /**
  * The declarations in `symbols` that get a lens, outermost first.
@@ -104,7 +130,7 @@ export function lensTargets<T extends LensSymbol>(
       if (COUNTED_KINDS.has(symbol.kind)) {
         found.push({ symbol, implementable: isInterface || insideInterface });
       }
-      if (depth < MAX_DEPTH && symbol.children) {
+      if (depth < MAX_DEPTH && symbol.children && CONTAINER_KINDS.has(symbol.kind)) {
         // A symbol's children are the same concrete type it is; the interface
         // cannot say so without making itself recursive in `T`, and the caller
         // wants its own type back rather than this file's view of it.

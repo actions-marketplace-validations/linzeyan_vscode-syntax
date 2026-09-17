@@ -120,6 +120,9 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   是「我在第幾層」。只畫可見範圍，顏色走 theme color。
 - **Gutter 圖片預覽**：某行提到的圖檔存在就在 gutter 放縮圖。不寫語法解析器——
   markdown／HTML／CSS 各有寫法，而檔案存不存在才是真正的過濾器。
+- **markdown preview 的 mermaid 圖表**：```mermaid fence 在 preview 裡畫成圖，配色與字型
+  跟著編輯器主題。**VSCode 1.135 起內建就有這個功能，那時候 poly 會自動讓開**——所以這一項
+  實際生效的是 1.85 到 1.134。`poly.markdownMermaid.enabled` 可關。
 - **TODOs 檢視**：檔案總管多一個面板，列出整個 workspace 的 `TODO`／`FIXME`／`HACK`／
   `XXX`／`BUG`。只在面板顯示時才掃描，排除規則沿用 `files.exclude`／`search.exclude`，
   而且掃描上限會寫在標題上——「清單很短」跟「清單被截斷」不該長得一樣。
