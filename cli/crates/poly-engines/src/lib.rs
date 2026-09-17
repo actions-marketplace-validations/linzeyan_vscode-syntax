@@ -173,8 +173,88 @@ fn format_typescript(path: &Path, text: &str, opts: FormatOptions) -> Result<Opt
         extension: None,
         text: text.to_string(),
         config,
-        external_formatter: None,
+        external_formatter: Some(&embedded_in_typescript),
     })
+}
+
+/// A tagged template whose tag names a language poly formats.
+///
+/// dprint-plugin-typescript formats TypeScript and asks its caller about
+/// anything else, the same shape markup_fmt uses for `<script>` and
+/// dprint-plugin-markdown for a fenced block. poly answers for the languages
+/// it has, which is what makes ``css`...` `` in a styled-component come out
+/// formatted rather than however it was typed.
+///
+/// Returning `None` leaves the template exactly as written, which is the right
+/// answer for a language poly does not format and for a snippet that does not
+/// parse -- a tagged template is often a fragment, and a fragment that fails to
+/// parse is not a file anybody asked poly to fix.
+///
+/// Interpolations arrive as placeholders, not holes: the plugin substitutes a
+/// uniquely numbered `dpr1nt_NN_d` (`@dpr1nt_NN_d` for css, so it reads as a
+/// LESS variable) for each `${}` before calling this, and puts the expressions
+/// back afterwards. So the text really is the language the tag claims -- but
+/// the formatter must not reorder or drop what looks to it like an unknown
+/// identifier, which is the other half of why css goes through LESS.
+fn embedded_in_typescript(
+    lang: &str,
+    text: String,
+    config: &dprint_plugin_typescript::configuration::Configuration,
+) -> Result<Option<String>> {
+    let opts = FormatOptions {
+        indent_width: Some(config.indent_width),
+        ..FormatOptions::default()
+    };
+    let formatted = match lang {
+        "css" => embedded_css(&text, config),
+        // markup_fmt's own `Language::Html`, with the inner callback poly uses
+        // everywhere else, so a `<style>` inside an html`` template reaches
+        // malva exactly as it would in a .html file.
+        "html" => format_markup(&text, "html", opts),
+        // sqruff takes no layout options from poly: `[format.sql]` rejects
+        // all three, because sqruff owns its own layout rules (.sqruff).
+        "sql" => format_sql(&text),
+        _ => return Ok(None),
+    };
+    // Unformattable is not an error here: the tag says what the author meant
+    // the fragment to be, and being wrong about that must not fail the whole
+    // TypeScript file.
+    Ok(formatted.ok().flatten())
+}
+
+/// The CSS inside a tagged template, which is a declaration list and not a file.
+///
+/// `css\`color: red\`` is not a stylesheet -- malva would reject it -- so it is
+/// wrapped in a rule, formatted, and unwrapped again. This is
+/// dprint-plugin-typescript's own approach, copied deliberately from its
+/// `tests/spec_test.rs`: LESS rather than CSS because LESS accepts `@variable`
+/// both as a value and as a standalone mixin, which is what a placeholder left
+/// by a removed interpolation looks like.
+///
+/// The trailing `;` in the wrapper is what lets a declaration list that already
+/// ends in one through without becoming a syntax error.
+fn embedded_css(
+    text: &str,
+    config: &dprint_plugin_typescript::configuration::Configuration,
+) -> Result<Option<String>> {
+    let mut options = malva::config::FormatOptions::default();
+    options.layout.indent_width = config.indent_width as usize;
+    let wrapped = malva::format_text(&format!("a{{\n{text}\n;}}"), malva::Syntax::Less, &options)
+        .map_err(|e| anyhow!("css {e}"))?;
+    let mut out = Vec::new();
+    for (i, line) in wrapped.lines().enumerate() {
+        // The `a {` this added, and the `}` that closed it.
+        if i == 0 || line.starts_with('}') {
+            continue;
+        }
+        // And the indent that being inside a rule gave every line.
+        let mut chars = line.chars();
+        for _ in 0..config.indent_width {
+            chars.next();
+        }
+        out.push(chars.as_str());
+    }
+    Ok(Some(out.join("\n")))
 }
 
 fn format_json(path: &Path, text: &str, opts: FormatOptions) -> Result<Option<String>> {
@@ -773,6 +853,87 @@ fn format_dockerfile(path: &Path, text: &str, opts: FormatOptions) -> Result<Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `css` tagged template is CSS, and poly formats it.
+    ///
+    /// The declaration list is the whole point: what sits between the
+    /// backticks is a fragment, not a stylesheet, so it reaches malva wrapped
+    /// in a rule and comes back unwrapped (`embedded_css`). An off-by-one in
+    /// that unwrapping shows up here as a stray indent or a lost first
+    /// property.
+    #[test]
+    fn a_css_tagged_template_is_formatted_as_css() {
+        let formatted = format_file(
+            Path::new("a.ts"),
+            "const s = css`color:red;background:blue`;\n",
+        )
+        .expect("typescript must format")
+        .expect("the template needs formatting, so there must be output");
+        assert_eq!(
+            formatted,
+            "const s = css`\n  color: red;\n  background: blue;\n`;\n",
+        );
+    }
+
+    /// An interpolated template is still formatted, and every expression comes
+    /// back byte for byte.
+    ///
+    /// The plugin swaps each `${}` for a numbered placeholder before calling
+    /// poly, so what malva sees is a stylesheet and not a fragment with holes.
+    /// The risk is on the way back: an engine that reorders declarations or
+    /// drops an unknown identifier would silently move an author's expression
+    /// to another property. `styled.div` is here because the plugin resolves it
+    /// to css by the tag's shape rather than by its name.
+    #[test]
+    fn an_interpolated_tagged_template_keeps_its_expressions() {
+        let formatted = format_file(
+            Path::new("a.ts"),
+            "const s = styled.div`color:${fg};padding:${p}px`;\n",
+        )
+        .expect("typescript must format")
+        .expect("the template needs formatting, so there must be output");
+        assert_eq!(
+            formatted,
+            "const s = styled.div`\n  color: ${fg};\n  padding: ${p}px;\n`;\n",
+        );
+    }
+
+    /// The same for `html`, which reaches markup_fmt.
+    #[test]
+    fn an_html_tagged_template_is_formatted_as_markup() {
+        let formatted = format_file(
+            Path::new("a.ts"),
+            "const t = html`<div   ><p>hi</p></div>`;\n",
+        )
+        .expect("typescript must format")
+        .expect("the template needs formatting, so there must be output");
+        assert!(formatted.contains("<div>"), "{formatted:?}");
+        assert!(formatted.contains("<p>hi</p>"), "{formatted:?}");
+    }
+
+    /// A tag poly has no language for, and a fragment that does not parse, both
+    /// leave the template exactly as written.
+    ///
+    /// This is the half that keeps the feature from being a liability: a
+    /// template is often not valid anything, and the author's bytes must
+    /// survive being guessed at.
+    #[test]
+    fn an_unformattable_tagged_template_is_left_alone() {
+        // A tag with no engine behind it.
+        assert!(format_file(
+            Path::new("a.ts"),
+            "const q = graphqlish`{ not  touched }`;\n"
+        )
+        .expect("typescript must format")
+        .is_none_or(|out| out.contains("{ not  touched }")));
+        // And a `css` tag whose contents are not CSS at all.
+        let broken = format_file(Path::new("a.ts"), "const s = css`@@@ not ; css {{{`;\n")
+            .expect("a bad fragment must not fail the file");
+        assert!(
+            broken.is_none_or(|out| out.contains("@@@ not ; css {{{")),
+            "the author's bytes must survive",
+        );
+    }
 
     /// A notebook must format to the same bytes every time it is formatted.
     ///

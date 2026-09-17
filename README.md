@@ -186,6 +186,11 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   `target/poly` 而不是預設的 `target/`，這樣你在終端打的 `cargo test` 不會等
   編輯器（rust-analyzer 也是這麼做的）；代價是多一棵 build tree，第一次會編一次。
   不想要就 `[tools] cargo = "off"`。
+- **TypeScript 裡的 `css`／`html`／`sql` 標籤模板會一起格式化**，用的是 poly 格式化
+  `.css`／`.html`／`.sql` 檔的同一個引擎，所以 styled-components 的樣式、lit 的模板存檔後
+  跟獨立檔案長得一樣。`styled.div` 與 `styled(Button)` 開頭的模板也算 CSS。插值
+  （`${…}`）原地保留，格式化不會動到它裡面的運算式。標籤是其他名字，或片段本身解析不了
+  （標籤模板常常只是一個片段，不是完整的檔案），就原樣留著——不會讓整個檔案格式化失敗。
 - **Protobuf 的 lint 是 poly 自己的規則**，不需要 buf module：`.proto` 上方沒有
   `buf.yaml` 也照樣檢查（以前這種檔案是整個跳過的）。有 `buf.yaml` 的話，它的
   `lint` 區段——`use`、`except`、`ignore`、`ignore_only`，v1 v2 都讀——決定哪幾條規則跑，

@@ -198,15 +198,24 @@ mermaid-diff: ## poly-editor's mermaid rendering against VSCode's built-in
 	node tools/mermaid-diff/run.js
 
 # The third differential, and the only one where poly does not replace the
-# upstream so much as swallow it: `poly check` links its linters in as
-# libraries. Every test in this repo therefore asks the engine a question
-# through poly, and none of them can tell "poly drives it the way its CLI does"
-# apart from "poly drives it some other way and no fixture noticed".
+# upstream so much as swallow it: `poly fmt` and `poly check` link their
+# engines in as libraries. Every test in this repo therefore asks the engine a
+# question through poly, and none of them can tell "poly drives it the way its
+# project does" apart from "poly drives it some other way and no fixture
+# noticed".
+#
+# Twelve engines, and only three of them have a CLI to install. For the rest --
+# the dprint plugins, the g-plane formatters, mago -- the comparison is against
+# the expected output each project keeps beside its own inputs, which is the
+# file its CI holds it to. `make engine-diff <name>` is not a thing make does;
+# run the script directly to pick one:
+#
+#     python3 tools/engine-diff.py cli/target/release/poly markup_fmt
 #
 # Out of `gates` for the same reason as the other two, plus one of its own: it
-# clones the engine's repository at the tag its pin names, so it is the only
-# target here that a GitHub outage can turn red.
-engine-diff: build ## poly's embedded linters against the CLIs they embed (clones them)
+# clones each project at the tag its version names, so it is the only target
+# here that a GitHub outage can turn red.
+engine-diff: build ## poly's embedded engines against the projects they embed (clones them)
 	python3 tools/engine-diff.py $(POLY)
 
 # The fourth, and the only one with nothing to download and no table of allowed

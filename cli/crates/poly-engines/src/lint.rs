@@ -586,6 +586,60 @@ fn build_python_settings(config: Option<&Path>) -> Result<ruff_workspace::Settin
     Ok(ruff_workspace::Settings::default())
 }
 
+/// The package root for a Python file, the way ruff's CLI resolves it.
+///
+/// Five rules ask which package a file is in, and they are the five that
+/// disagreed with the ruff binary when poly passed `None`: N999 needs the
+/// module name, D100 and D104 need to know the file *is* a module, PLW0406
+/// compares an import against the module's own name, and INP001 is the whole
+/// question read backwards -- with no package, every file looks like it is in
+/// an implicit namespace one. Measured over ruff's own fixtures, passing None
+/// cost 170 findings poly should have reported and invented 242 it should not,
+/// including an INP001 on `__init__.py` files, which are the one thing that
+/// cannot be in an implicit namespace package.
+///
+/// `detect_package_root` is ruff's own function, so the walk is the one the
+/// binary does: up the ancestors while each has an `__init__.py`, and the last
+/// one that does is the root.
+///
+/// Nested is decided differently here, and this is the one place poly cannot
+/// copy the CLI. ruff routes every root it found against the *set of files it
+/// was given* and demotes any root sitting under another. poly lints one file
+/// at a time under rayon and has no such set, so it asks the filesystem the
+/// same question instead: is any ancestor of this root itself a package? The
+/// answers differ only for a root whose parent package holds no Python file
+/// that is being linted, which no layout in ruff's own fixtures produces.
+///
+/// Cached per directory, which is what makes this affordable: the walk is a
+/// handful of `stat` calls, and without the cache every file in a package
+/// would repeat its parents' -- the per-file cost the comment this replaces
+/// was right to worry about.
+fn python_package(dir: &Path, namespace: &[PathBuf]) -> Option<PathBuf> {
+    type Roots = HashMap<PathBuf, Option<PathBuf>>;
+    static ROOTS: Mutex<Option<Roots>> = Mutex::new(None);
+
+    let mut guard = ROOTS.lock().expect("ruff package root cache lock");
+    let roots = guard.get_or_insert_with(HashMap::new);
+    if let Some(hit) = roots.get(dir) {
+        return hit.clone();
+    }
+    let root = ruff_linter::packaging::detect_package_root(dir, namespace).map(Path::to_path_buf);
+    roots.insert(dir.to_path_buf(), root.clone());
+    root
+}
+
+/// Whether `root` sits under another package root. See `python_package`.
+fn package_is_nested(root: &Path, namespace: &[PathBuf]) -> bool {
+    // Starting above the root's own parent is pointless: `detect_package_root`
+    // stopped there precisely because that directory is not a package. What
+    // makes a root nested is a package further up, with a gap in between.
+    root.parent().is_some_and(|parent| {
+        parent
+            .ancestors()
+            .any(|ancestor| ruff_linter::packaging::is_package(ancestor, namespace))
+    })
+}
+
 fn lint_python(path: &Path, text: &str) -> Result<Vec<Issue>> {
     let source_type = ruff_python_ast::PySourceType::from(path);
     // A .ipynb is JSON, not Python. Handing the raw text to the linter would
@@ -604,13 +658,33 @@ fn lint_python(path: &Path, text: &str) -> Result<Vec<Issue>> {
         }
     };
     let settings = python_settings(path)?;
+    // Absolute, because ruff's CLI is: `python_files_in_path` normalizes every
+    // path before anything looks at it, and package detection only works on
+    // the result. A relative path bottoms out at `""` once the walk reaches the
+    // working directory, and a root of `""` has no `file_name()` -- which N999
+    // unwraps, so poly panicked once per file the moment package detection was
+    // switched on over a tree whose own root is a package. ruff's fixtures are
+    // exactly such a tree.
+    //
+    // Nothing downstream reads this path: `python_issue` takes the file name
+    // from the caller, not from the diagnostic. What it does reach is
+    // `per-file-ignores`, whose globs are matched against it -- and matching
+    // them against an absolute path is what the CLI does too.
+    let absolute = ruff_linter::fs::normalize_path(path);
+    // Resolved into a local because `PackageRoot` borrows it.
+    let root = absolute
+        .parent()
+        .and_then(|dir| python_package(dir, &settings.linter.namespace_packages));
+    let package = root.as_deref().map(|root| {
+        if package_is_nested(root, &settings.linter.namespace_packages) {
+            ruff_linter::package::PackageRoot::nested(root)
+        } else {
+            ruff_linter::package::PackageRoot::root(root)
+        }
+    });
     let found = ruff_linter::linter::lint_only(
-        path,
-        // Package detection only feeds rules that ask "is this file in a
-        // package" (import sorting's first-party guess, N999's module-name
-        // check). Resolving it means another walk per file for something the
-        // stdin path never had either.
-        None,
+        &absolute,
+        package,
         &settings.linter,
         // What the subprocess ran with by default. `# noqa` is how a Python
         // project silences one line, and honouring it in CI but not in the
@@ -3660,6 +3734,75 @@ mod tests {
             std::fs::write(dir.path().join(name), body).unwrap();
         }
         dir
+    }
+
+    /// A Python project on disk, because a package is a fact about directories:
+    /// `lint_python` walks up from the file looking for `__init__.py`, and
+    /// nothing about that can be asked of a string.
+    ///
+    /// Both rules selected here are off by default, which is the point -- they
+    /// are the ones that need the package, so the project has to ask for them
+    /// before either of these tests can see anything at all.
+    fn python_package_project(config: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalized for the reason `spelling_project` canonicalizes: macOS
+        // hands out /var/folders/... and resolves it to /private/var/..., and
+        // the caches here are keyed by directory.
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("ruff.toml"), config).unwrap();
+        for (name, body) in files {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        dir
+    }
+
+    fn codes_at(dir: &tempfile::TempDir, name: &str) -> Vec<String> {
+        let path = dir.path().canonicalize().unwrap().join(name);
+        let text = std::fs::read_to_string(&path).unwrap();
+        lint_python(&path, &text)
+            .unwrap_or_else(|e| panic!("{name}: {e:#}"))
+            .into_iter()
+            .map(|issue| issue.code)
+            .collect()
+    }
+
+    /// INP001 is the package question read backwards, and it is the clearest
+    /// reason poly resolves a package root at all: handed `None`, ruff sees
+    /// every file as loose and reports all of them -- `__init__.py` included,
+    /// which is the one file that cannot be in an implicit namespace package.
+    /// Measured over ruff's own fixtures, passing `None` invented 239 findings
+    /// the tool poly stands in for does not report.
+    #[test]
+    fn a_file_in_a_package_is_not_in_an_implicit_namespace_package() {
+        let dir = python_package_project(
+            "[lint]\nselect = [\"INP001\"]\n",
+            &[
+                ("pkg/__init__.py", ""),
+                ("pkg/mod.py", ""),
+                ("loose/mod.py", ""),
+            ],
+        );
+        assert!(codes_at(&dir, "pkg/mod.py").is_empty());
+        assert!(codes_at(&dir, "pkg/__init__.py").is_empty());
+        // The other direction, so this fails if detection starts answering
+        // "package" for everything -- rather than passing because the rule is
+        // quiet for some unrelated reason.
+        assert_eq!(codes_at(&dir, "loose/mod.py"), ["INP001"]);
+    }
+
+    /// N999 names the module, and for a package's `__init__.py` the module is
+    /// the *directory*. With no package root ruff cannot see that name, so the
+    /// rule simply went quiet: 170 findings quiet, over ruff's own fixtures.
+    #[test]
+    fn a_module_name_rule_sees_the_package_directory() {
+        let dir = python_package_project(
+            "[lint]\nselect = [\"N999\"]\n",
+            &[("not-a-module/__init__.py", ""), ("fine/__init__.py", "")],
+        );
+        assert_eq!(codes_at(&dir, "not-a-module/__init__.py"), ["N999"]);
+        assert!(codes_at(&dir, "fine/__init__.py").is_empty());
     }
 
     /// The whole record for one finding: position, rule code, the rule's own
