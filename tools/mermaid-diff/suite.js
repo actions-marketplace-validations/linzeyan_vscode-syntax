@@ -173,9 +173,7 @@ exports.run = async function run() {
         vscode.Uri.file(join(builtIn.extensionPath, "markdown-preview-out", "index.js")),
       )
     }"></script>`
-    : `<script src="${
-      panel.webview.asWebviewUri(vscode.Uri.file(join(editorDist, "preview.js")))
-    }"></script>`;
+    : `<script src="${panel.webview.asWebviewUri(vscode.Uri.file(join(editorDist, "preview.js")))}"></script>`;
 
   panel.webview.html = page(rendered, scriptTag, nonce, csp);
 

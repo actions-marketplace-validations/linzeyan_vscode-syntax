@@ -36,21 +36,25 @@ const DIAGRAMS = {
   er: "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ LINE-ITEM : contains",
   journey: "journey\n  title My day\n  section Go to work\n    Make tea: 5: Me\n    Drive: 3: Me",
   gantt: "gantt\n  title A Gantt\n  dateFormat YYYY-MM-DD\n  section S\n    Task :a1, 2024-01-01, 30d",
-  pie: 'pie title Pets\n  "Dogs" : 386\n  "Cats" : 85',
-  quadrant: "quadrantChart\n  title Reach and engagement\n  x-axis Low Reach --> High Reach\n  y-axis Low --> High\n  Campaign A: [0.3, 0.6]",
-  requirement: "requirementDiagram\n  requirement test_req {\n    id: 1\n    text: the test text.\n    risk: high\n    verifymethod: test\n  }",
+  pie: "pie title Pets\n  \"Dogs\" : 386\n  \"Cats\" : 85",
+  quadrant:
+    "quadrantChart\n  title Reach and engagement\n  x-axis Low Reach --> High Reach\n  y-axis Low --> High\n  Campaign A: [0.3, 0.6]",
+  requirement:
+    "requirementDiagram\n  requirement test_req {\n    id: 1\n    text: the test text.\n    risk: high\n    verifymethod: test\n  }",
   // Commit ids are spelled out: mermaid generates random ones otherwise, and
   // two sides drawing the same graph would then differ on every run.
-  gitgraph: 'gitGraph\n  commit id: "one"\n  branch develop\n  commit id: "two"\n  checkout main\n  merge develop',
+  gitgraph: "gitGraph\n  commit id: \"one\"\n  branch develop\n  commit id: \"two\"\n  checkout main\n  merge develop",
   c4: "C4Context\n  title System Context\n  Person(customerA, \"Banking Customer A\")",
   mindmap: "mindmap\n  root((mindmap))\n    Origins\n      Long history\n    Research",
   timeline: "timeline\n  title History\n  2002 : LinkedIn\n  2004 : Facebook",
   sankey: "sankey-beta\n\nAgricultural waste,Bio-conversion,124.729",
-  xychart: 'xychart-beta\n  title "Sales"\n  x-axis [jan, feb, mar]\n  y-axis "Revenue" 0 --> 10000\n  bar [5000, 6000, 7500]',
+  xychart:
+    "xychart-beta\n  title \"Sales\"\n  x-axis [jan, feb, mar]\n  y-axis \"Revenue\" 0 --> 10000\n  bar [5000, 6000, 7500]",
   block: "block-beta\n  columns 3\n  a b c\n  d e f",
   packet: "packet-beta\n0-15: \"Source Port\"\n16-31: \"Destination Port\"",
   kanban: "kanban\n  Todo\n    [Create Sample]\n  Done\n    [Ship it]",
-  architecture: "architecture-beta\n  group api(cloud)[API]\n  service db(database)[Database] in api\n  service server(server)[Server] in api\n  db:L -- R:server",
+  architecture:
+    "architecture-beta\n  group api(cloud)[API]\n  service db(database)[Database] in api\n  service server(server)[Server] in api\n  db:L -- R:server",
   radar: "radar-beta\n  axis a[\"A\"], b[\"B\"], c[\"C\"]\n  curve x[\"X\"]{3, 4, 5}",
   treemap: "treemap-beta\n\"Section 1\"\n  \"Leaf 1.1\": 12\n  \"Leaf 1.2\": 24",
   info: "info",
@@ -80,7 +84,7 @@ const DIAGRAMS = {
 const MARKDOWN = {
   plain: "```mermaid\ngraph TD\n  A --> B\n```",
   uppercase: "```Mermaid\ngraph TD\n  A --> B\n```",
-  "info-attributes": '```mermaid {caption="flow"}\ngraph TD\n  A --> B\n```',
+  "info-attributes": "```mermaid {caption=\"flow\"}\ngraph TD\n  A --> B\n```",
   // mermaid's own documentation fences source it is *talking about* this way.
   "mermaid-example": "```mermaid-example\ngraph TD\n  A --> B\n```",
   "not-mermaid": "```mermaidjs\ngraph TD\n  A --> B\n```",
@@ -107,22 +111,23 @@ const MARKDOWN = {
 
 /** What is inside the fence, where the two sides could diverge on their own. */
 const CONTENT = {
-  "html-in-label": '```mermaid\ngraph TD\n  A["<script>alert(1)</script>"] --> B\n```',
-  "ampersand-in-label": '```mermaid\ngraph TD\n  A["Tom & Jerry"] --> B\n```',
-  "entity-in-label": '```mermaid\ngraph TD\n  A["&amp; &lt; &gt;"] --> B\n```',
-  "markup-in-label": '```mermaid\ngraph TD\n  A["<b>bold</b>"] --> B\n```',
-  "cjk-label": '```mermaid\ngraph TD\n  A["繁體中文"] --> B["日本語"]\n```',
-  "emoji-label": '```mermaid\ngraph TD\n  A["🚀 ship"] --> B\n```',
+  "html-in-label": "```mermaid\ngraph TD\n  A[\"<script>alert(1)</script>\"] --> B\n```",
+  "ampersand-in-label": "```mermaid\ngraph TD\n  A[\"Tom & Jerry\"] --> B\n```",
+  "entity-in-label": "```mermaid\ngraph TD\n  A[\"&amp; &lt; &gt;\"] --> B\n```",
+  "markup-in-label": "```mermaid\ngraph TD\n  A[\"<b>bold</b>\"] --> B\n```",
+  "cjk-label": "```mermaid\ngraph TD\n  A[\"繁體中文\"] --> B[\"日本語\"]\n```",
+  "emoji-label": "```mermaid\ngraph TD\n  A[\"🚀 ship\"] --> B\n```",
   "backtick-in-label": "```mermaid\ngraph TD\n  A[\"a `code` b\"] --> B\n```",
   "syntax-error": "```mermaid\ngraph TD\n  A[Start -->\n```",
   "unknown-diagram-type": "```mermaid\nnosuchdiagram\n  A --> B\n```",
-  "init-directive-theme": '```mermaid\n%%{init: {"theme": "forest"}}%%\ngraph TD\n  A --> B\n```',
-  "init-directive-elk": '```mermaid\n%%{init: {"layout": "elk"}}%%\ngraph TD\n  A --> B\n```',
+  "init-directive-theme": "```mermaid\n%%{init: {\"theme\": \"forest\"}}%%\ngraph TD\n  A --> B\n```",
+  "init-directive-elk": "```mermaid\n%%{init: {\"layout\": \"elk\"}}%%\ngraph TD\n  A --> B\n```",
   "flowchart-elk-header": "```mermaid\nflowchart-elk TD\n  A --> B\n```",
   // The built-in's other extra layout, registered beside elk.
-  "init-directive-tidy-tree": '```mermaid\n%%{init: {"layout": "tidy-tree"}}%%\ngraph TD\n  A --> B\n```',
-  "click-handler": '```mermaid\ngraph TD\n  A --> B\n  click A "https://example.com" "tooltip"\n```',
-  "html-label": '```mermaid\n%%{init: {"flowchart": {"htmlLabels": true}}}%%\ngraph TD\n  A["line<br/>break"] --> B\n```',
+  "init-directive-tidy-tree": "```mermaid\n%%{init: {\"layout\": \"tidy-tree\"}}%%\ngraph TD\n  A --> B\n```",
+  "click-handler": "```mermaid\ngraph TD\n  A --> B\n  click A \"https://example.com\" \"tooltip\"\n```",
+  "html-label":
+    "```mermaid\n%%{init: {\"flowchart\": {\"htmlLabels\": true}}}%%\ngraph TD\n  A[\"line<br/>break\"] --> B\n```",
   "large-source": `\`\`\`mermaid\ngraph TD\n${
     Array.from({ length: 400 }, (_, i) => `  n${i} --> n${i + 1}`).join("\n")
   }\n\`\`\``,
