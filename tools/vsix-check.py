@@ -63,7 +63,10 @@ def main() -> int:
     # and checking last release's VSIX would pass while this one is broken.
     package = root / f"{manifest['name']}-{manifest['version']}.vsix"
     if not package.exists():
-        print(f"{package.name} is not here: package the extension before checking it", file=sys.stderr)
+        print(
+            f"{package.name} is not here: package the extension before checking it",
+            file=sys.stderr,
+        )
         return 1
 
     with zipfile.ZipFile(package) as archive:
@@ -80,7 +83,9 @@ def main() -> int:
         elif sizes[entry] == 0:
             problems.append(f"{path} is in the package and empty")
 
-    print(f"{package.name}: {len(paths)} manifest path(s), {len(sizes)} file(s) packaged")
+    print(
+        f"{package.name}: {len(paths)} manifest path(s), {len(sizes)} file(s) packaged"
+    )
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     if problems:
