@@ -189,10 +189,13 @@ jobs:
               sed -E 's/^test (.+) \.\.\. FAILED$/::error::cargo test: \1/' || true
           fi
           exit $status
+      # Only the binary's half here: the other artifact is poly-editor's preview
+      # bundle, whose tree only pnpm can resolve, and this job has no node. It
+      # is checked in `extensions`, next to the install that makes it readable.
       - name: Third-party notices are current (A9)
         run: |
           python3 tools/third-party-notices.py --self-test
-          python3 tools/third-party-notices.py --check
+          python3 tools/third-party-notices.py --check --scope cargo
       # Offline on purpose: it compares the lock against the registry, nothing
       # upstream. A hand-edited version bump that skips tool-sync.py leaves
       # every platform but the editor's on trust-on-first-use, which looks
@@ -451,3 +454,8 @@ jobs:
           pnpm test
           pnpm run build
           pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
+      # The other half of A9, here because it needs the tree the step above just
+      # installed: what the preview bundle carries is decided by pnpm's
+      # resolution, not by a manifest anyone can read without it.
+      - name: poly-editor third-party notices are current (A9)
+        run: python3 tools/third-party-notices.py --check --scope npm

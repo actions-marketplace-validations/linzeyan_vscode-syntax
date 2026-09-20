@@ -193,15 +193,21 @@ def collect_npm() -> str:
     bundle. Anything `--external:` keeps out is removed afterwards, since poly
     does not ship it and owes no notice for it.
     """
-    listed = json.loads(
-        subprocess.run(
-            ["pnpm", "licenses", "list", "--prod", "--json"],
-            cwd=EDITOR,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-    )
+    try:
+        listed = json.loads(
+            subprocess.run(
+                ["pnpm", "licenses", "list", "--prod", "--json"],
+                cwd=EDITOR,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+    except FileNotFoundError:
+        sys.exit(
+            "pnpm is required to read poly-editor's dependency tree. "
+            "Where it is absent, ask for the other artifact with --scope cargo."
+        )
     external = bundled_externals()
     rows = []
     unknown = []
@@ -309,13 +315,27 @@ def main() -> None:
     parser.add_argument(
         "--self-test", action="store_true", help="check SPDX resolution only"
     )
+    # Two artifacts, two dependency managers, one allowlist: the poly binary's
+    # crates and the packages poly-editor's preview bundle carries. Separable
+    # because reading each needs that manager installed, and CI builds the two
+    # in different jobs -- the cargo half runs where there is no pnpm, and
+    # asking for both there failed the gate on a missing tool rather than on a
+    # missing notice.
+    parser.add_argument(
+        "--scope",
+        choices=("all", "cargo", "npm"),
+        default="all",
+        help="which artifact's notices to work on",
+    )
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return
-    # Two artifacts, two dependency managers, one allowlist: the poly binary's
-    # crates and the packages poly-editor's preview bundle carries.
-    for out, content in ((OUT, collect()), (EDITOR_OUT, collect_npm())):
+    artifacts = {"cargo": (OUT, collect), "npm": (EDITOR_OUT, collect_npm)}
+    wanted = artifacts.keys() if args.scope == "all" else (args.scope,)
+    for name in wanted:
+        out, collector = artifacts[name]
+        content = collector()
         if args.check:
             current = out.read_text() if out.exists() else ""
             if current != content:
