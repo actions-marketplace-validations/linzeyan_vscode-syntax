@@ -200,6 +200,37 @@ function themeVars(left, right) {
 }
 
 /**
+ * What the race between two renders left on the page.
+ *
+ * Not a comparison: the built-in has its own answer to the same problem, and
+ * this is about poly's. It is reported here because the property is only
+ * visible with the real bundle in a real webview, which is what this harness
+ * already builds.
+ */
+function staleRender(one) {
+  const stale = one.stale;
+  if (!stale) {
+    return ["the stale-render probe did not run"];
+  }
+  const problems = [];
+  // A probe that arrives too late measures a render that had already finished,
+  // and a counter that was never raced cannot be caught dropping the wrong one.
+  if (!stale.raced) {
+    problems.push("the first render finished before the second began: nothing raced");
+  }
+  if (stale.svgs !== 1) {
+    problems.push(`${stale.svgs} diagrams on a page that asked for one`);
+  }
+  if (stale.labels.includes("STALE")) {
+    problems.push("the abandoned render landed and the newer one had nothing left to replace");
+  }
+  if (!stale.labels.includes("LATEST")) {
+    problems.push(`the last content did not draw: ${stale.labels.slice(0, 3).join(", ")}`);
+  }
+  return problems;
+}
+
+/**
  * Diagram cases that drew nothing on either side.
  *
  * A source neither renderer understands compares equal to itself, so a typo in
@@ -324,6 +355,13 @@ async function main() {
       console.log("  !! no case drew a tooltip: the interaction probe measured nothing");
     }
     report(byTheme[theme]);
+
+    const racing = staleRender(right);
+    console.log(
+      racing.length === 0
+        ? "  a render overtaken by the next one leaves only the newer drawing"
+        : `  !! stale render: ${racing.join("; ")}`,
+    );
   }
 
   // The second question, and the one the reference comparison cannot reach:

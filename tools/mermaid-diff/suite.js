@@ -38,7 +38,7 @@ async function renderCase(markdown) {
  * them -- a document with many diagrams -- and because 40 extension-host round
  * trips to learn the same thing is 40 times the wall clock.
  */
-function page(rendered, scriptTag, nonce, csp) {
+function page(rendered, scriptTag, nonce, csp, probeStale) {
   const sections = rendered
     .map(({ name, html }) => `<section data-case="${name}">\n${html}\n</section>`)
     .join("\n");
@@ -176,9 +176,79 @@ ${scriptTag}
     };
   }
 
+  // Whether a render that is already running gives way to the one after it.
+  //
+  // The preview sends its content again on every keystroke, so poly numbers
+  // each pass and drops the result of one that has been overtaken. Nothing
+  // exercised that: the corpus renders once, and a counter that is never raced
+  // is a counter that could be deleted without a test going red.
+  //
+  // The shape here is the one where the counter is load-bearing, and it took a
+  // run with the counter removed to find it. Two details decide whether this
+  // measures anything at all:
+  //
+  //   * the source is edited in place, in the same element. Replacing the
+  //     element leaves the older pass holding a node with no parent, and
+  //     replaceWith on a detached node does nothing -- so the page came out
+  //     right with the counter deleted, and the probe passed for no reason.
+  //   * the first source is the quick one and the second is the slow one. The
+  //     older pass has to finish first to have anything to corrupt; if it
+  //     finishes last, the newer drawing is already in the document and the
+  //     older one lands on a detached node again.
+  //
+  // With those two, an unguarded render leaves the abandoned drawing on screen
+  // for good: it replaces the block, and the pass that should have won then
+  // finds nothing to replace.
+  //
+  // poly's side only: the built-in has its own answer to the same problem, and
+  // this is about poly's.
+  async function raceRenders() {
+    const host = document.createElement("section");
+    host.dataset.case = "stale-render";
+    const block = document.createElement("pre");
+    block.className = "poly-mermaid";
+    host.append(block);
+    document.body.append(host);
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    // Built by concatenation: this lives inside a template literal, so a
+    // backtick would end the page and a dollar-brace would be interpolated
+    // here in node rather than there in the browser.
+    const slow = "graph TD\\n  a[LATEST] --> b0[KEPT 0]\\n"
+      + Array.from({ length: 400 }, (_, i) =>
+        "  b" + i + "[KEPT " + i + "] --> b" + (i + 1) + "[KEPT " + (i + 1) + "]"
+      ).join("\\n");
+    const fast = "graph TD\\n  z[STALE] --> y[GONE]";
+
+    block.textContent = fast;
+    window.dispatchEvent(new Event("vscode.markdown.updateContent"));
+    // No pause before the second keystroke, and none is needed: the listener
+    // calls draw synchronously, so by the time dispatch returns the first pass
+    // has taken its number and is parked on its first await. Waiting instead
+    // means guessing how long a diagram takes -- 40ms and 150 nodes was the
+    // first guess, and the probe reported that the render had already landed
+    // and nothing raced.
+    const raced = host.querySelector("svg") === null;
+    block.textContent = slow;
+    window.dispatchEvent(new Event("vscode.markdown.updateContent"));
+    await wait(15000);
+
+    const svg = host.querySelector("svg");
+    // Only the three labels that answer the question: the slow diagram carries
+    // hundreds, and none of the rest tells anyone which pass won.
+    const labels = svg
+      ? [...new Set(
+        Array.from(svg.querySelectorAll("text, foreignObject div, foreignObject span"), (el) => clean(el.textContent))
+          .filter((label) => label === "LATEST" || label === "STALE" || label === "GONE"),
+      )].sort()
+      : [];
+    const result = { raced, svgs: host.querySelectorAll("svg").length, labels };
+    host.remove();
+    return result;
+  }
+
   let settled = 0;
   let last = "";
-  const timer = setInterval(() => {
+  const timer = setInterval(async () => {
     const now = Array.from(document.querySelectorAll("section[data-case]"))
       .map((s) => s.querySelectorAll("svg").length).join(",");
     // Rendering is asynchronous and per diagram, so the page is done when it
@@ -191,6 +261,7 @@ ${scriptTag}
       for (const section of document.querySelectorAll("section[data-case]")) {
         after[section.dataset.case] = measure(section);
       }
+      const stale = ${probeStale} ? await raceRenders() : null;
       // What the editor actually called this theme. The page does not set it:
       // both renderers decide light from dark by reading it, so a suite that
       // wrote it would be handing them the answer -- and one that never
@@ -202,6 +273,7 @@ ${scriptTag}
         pageErrors: errors,
         bodyClass: document.body.className,
         vars: window.__vars,
+        stale,
       });
     }
   }, 250);
@@ -262,7 +334,7 @@ async function measureTheme(theme, rendered, side, builtIn) {
     }"></script>`
     : `<script src="${panel.webview.asWebviewUri(vscode.Uri.file(join(editorDist, "preview.js")))}"></script>`;
 
-  panel.webview.html = page(rendered, scriptTag, nonce, csp);
+  panel.webview.html = page(rendered, scriptTag, nonce, csp, !builtIn);
 
   const measured = await new Promise((resolve) => {
     panel.webview.onDidReceiveMessage(resolve);
@@ -272,6 +344,7 @@ async function measureTheme(theme, rendered, side, builtIn) {
 
   return {
     bodyClass: measured.bodyClass ?? "",
+    stale: measured.stale ?? null,
     vars: measured.vars ?? {},
     cases: Object.fromEntries(
       rendered.map(({ name, group }) => [name, {
