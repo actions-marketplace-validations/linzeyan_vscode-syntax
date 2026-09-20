@@ -467,6 +467,11 @@ jobs:
       # poly-editor, and the e2e step downloaded the VSCode this reuses.
       - name: Reference lens lands on declarations only
         run: xvfb-run -a make ref-lens
+      # And the same trick for the table of contents: the anchors it writes,
+      # compared against the ones the preview's own renderer writes. Same
+      # VSCode, same installed extension, so it costs a minute on top.
+      - name: Heading anchors match the preview's
+        run: xvfb-run -a make toc-fuzz
       # The other half of A9, here because it needs the tree the step above just
       # installed: what the preview bundle carries is decided by pnpm's
       # resolution, not by a manifest anyone can read without it.

@@ -34,7 +34,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
 	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus editor-diff mermaid-diff engine-diff \
-	lsp-fmt-diff ref-lens bump control clean
+	lsp-fmt-diff ref-lens toc-fuzz bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -139,6 +139,19 @@ editor: ## Typecheck, test, build and package poly-editor
 # real server reports.
 ref-lens: ## Where poly's reference lens lands, asked of a real language server
 	node tools/ref-lens-check/run.js
+
+# The table of contents command's anchors against the ones the preview writes,
+# for a corpus of headings that is half stated rules and half generated
+# punctuation. A gate for the same reason ref-lens is: the reference is the
+# editor's own renderer, reached through `markdown.api.render`, and nothing is
+# downloaded that `e2e` has not already downloaded.
+#
+# It earned its place on the first run: 134 of 448 anchors did not match, in a
+# module whose comment claimed its slugifier was VSCode's "transcribed
+# character for character". The unit tests could not see it -- they assert
+# against examples written by whoever wrote the rule.
+toc-fuzz: ## Heading anchors against the ones VSCode's own preview writes
+	node tools/toc-fuzz/run.js
 
 # The offline half of ci.yml's grammars job. The other half re-fetches every
 # pinned grammar, which needs the network and a token; what stays here is
@@ -279,7 +292,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ref-lens ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ref-lens toc-fuzz ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0
