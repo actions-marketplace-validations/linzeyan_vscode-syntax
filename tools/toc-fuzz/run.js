@@ -118,17 +118,16 @@ function classDisagreements(builtinBundle, polySource) {
   return disagree;
 }
 
-/** The app bundle of the newest cached build, where the built-ins live. */
-function appRoot() {
-  const executable = cachedVSCode();
-  if (!executable) {
-    return "/Applications/Visual Studio Code.app/Contents/Resources/app";
-  }
-  return resolve(executable, "..", "..", "Resources", "app");
-}
-
-/** The newest VSCode already downloaded, ordered by version and not by name. */
-function cachedVSCode() {
+/**
+ * The newest VSCode already downloaded, or none.
+ *
+ * `@vscode/test-electron` lays a build out the way its platform does: a
+ * bundle on macOS, `resources/app` beside the binary everywhere else. Only
+ * looking for the bundle made this return nothing on Linux, where the run then
+ * fell through to a hard-coded `/Applications` path that cannot exist -- CI
+ * tokenized all 448 headings and then failed reading the editor's own rule.
+ */
+function cachedBuild() {
   if (!existsSync(CACHE)) return null;
   const builds = readdirSync(CACHE)
     .map((name) => ({ name, version: /(\d+)\.(\d+)\.(\d+)$/.exec(name) }))
@@ -140,8 +139,34 @@ function cachedVSCode() {
     );
   const build = builds.pop();
   if (!build) return null;
-  const macos = join(CACHE, build.name, "Visual Studio Code.app", "Contents", "MacOS");
-  return existsSync(macos) ? join(macos, readdirSync(macos)[0]) : null;
+  const dir = join(CACHE, build.name);
+  const macos = join(dir, "Visual Studio Code.app", "Contents", "MacOS");
+  // The app directory is found by looking for it rather than by deriving it
+  // from the executable, because the executable is the part whose name varies
+  // -- `Electron`, `code`, `Code.exe` -- and it is the optional half here: it
+  // only saves a download, while the app directory is what the comparison
+  // cannot run without.
+  const app = existsSync(macos)
+    ? join(dir, "Visual Studio Code.app", "Contents", "Resources", "app")
+    : join(dir, "resources", "app");
+  if (!existsSync(app)) return null;
+  const executable = existsSync(macos)
+    ? join(macos, readdirSync(macos)[0])
+    : [join(dir, "code"), join(dir, "Code.exe")].find((path) => existsSync(path));
+  return { app, executable };
+}
+
+/** The app bundle the built-ins live in, said out loud when there is none. */
+function appRoot() {
+  const installed = "/Applications/Visual Studio Code.app/Contents/Resources/app";
+  const found = cachedBuild()?.app ?? (existsSync(installed) ? installed : null);
+  if (!found) {
+    throw new Error(
+      `no VSCode to read the slugifier out of: nothing usable under ${CACHE}. `
+        + "Run `make e2e` first, or install VSCode.",
+    );
+  }
+  return found;
 }
 
 async function main() {
@@ -176,7 +201,13 @@ async function main() {
       POLY_TOC_SEED: String(flag("--seed", "20260920")),
       POLY_TOC_ROUNDS: String(flag("--rounds", "400")),
     },
-    ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
+    // Both, so a machine with nothing cached downloads into the same place the
+    // end-to-end tests do rather than making a second copy beside the repo --
+    // which is what CI did, and then looked for the first one.
+    cachePath: CACHE,
+    ...(cachedBuild()?.executable
+      ? { vscodeExecutablePath: cachedBuild().executable }
+      : {}),
     launchArgs: [
       `--folder-uri=${pathToFileURL(join(SCRATCH, "workspace")).toString()}`,
       `--user-data-dir=${join(SCRATCH, "user-data")}`,
