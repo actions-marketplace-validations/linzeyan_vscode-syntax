@@ -2,15 +2,21 @@ name: Tool Sync
 
 # The other half of R1. Grammar Sync has kept the grammars current since M5;
 # the twelve external linters were pinned in Rust and bumped by hand, so poly
-# reported whatever ruff said the day someone last remembered.
+# reported whatever shellcheck said the day someone last remembered.
 #
-# Monday 08:00 UTC: after Grammar Sync (06:00) so the two do not open PRs on
-# top of each other, and after Action tag (07:00), which is the other Monday
+# The 1st, 08:00 UTC: after Grammar Sync (06:00) so the two do not open PRs on
+# top of each other, and after Action tag (07:00), which is the other scheduled
 # job. Note: PRs opened with GITHUB_TOKEN do not trigger CI -- close/reopen the
 # PR (or push to its branch) to run checks before merging.
+#
+# Monthly rather than weekly, unlike the pins themselves: a version here is
+# pinned with its sha256 either way, so the cadence only decides how long a
+# fixed upstream bug goes unnoticed against the cost of reviewing a PR that
+# re-lints the whole repo. A tool that needs picking up sooner than the 1st is
+# what workflow_dispatch is for.
 on:
   schedule:
-    - cron: "0 8 * * 1"
+    - cron: "0 8 1 * *"
   workflow_dispatch:
 
 permissions:
@@ -80,7 +86,7 @@ jobs:
             exit 1
           fi
           {
-            echo "Automated weekly external tool refresh. Every pinned"
+            echo "Automated monthly external tool refresh. Every pinned"
             echo "(version, platform) sha256 came from the release API and was"
             echo "verified by downloading on this runner."
             echo
@@ -98,7 +104,7 @@ jobs:
             echo
             echo "CI does not auto-run on token-created PRs — close/reopen to trigger."
           } > /tmp/pr-body.md
-          if ! gh pr create --title "tool-sync: weekly external linter refresh" \
+          if ! gh pr create --title "tool-sync: monthly external linter refresh" \
                --body-file /tmp/pr-body.md --base main --head "$BRANCH"; then
             if ! gh pr edit "$BRANCH" --body-file /tmp/pr-body.md; then
               echo "::error title=pr create failed::Branch $BRANCH is pushed, but opening the PR failed — 'Allow GitHub Actions to create and approve pull requests' defaults to off in Settings > Actions > General"

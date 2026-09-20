@@ -1,0 +1,6 @@
+{
+  "greeting": "Hello {{ name }}, you have {{count}} unread messages",
+  "image": "{{ .Values.registry }}/poly:{{ .Chart.AppVersion }}",
+  "plain": "a string with no braces in it",
+  "replicas": 3
+}

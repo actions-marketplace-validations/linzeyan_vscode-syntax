@@ -9,12 +9,24 @@ file is current (CI drift gate).
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "extensions" / "lsp" / "THIRD-PARTY-NOTICES.md"
+EDITOR = ROOT / "extensions" / "editor"
+EDITOR_OUT = EDITOR / "THIRD-PARTY-NOTICES.md"
+
+# npm packages whose `license` field is missing, and what their own LICENSE file
+# says instead. An entry here is a claim about a file on disk, so it names the
+# file: khroma ships `license` starting "The MIT License (MIT)" and simply omits
+# the field from its package.json. Without this the run stops, which is the
+# right default -- a package that documents nothing is not silently permissive.
+NPM_LICENSE_FILES = {
+    "khroma": ("MIT", "license"),
+}
 
 # A9/N5 allowlist for everything the binary statically links. Ordered by
 # preference: when a crate offers a choice we take the earliest entry, so MIT
@@ -22,6 +34,12 @@ OUT = ROOT / "extensions" / "lsp" / "THIRD-PARTY-NOTICES.md"
 # there is no patched source form we would owe anyone under §3.1. Copyleft with
 # no permissive alternative (GPL/AGPL/SSPL, bare LGPL) is not on the list and
 # fails the build rather than landing quietly in the notices.
+#
+# PSF-2.0 arrived with ruff's linter: libcst carries `MIT AND (MIT AND
+# PSF-2.0)` because parts of it derive from CPython's own grammar. It is the
+# licence CPython itself ships under -- permissive, no copyleft, attribution
+# only -- so it belongs with the rest of this list rather than being a reason
+# to refuse the dependency.
 ALLOWED = (
     "MIT",
     "Apache-2.0",
@@ -34,6 +52,7 @@ ALLOWED = (
     "Unlicense",
     "MIT-0",
     "CC0-1.0",
+    "PSF-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "CDLA-Permissive-2.0",
@@ -154,6 +173,109 @@ def collect() -> str:
     return "\n".join(lines)
 
 
+def bundled_externals() -> set[str]:
+    """npm packages poly-editor's build deliberately leaves out of the bundle.
+
+    Read off the build command rather than listed here, because the two would
+    drift and the drift is invisible: a package dropped from `--external:` would
+    start shipping without appearing in the notices, which is the exact failure
+    this file exists to prevent. `vscode` is the editor API, not a package.
+    """
+    build = json.loads((EDITOR / "package.json").read_text())["scripts"]["build"]
+    return set(re.findall(r"--external:([@\w./-]+)", build)) - {"vscode"}
+
+
+def collect_npm() -> str:
+    """The packages esbuild bundles into poly-editor's markdown preview script.
+
+    `pnpm licenses` rather than a walk of node_modules: it resolves the same
+    tree the build resolves, and `--prod` is the half of it that can reach the
+    bundle. Anything `--external:` keeps out is removed afterwards, since poly
+    does not ship it and owes no notice for it.
+    """
+    try:
+        listed = json.loads(
+            subprocess.run(
+                ["pnpm", "licenses", "list", "--prod", "--json"],
+                cwd=EDITOR,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+    except FileNotFoundError:
+        sys.exit(
+            "pnpm is required to read poly-editor's dependency tree. "
+            "Where it is absent, ask for the other artifact with --scope cargo."
+        )
+    external = bundled_externals()
+    rows = []
+    unknown = []
+    disallowed = []
+    for packages in listed.values():
+        for pkg in packages:
+            name = pkg["name"]
+            if name in external:
+                continue
+            # pnpm hands back some expressions already parenthesised
+            # ("(MPL-2.0 OR Apache-2.0)"), and the line below adds its own.
+            license_ = (pkg.get("license") or "").strip()
+            if license_.startswith("(") and license_.endswith(")"):
+                inner = license_[1:-1]
+                if "(" not in inner and ")" not in inner:
+                    license_ = inner
+            source = ""
+            if license_ in ("", "Unknown"):
+                override = NPM_LICENSE_FILES.get(name)
+                if override is None:
+                    unknown.append(name)
+                    continue
+                license_, source = override
+            chosen, rejected_some = choose_license(license_)
+            if chosen is None:
+                disallowed.append(f"{name} ({license_})")
+                continue
+            for version in pkg.get("versions") or [""]:
+                rows.append(
+                    (
+                        name,
+                        version,
+                        license_,
+                        chosen if rejected_some else None,
+                        source,
+                        pkg.get("homepage") or "",
+                    )
+                )
+    if unknown:
+        sys.exit(f"npm packages without license metadata (resolve manually): {unknown}")
+    if disallowed:
+        sys.exit(
+            "npm packages outside the A9 license allowlist "
+            f"({', '.join(ALLOWED)}): {disallowed}"
+        )
+    rows.sort()
+    lines = [
+        "# Third-party notices — poly-editor",
+        "",
+        "The markdown preview script (`dist/preview.js`) bundles mermaid and the",
+        "packages below. Generated by tools/third-party-notices.py from",
+        "`pnpm licenses list --prod` — do not edit by hand. Licenses are checked",
+        "against the same A9 allowlist the poly binary uses; where a package also",
+        "offers one poly does not accept, the term poly relies on is named inline.",
+        "",
+        "Packages the build marks `--external:` are absent, because they are not",
+        "shipped.",
+        "",
+    ]
+    for name, version, license_, taken, source, homepage in rows:
+        suffix = f" — {homepage}" if homepage else ""
+        note = f"; poly takes {taken}" if taken else ""
+        via = f"; from its {source} file" if source else ""
+        lines.append(f"- {name} {version} ({license_}{note}{via}){suffix}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 # A gate that stops working is worse than no gate: --check would still pass on
 # a tree whose licenses were never really evaluated. These pin the behavior the
 # allowlist depends on, including the copyleft cases we have no crate for today.
@@ -193,21 +315,37 @@ def main() -> None:
     parser.add_argument(
         "--self-test", action="store_true", help="check SPDX resolution only"
     )
+    # Two artifacts, two dependency managers, one allowlist: the poly binary's
+    # crates and the packages poly-editor's preview bundle carries. Separable
+    # because reading each needs that manager installed, and CI builds the two
+    # in different jobs -- the cargo half runs where there is no pnpm, and
+    # asking for both there failed the gate on a missing tool rather than on a
+    # missing notice.
+    parser.add_argument(
+        "--scope",
+        choices=("all", "cargo", "npm"),
+        default="all",
+        help="which artifact's notices to work on",
+    )
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return
-    content = collect()
-    if args.check:
-        current = OUT.read_text() if OUT.exists() else ""
-        if current != content:
-            sys.exit(
-                f"{OUT.relative_to(ROOT)} is stale; run tools/third-party-notices.py"
-            )
-        print(f"{OUT.relative_to(ROOT)} is current")
-        return
-    OUT.write_text(content)
-    print(f"wrote {OUT.relative_to(ROOT)} ({content.count(chr(10))} lines)")
+    artifacts = {"cargo": (OUT, collect), "npm": (EDITOR_OUT, collect_npm)}
+    wanted = artifacts.keys() if args.scope == "all" else (args.scope,)
+    for name in wanted:
+        out, collector = artifacts[name]
+        content = collector()
+        if args.check:
+            current = out.read_text() if out.exists() else ""
+            if current != content:
+                sys.exit(
+                    f"{out.relative_to(ROOT)} is stale; run tools/third-party-notices.py"
+                )
+            print(f"{out.relative_to(ROOT)} is current")
+            continue
+        out.write_text(content)
+        print(f"wrote {out.relative_to(ROOT)} ({content.count(chr(10))} lines)")
 
 
 if __name__ == "__main__":

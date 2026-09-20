@@ -1,0 +1,6 @@
+/* A stylesheet a template engine fills in before it ships. */
+.banner {
+  color: {{ .Theme.Accent }};
+  background: #202020;
+  margin: 0 auto;
+}

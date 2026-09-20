@@ -28,6 +28,10 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - 輸出標準 TextMate scope，**任何現有 color theme 直接生效**，不自帶配色。
 - 部分語言改採比內建更好的社群文法（如 rust 用 dustypomerleau/rust-syntax）。
 - 文法一律以 pinned commit 從上游 repo／marketplace VSIX 同步，不手改。
+- **markdown 清單按 Enter 自動接續**下一項（`-`／`*`／`+`、`1.`／`1)`、`- [ ]`、`>`），
+  VSCode 內建沒有這個行為。同一份規則也套用在 `SKILL.md`、`*.prompt.md`、
+  `*.instructions.md`、`.claude/agents/**`、`.claude/rules/**` 這些 VSCode 1.120 起
+  不再算 `markdown` 的檔案上。有序清單接出來的是 `1.`（`poly fmt` 保留這種寫法）。
 - **零執行期程式碼**，不佔 extension host 資源。
 
 ### poly-lsp — 編輯器整合
@@ -47,17 +51,18 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **語言伺服器（預設關閉）**：`poly.languageServers` 打開後，poly 會啟動專案自己
   toolchain 裡的 language server，把 hover、go-to-definition、declaration、type
   definition、implementation、references、outline、completion、signature help、
-  symbol highlight、folding、expand selection、rename、code action 路由給它。目前七個：
+  symbol highlight、folding、expand selection、rename、code action 路由給它。目前八個：
   gopls（Go）、rust-analyzer（Rust）、clangd（C／C++）、sourcekit-lsp（Swift）、terraform-ls
-  （Terraform）、lua-language-server（Lua）、buf（Protobuf）。poly **不實作**這些功能，
+  （Terraform）、lua-language-server（Lua）、buf（Protobuf）、arity（R）。poly **不實作**這些功能，
   server 一律從 PATH 找，找不到就說一聲——所以品質就是那支 server 的品質。
-  **buf 是唯一的例外**，poly 會代抓：其他 server 都得配合建置專案的 toolchain（gopls 讀
-  go.mod 的 Go 版本、rust-analyzer 要編譯該 crate 的 rustc），而 `.proto` 背後沒有建置，
-  buf 也早就是 poly 釘死版本代抓的 protobuf formatter／linter，所以 protobuf 不必先裝
+  **buf 與 arity 是例外**，poly 會代抓：其他 server 都得配合建置專案的 toolchain（gopls 讀
+  go.mod 的 Go 版本、rust-analyzer 要編譯該 crate 的 rustc），而 `.proto` 與 `.R` 背後沒有建置，
+  這兩支也早就是 poly 釘死版本代抓的 formatter／linter，所以 protobuf 與 R 不必先裝
   任何東西。實際能用
   哪幾項由 server 自己宣告，十四項裡：clangd 與 rust-analyzer 給滿 14、gopls 13、
-  sourcekit-lsp 12、lua-language-server 12、buf 10、terraform-ls 只有 7。有一個例外值得知道：
-  Swift 的 Go to Declaration 會失敗，Go to Definition 正常。**code action 只給燈泡那
+  sourcekit-lsp 12、lua-language-server 12、arity 11、buf 10、terraform-ls 只有 7。有兩個例外值得知道：
+  Swift 的 Go to Declaration 會失敗，Go to Definition 正常；arity 的 hover 讀的是
+  `arity index` 從機器上已安裝的 R 套件收集來的說明，沒裝 R 就是空的（其餘十項照常）。**code action 只給燈泡那
   些**：`editor.codeActionsOnSave` 跑的 `source.*` 一律不轉，否則會跟 poly 的格式化在
   同一次存檔搶同一段程式碼；代價是 gopls 的「Source Action…」選單在 poly 下是空的。
   **poly 自己的 lint 不會因此消失**：server 的診斷是跟 poly 的合併，不是取代，所以
@@ -87,31 +92,155 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **`Poly: Toggle Bold` ／ `Toggle Italic`**：`cmd/ctrl+b`、`cmd/ctrl+i`，只在
   markdown 檔生效。產生 `**bold**` 與 `_italic_`——就是 `poly fmt` 正規化出來的那兩種，
   不會被下一次存檔改掉。
+- **清單接續**：在清單項目上按 Enter 接出下一項，**有序清單號碼遞增**（整份寫成 `1.` 的
+  清單維持 `1.`），任務項接出 `- [ ]`，**空的項目按 Enter 結束清單**（往外退一層，最外層
+  就清掉 marker）。markdown 家族與 yaml 都有，yaml 只認 sequence 的破折號——`>` 在那裡是
+  folded block scalar。
+- **清單縮排**：游標在清單項目的內容起點或更左邊時，`tab` 進一層、`shift+tab` 退一層。
+  一層是上一項內容開始的那一欄——`- x` 的內容在第 2 欄、`1. x` 在第 3 欄，也就是
+  `poly fmt` 正規化出來的縮排，不是 `editor.tabSize`。游標已經在文字裡、有選取、補全清單
+  開著、Copilot 的 inline suggestion 等著被接受時，Tab 原樣還給編輯器。
+- **Postfix completion**：`err.if` 展開成 `if err != nil { }`（Go）、`if (err) { }`
+  （TS）、`if err:`（Python）。go／rust／swift／ts／js／python／lua／c／cpp 都有。這是
+  文字重排不是分析——poly 只讀 `.` 左邊那串字元塞進模板，不知道 `err` 是什麼型別，也正
+  因為如此同一份表才蓋得住每個語言。排在 language server 的答案後面。
+- **`Poly: Extract Variable` ／ `Inline Variable`**：`cmd/ctrl+alt+v`、
+  `cmd/ctrl+alt+shift+v`，每個語言都通用。內建的 `editor.action.refactor` 開的是一張選單，
+  而你要的那一項每個 server 講法都不同（`Extract variable`／`Extract into variable`／
+  `Extract subexpression to variable`／`Extract to constant in enclosing scope`），快捷鍵
+  綁不到任何一個。poly 問的是 LSP 標準的 `refactor.extract`／`refactor.inline` kind，
+  過濾掉 `Extract function` 那種不是變數的，剛好一項就直接套用。做事的是語言自己的 server。
+- **跨檔案 next／previous change ＋ `Poly: Revert Selected Changes and Save`**：
+  `cmd/ctrl+alt+z`／`cmd/ctrl+alt+a` 跳到上／下一個有改動的檔案並落在改動上，`alt+q`
+  還原游標所在的 hunk 並存檔。VSCode 內建的是「同一個檔案裡的下一處改動」，跨檔案那
+  一步沒有——而那是 review 一個 branch 時按最多次的一步。順序照路徑排，所以同一顆
+  按鍵按兩次一定走同一條路。
 - **縮排上色**：每層縮排的空白塗底色，四色循環；**填不滿一層的空白另外標色**，那正是
   「縮排改到一半」的樣子。內建的 indent guides 畫線回答「block 從哪開始」，上色回答的
   是「我在第幾層」。只畫可見範圍，顏色走 theme color。
 - **Gutter 圖片預覽**：某行提到的圖檔存在就在 gutter 放縮圖。不寫語法解析器——
   markdown／HTML／CSS 各有寫法，而檔案存不存在才是真正的過濾器。
+- **markdown preview 的 mermaid 圖表**：```mermaid fence 在 preview 裡畫成圖，配色與字型
+  跟著編輯器主題。**VSCode 1.135 起內建就有這個功能，那時候 poly 會自動讓開**——所以這一項
+  實際生效的是 1.85 到 1.134。`poly.markdownMermaid.enabled` 可關。
 - **TODOs 檢視**：檔案總管多一個面板，列出整個 workspace 的 `TODO`／`FIXME`／`HACK`／
   `XXX`／`BUG`。只在面板顯示時才掃描，排除規則沿用 `files.exclude`／`search.exclude`，
   而且掃描上限會寫在標題上——「清單很短」跟「清單被截斷」不該長得一樣。
 
 ### poly — CLI
 
-- **內嵌引擎**（免安裝、離線可用）：TypeScript／JavaScript、JSON／JSONC、
-  Markdown、TOML、YAML、CSS／SCSS／LESS、HTML／Vue／Svelte／Astro／Jinja、
-  Python、SQL、XML、GraphQL、Dockerfile。
-- **外部工具**（受管下載）：shellcheck、shfmt、hadolint、actionlint、typos、
-  ruff、tflint、gofumpt、golangci-lint、stylua、selene、swiftlint、buf
-  （Protobuf 的格式化與 lint，同一支 binary 也是上面那個 language server）。版本釘死，
+- **內嵌引擎**（免安裝、離線可用）：TypeScript／JavaScript（lint 是 deno_lint 的
+  recommended 規則集，code 長 `deno_lint/*`；專案自己裝了 eslint 或 biome 就換它們，
+  同一份檔案不會被兩套規則各報一次）、JSON／JSONC、
+  Markdown（格式化，lint 是 rumdl 的 7 條規則，code 長 `rumdl/MD*`——見下面的說明）、
+  TOML、YAML、CSS／SCSS／LESS、HTML／Vue／Svelte／Astro／Jinja、
+  Python／Jupyter（格式化與 lint 都是 ruff）、SQL、XML、
+  GraphQL（格式化，lint 只有語法檢查——見下面的說明）、
+  Dockerfile（格式化，lint 是 poly 自己寫的規則，code 長 `poly/docker-*`；
+  hadolint 預設關閉，因為它跟 poly 的規則大部分重疊——見下面的外部工具），
+  Lua（格式化 stylua、lint selene）、
+  PHP（格式化與 lint 都是 mago，lint 是它 190 條規則裡的 7 條——見下面的說明）、
+  Protobuf（lint 是 poly 自己寫的規則，code 長 `poly/proto-*`；格式化仍是 buf）。
+  這些都是編進 binary 的 Rust library，
+  不再下載。拼字檢查（typos）也在裡面，而且不分語言——它讀的是每一個檔案，
+  包含 poly 認不出語言的那些。
+- **外部工具**（受管下載）：shellcheck、shfmt、actionlint、
+  tflint、gofumpt、golangci-lint、swiftlint、buf
+  （Protobuf 的格式化，同一支 binary 也是上面那個 language server）、
+  arity（R 的格式化與 lint，同樣也是上面那個 language server）。版本釘死，
   每個平台的 sha256 都預先寫進 `poly-tools.lock`——下載對不上就直接失敗，而不是
   信任第一次抓到的東西。
+- **zsh 只格式化，不 lint**（`.zsh`）。shfmt 讀得懂 zsh 文法，shellcheck 讀不懂——它只支
+  援 sh／bash／dash／ksh。以前 poly 把 `.zsh` 一起丟給 shellcheck，結果是拿 bash 文法解析
+  zsh：361 個真實 `.zsh` 檔案上產生 2,454 條 findings，佔量測語料裡全部 shellcheck findings
+  的 55%，其中最多的一條還是叫你替 zsh 根本不會做 word splitting 的展開加引號。現在 `.zsh`
+  是自己的語言，格式化照舊，lint 沒有——覆蓋回報的 `shellcheck N files` 也不再把它們算進
+  去。`[format.zsh]` 是它的設定區段。
+- **預設關閉但仍可用**：hadolint。poly 現在有自己的 Dockerfile 規則，兩邊一起跑
+  等於同一個缺陷印兩次、掛兩個 code、兩種嚴重度，`[lint] fail-on` 會變成看誰先講話。
+  拿 256 個真實 Dockerfile 量過：hadolint 的 shellcheck findings 是 poly 自己那套
+  的子集（65 對 534，沒有一個 code 是 hadolint 有而 poly 沒有的），而且位置更差
+  （每個 RUN 的第 1 欄，poly 指到出問題的那個字）。poly 沒有補的是它三條 info 級
+  規則：DL3047、DL3059、DL3066。想同時看兩邊就寫 `[tools] hadolint = "on"`，
+  poly 會照樣下載並執行它，不會囉嗦。
+- **actionlint 有兩組檢查關掉了**，都是同一個道理：poly 自己已經在做那件事。一是它
+  的 shellcheck pass——workflow 的 `run:` 由 poly 自己跑 shellcheck，掛
+  `shellcheck/SC…` 並指到出問題的那個字；開著等於同一個缺陷被 actionlint 用 error
+  再報一次、指在 `run:` 那一鍵。二是跟 poly 規則重疊的五個檢查：runner label、step
+  的未知 key、既沒 `uses:` 也沒 `run:` 的 step、event filter、permission scope。
+- **其中 runner label 那條原本會讓自架 runner 的專案一跑就整片紅。** 1,190 個真實
+  workflow 上，actionlint 全部 926 條 findings 有 655 條是它（70.7%），而其中 621
+  條是自架 runner 的名字：`amd-medium`、`blacksmith-4vcpu-ubuntu-2404`，某個 repo
+  自己的 pool 就佔 530 次。它沒有辦法知道那些名字是真的，而且每一條都是 error。poly
+  的規則只在三種情況出聲——已退役的 image、跟真名差一兩個字、不存在的版本號——其餘
+  一律當作自架或第三方 runner 放過。另外四個檢查關掉零成本：重複的 69 條全部落在同
+  一行同一欄，而且 poly 報得不比 actionlint 少（27:14、13:13、7:4、5:4）。代價只有
+  一項：你如果在 `.github/actionlint.yaml` 列了自己的 label，actionlint 讀得到而
+  poly 讀不到，那份清單裡的拼錯就沒人抓。actionlint 其餘的檢查一條都沒少，它的
+  expression type checker 更是它留在這裡的全部理由。
 - **只用專案 toolchain、不代裝**：rustfmt、clang-format、swift-format、
-  terraform fmt。
-- **Protobuf 的 lint 需要 buf module**：`.proto` 上方沒有 `buf.yaml` 就大聲跳過。
-  沒有 module 時 buf 會拿當前工作目錄當根目錄，`PACKAGE_DIRECTORY_MATCH` 會對正常的
-  package 亂噴，而且結果隨你從哪執行而變——會漂移的檢查比沒有檢查更糟（R5／A4）。
+  terraform fmt、`cargo clippy`。
+- **Rust 的 lint 是 `cargo clippy`**，範圍是整個 cargo workspace——跟 Go 的
+  golangci-lint（整個 module）、Terraform 的 tflint（一個目錄）同一個機制：存檔時
+  在編輯器裡跑的，跟 `poly check` 在 CI 裡跑的，是同一次呼叫。build 目錄是
+  `target/poly` 而不是預設的 `target/`，這樣你在終端打的 `cargo test` 不會等
+  編輯器（rust-analyzer 也是這麼做的）；代價是多一棵 build tree，第一次會編一次。
+  不想要就 `[tools] cargo = "off"`。
+- **TypeScript 裡的 `css`／`html`／`sql` 標籤模板會一起格式化**，用的是 poly 格式化
+  `.css`／`.html`／`.sql` 檔的同一個引擎，所以 styled-components 的樣式、lit 的模板存檔後
+  跟獨立檔案長得一樣。`styled.div` 與 `styled(Button)` 開頭的模板也算 CSS。插值
+  （`${…}`）原地保留，格式化不會動到它裡面的運算式。標籤是其他名字，或片段本身解析不了
+  （標籤模板常常只是一個片段，不是完整的檔案），就原樣留著——不會讓整個檔案格式化失敗。
+- **Protobuf 的 lint 是 poly 自己的規則**，不需要 buf module：`.proto` 上方沒有
+  `buf.yaml` 也照樣檢查（以前這種檔案是整個跳過的）。有 `buf.yaml` 的話，它的
+  `lint` 區段——`use`、`except`、`ignore`、`ignore_only`，v1 v2 都讀——決定哪幾條規則跑，
+  `// buf:lint:ignore` 註釋也照樣有效。poly 這 14 條對應 buf `BASIC` 那層的
+  單檔規則；buf `STANDARD` 多加的那批命名慣例（`ENUM_VALUE_PREFIX`、
+  `PACKAGE_VERSION_SUFFIX`、`SERVICE_SUFFIX` 等）、需要整個 module 的規則
+  （`PACKAGE_SAME_*`、`RPC_REQUEST_RESPONSE_UNIQUE` …）與需要解析 import 的規則
+  （`IMPORT_USED`、`PROTOVALIDATE` …）都沒有。編譯錯誤現在由 `poly fmt` 抓（那仍是 buf）。
+  poly 的 parser 還不支援 `edition = "2023"`，遇到讀不了的檔案會報
+  `poly/proto-unreadable`——那是「poly 沒檢查這個檔案」，不是「這個檔案有問題」。
   格式化不受影響，`.proto` 一律格式化。
+- **GraphQL 的 lint 只有語法檢查**（code 是 `graphql/syntax`，等級 error），與 TOML、
+  TypeScript 一樣是「這個檔案不是它副檔名說的那個語言」。用的是格式化時的同一支 parser
+  （apollo-parser，October 2021 版規格），所以編輯器與 CI 指的是同一個字元。
+  **不做 schema 驗證**，這是量過的決定：854 個真實 `.graphql` 上，驗證器報的東西有 98.8%
+  是「定義在別的檔案」——federation 的 `@link`、隔壁模組宣告的 type、只有幾個 type 而沒有
+  root 的 schema 片段。一份 schema 是好幾個檔案組起來的，而 poly 一次看一個檔案，那些不是
+  這個檔案的缺陷。
+- **Markdown 的 lint 是 rumdl 的 7 條規則**，全部只報壞掉的東西：相對連結指向不存在的檔
+  （MD057）、錨點不存在（MD051）、連結寫反 `(文字)[網址]`（MD011）、空連結（MD042）、
+  參考式連結沒有定義（MD052）、標題跳級（MD001）、圖片沒有 alt（MD045）。code 長
+  `rumdl/MD*`，rumdl 自己的 `rumdl-disable`／`rumdl-disable-next-line` 註解（`<!-- ... -->`
+  那種形式，寫成 HTML 註解）照樣有效，要整個關掉某一條就寫 `[lint] ignore`。
+  版面的規則（行長、標題與清單前後的空行、強調的寫法…）一條都不開，專案自己的
+  `.rumdl.toml` 也不讀：那些是 `poly fmt` 的事，開下去等於報 `poly fmt` 前一秒才寫出來的
+  東西——實測 4,947 個檔案，光 MD036 就有 1,054 條是格式化自己造出來的。
+  **一個已知落差**：MD051 只答得出同一個檔案裡的錨點。`other.md#section` 這種跨檔錨點，
+  rumdl 自己是先索引整棵樹才能檢查的，而 poly 一次只看一個檔案（編輯器裡本來也只有那一個
+  檔案），所以不報——同一批檔案裡有 58 條。
+- **PHP 的格式化是 mago**，預設就是 PSR-12 的 120 欄／4 空白，`[format.php]` 三個 knob
+  全部有效。`.php`／`.php4`／`.php5`／`.phtml`／`.ctp` 都認，模板裡的 HTML 不動。
+  **lint 只開 7 條**（code 長 `mago/*`，等級 warning）：`preg_quote()` 沒給 delimiter、
+  用 `==`／`===` 比對 token 或密碼、迴圈第一圈就必定跳出、`printf` 佔位符比引數多、
+  `finally` 裡有 return／break、短開頭標籤 `<?`、`explode()` 兩個引數寫反。
+  另外 `php/syntax`（等級 error）是「PHP 不會跑這個檔案」，與 TOML、TypeScript、GraphQL
+  同一種說法。**其餘 106 條預設規則一條都不開**，這是量過的決定：8 個真實 PHP 專案的
+  20,200 個檔案上，mago 的預設規則集報 83,756 條、命中 81.5% 的檔案，其中三分之二是
+  「每個檔案都要寫 `declare(strict_types=1)`」「不要用 `isset`」「不要用 `else`」這類
+  house style；它的 error 等級也有 64% 是複雜度指標而不是缺陷。專案自己的 `mago.toml`
+  不讀，`@mago-ignore` 註釋也不是 poly 的抑制方式——要關某一條就寫 `[lint] ignore`，
+  單行就寫 `// poly: ignore mago/<rule>`。
+- **R（`.R`／`.r`）的格式化、lint 與語言功能都是 arity**，一支 binary，poly 代抓，
+  不必先裝 R。專案自己的 `arity.toml` 或 `air.toml`（版面、`select`／`ignore`）照樣生效，
+  `# arity-ignore <rule>: 理由` 註釋也照樣有效。code 長 `arity/*`；lint 以 R 套件為
+  單位跑——`R/` 底下互相引用的符號不會被誤報成未定義，編輯器與 `poly check` 是同一個答案。
+  **自己宣告是產生出來的檔案不會被重排**：開頭八行有註釋寫 `do not edit` 的，`poly fmt`
+  一律跳過——Rcpp 的 `RcppExports.R`、cpp11 的 `cpp11.R`、rlang 的
+  `import-standalone-*.R` 都是這一類。**剩下一個已知落差**：arity 另外還跳過 `revdep/`
+  與 `renv/` 這兩個目錄，poly 不跳，因為那底下是手寫腳本而不是產生出來的（七個真實 R
+  套件、1,464 個檔裡有 8 個）。不想格式化就寫進 `[format] exclude`。
 - **`poly minify [路徑...]`**：把 JSON／JSONC 就地壓成一行，移除空白與註解。走跟
   `poly fmt` 同一套 walk 與 `[format] exclude`，所以 CLI 與編輯器命令答案一致。
   獨立命令而不是 `poly fmt` 的旗標——兩者契約相反，`fmt` 是「符合專案風格」，而沒有
@@ -134,9 +263,9 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 選檔案 → 重新載入視窗。或用命令列：
 
 ```sh
-code --install-extension poly-syntax-highlight-0.9.0.vsix
-code --install-extension poly-lsp-darwin-arm64-0.9.0.vsix
-code --install-extension poly-editor-0.9.0.vsix
+code --install-extension poly-syntax-highlight-0.13.2.vsix
+code --install-extension poly-lsp-darwin-arm64-0.13.2.vsix
+code --install-extension poly-editor-0.13.2.vsix
 ```
 
 之後的版本由 poly-lsp 自己提示更新，不必再手動抓——它只更新你已經裝了的那幾個。
@@ -150,7 +279,7 @@ extension，只能手動裝。
 0.5.0 的更新提示還是會跳，但按下 Install 一定失敗，而且訊息會騙你：
 
 > Poly: automatic install failed (Error: release has no asset
-> poly-syntax-0.9.0.vsix). The VSIX files were downloaded — install them
+> poly-syntax-0.13.2.vsix). The VSIX files were downloaded — install them
 > manually via "Extensions: Install from VSIX".
 
 其實一個檔都沒下載（它在第一個找不到的 asset 就放棄了），所以「Show Files」按下
@@ -184,7 +313,7 @@ irm https://raw.githubusercontent.com/linzeyan/vscode-syntax/main/install.ps1 | 
 版本就設環境變數——`irm | iex` 沒辦法傳參數，所以兩邊都認得：
 
 ```sh
-POLY_VERSION=0.9.0 POLY_INSTALL_DIR=~/bin sh install.sh
+POLY_VERSION=0.13.2 POLY_INSTALL_DIR=~/bin sh install.sh
 ```
 
 Windows on ARM 上會裝 arm64 版，即使腳本本身跑在 x64 模擬層裡（從 ssh 或某些
@@ -210,12 +339,12 @@ SmartScreen 擋，處理方式見
 - run: poly check --strict .
 ```
 
-`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.9.0" }`——poly
+`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.13.2" }`——poly
 會改寫檔案，所以新版本自己跑進來有可能把綠的分支變紅。
 
 Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、放進 PATH。順便
 快取 poly 之後會下載的外部 linter（`with: { cache: false }` 可關）——冷跑一次
-`poly check` 在 lint 任何東西之前要先抓幾十 MB 的 shellcheck、ruff。
+`poly check` 在 lint 任何東西之前要先抓幾十 MB 的 shellcheck、hadolint。
 
 ### 在容器裡用
 
@@ -223,13 +352,52 @@ Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、
 docker run --rm -v "$PWD:/work" ghcr.io/linzeyan/poly check --strict .
 ```
 
-`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.9.0`、`0.9`；pre-release
+`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.13.2`、`0.13`；pre-release
 不會動到 `latest`。image 裡的 binary 就是 release 附的那一支，不是另外編的。
+
+image **不含任何語言 toolchain**，只含 poly 自己會下載的那些 linter。所以 Rust
+專案在容器裡要拿掉 `--strict`——`cargo clippy` 只可能來自 toolchain，poly 下載不
+到，`--strict` 會（正確地）把它當成錯誤。同理 `poly fmt` 在容器裡不會有
+clang-format、swift-format、terraform fmt。
 
 外部 linter 快取在 `/cache`，CI 裡掛個 volume 上去就不用每次重抓：
 
 ```sh
 docker run --rm -v "$PWD:/work" -v poly-cache:/cache ghcr.io/linzeyan/poly check .
+```
+
+### 在 pre-commit 裡用
+
+單一 binary、沒有 runtime 依賴，直接當 hook 用。手寫 `.git/hooks/pre-commit`：
+
+```sh
+#!/bin/sh
+poly fmt --check --changed || {
+  echo "run: poly fmt --changed" >&2
+  exit 1
+}
+poly check --changed --strict
+```
+
+`--changed` 的範圍是 working tree vs HEAD 加上 untracked，比「只看 staged」寬——用
+`git add -p` 分次 stage 時會檢查到還沒 stage 的改動，是刻意的保守近似。
+
+用 pre-commit framework 的話它自己會把 staged 檔案逐個傳進來，範圍更準：
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: poly-fmt
+        name: poly fmt --check
+        entry: poly fmt --check
+        language: system
+        pass_filenames: true
+      - id: poly-check
+        name: poly check
+        entry: poly check --strict
+        language: system
+        pass_filenames: true
 ```
 
 ### 驗證裝好了
@@ -253,6 +421,8 @@ poly check --strict <paths...> # 工具缺席時視為錯誤，而不是跳過�
 poly fmt --changed             # 只處理 git 變更的檔案（pre-commit 用）
 poly tools list                # 工具解析狀態
 poly tools install [tool...]   # 預先抓好受管工具（離線環境先在有網路的機器跑）
+poly config export             # 印出含所有預設值與註解的 poly.toml
+poly deadcode [路徑]           # 進入點走不到的程式碼（見下）
 poly lsp                       # 給編輯器用的 LSP daemon
 poly --help                    # 完整說明
 poly --version                 # 版本（確認 PATH 上是哪一支）
@@ -268,6 +438,51 @@ poly --version                 # 版本（確認 PATH 上是哪一支）
 說一聲然後跳過那些檔案，exit code 不受影響。這對「不是每台機器都裝了每套
 toolchain」是對的預設，但 CI 需要的是相反的答案——`--strict` 就是那個開關。
 
+### `poly deadcode`：進入點走不到的程式碼
+
+跟 `poly check` 分開，因為它回答的是另一個問題。單檔 linter 問「這個 package／模組裡
+有沒有人提到它」，所以**匯出的東西永遠不算 unused**——外面可能有人用。這個命令問的是
+「從進入點有沒有任何路徑會跑到它」，那才是刪掉一段程式碼之前要問的問題。代價是它要花
+一次 build 的時間，而且對 library 來說每個匯出的 API 都會是「死的」（呼叫者在別人的
+repo 裡）——所以它是你去問的，不是存檔時自動跑的，也不進 CI gate。
+
+**四個語言，三支工具，poly 一支都不自己寫**（R7／A6）：
+
+| 語言           | 工具                              | 範圍怎麼決定                                     |
+| -------------- | --------------------------------- | ------------------------------------------------ |
+| Go             | `golang.org/x/tools/cmd/deadcode` | 往上找到 `go.work` 就用它，否則最近的 `go.mod`   |
+| TypeScript／JS | knip                              | 那個 knip 旁邊的 `package.json`                  |
+| Python         | vulture                           | 最近的 `pyproject.toml`／`setup.py`／`setup.cfg` |
+
+給一個檔案就只跑它那個語言的；給一個目錄，則凡是往上找得到標記的都跑——monorepo 裡
+只回答三個語言中的一個，是沒有人要的子集。
+
+**Rust 沒有，這是誠實的空白**：rustc 自己的 `dead_code` 已經隨 `cargo clippy` 每次存檔
+就到了，而跨 crate 的那一問沒有主流工具在回答。
+
+**Go 的跨 module 靠 `go.work`**：有 go.work 的話分析從 workspace 根開始，`liba` 裡只被
+`appb` 呼叫的函式就是活的；沒有 go.work，`liba` 根本不在 build list 裡。這是
+`Poly: Create go.work for the Open Go Modules` 那個命令的第二個用途。
+
+三支工具都跟著各自的 toolchain 走，poly 不代裝：
+
+```sh
+go install golang.org/x/tools/cmd/deadcode@latest   # Go
+npm install --save-dev knip                          # TypeScript／JavaScript
+pip install vulture                                  # Python
+poly deadcode .
+```
+
+vulture 是唯一需要 poly 幫忙的：它自己走目錄，而且不知道 venv 是什麼——直接指給它一個
+專案根目錄，會拿到 pip 內建那份 vendored 程式碼的幾千條回報。poly 改成把**自己走出來的
+檔案清單**交給它（同一套 `.gitignore` 與 `[lint] exclude`，跟 `poly check` 一致），再加
+一層 `--exclude` 擋掉 venv／site-packages。
+
+編輯器裡是 `Poly: Analyze Dead Code`，在終端跑同一行；上面這些語言的每個檔案，**第一行
+程式碼**上面也會有一條 `analyze dead code` lens（`poly.deadCodeCodeLens.enabled` 可關）。
+不是第 0 行——shebang、版權標頭、`//go:build` 都在那上面。一個檔一條，不是一個函式一條
+——分析本來就是整個 program 的，一個函式一條只是同一個答案的 N 個入口。
+
 ### 什麼算失敗：`--fail-on`
 
 poly 預設對**任何**問題都 exit 1，連 `info` 等級的錯字也算。要放寬就設嚴重度門檻：
@@ -280,6 +495,21 @@ poly check --fail-on never .     # 純報告，永遠 exit 0
 
 `--fail-on=warning` 與 `--fail-on warning` 都認得。低於門檻的問題**還是會印出來**，
 summary 會加註 `(N below fail-on)`，所以綠色的 run 有輸出不會被誤讀成 bug。
+
+四個等級是 poly 的判斷，不是照抄上游工具的：
+
+| 等級      | 意思                                   |
+| --------- | -------------------------------------- |
+| `error`   | 幾乎確定是缺陷：會壞、不安全，或不合法 |
+| `warning` | 可疑但可能是故意的，值得看一眼         |
+| `info`    | 風格與一致性，不影響正確性             |
+| `hint`    | 建議與偏好                             |
+
+同一份判準套到每個工具，所以 `--fail-on error` 在 Lua、SQL、Dockerfile、workflow 上
+擋的是同一類東西。本來就有等級而且意思相同的工具（shellcheck、clippy、biome、eslint、
+swiftlint、selene、tflint、hadolint、arity、rumdl）照用它們自己的；不排序的工具由 poly 排一次
+（ruff、golangci-lint、sqruff、deno_lint 是 warning，typos 是 info——deno_lint 把每一條
+都印成 error 是它 CLI 的顯示方式，不是分級）；poly 自己的規則則是一條規則一個等級。
 
 寫進 `poly.toml` 才能讓編輯器與 CI 同一套標準，而且兩邊可以不同——「沒格式化要擋，
 錯字不用」是很常見的政策：
@@ -332,6 +562,46 @@ schema.sql:1:1: warning [poly/unformatted] file is not formatted
 `poly/format`，位置指在 parser 停下來的地方；引擎畫的 code frame 縮排接在後面，一個
 問題仍然只佔一行有錨點的輸出。
 
+### 這次誰看過：coverage
+
+綠燈有兩種意思——「沒問題」跟「沒人看」。`poly check` 每次都在 stderr 印一份 coverage
+把兩者分開：這次走到的檔案是被誰檢查的、誰沒檢查、為什麼。
+
+```text
+coverage:
+  actionlint      6 files  ran
+  biome          64 files  absent — no node_modules/.bin/biome with a biome.json above these files
+  cargo          25 files  ran
+  deno_lint      27 files  ran
+  eslint         27 files  absent — no node_modules/.bin/eslint with an eslint config above these files
+  hadolint        1 file   off-by-default — add `hadolint = "on"` under [tools] to run it as well
+  poly/actions    6 files  ran
+  poly/docker     1 file   ran
+  ruff           12 files  ran
+  shellcheck     10 files  ran
+  toml            8 files  ran
+  typos         136 files  ran
+8 tools ran, 0 issues
+```
+
+只列**這次有檔案可看**的 checker：沒有 Go 的 repo 不會印 golangci-lint。狀態六種：
+
+| 狀態             | 意思                                           |
+| ---------------- | ---------------------------------------------- |
+| `ran`            | 跑過了                                         |
+| `missing`        | poly 找不到這支工具，`--strict` 會因此 exit 2  |
+| `disabled`       | `poly.toml` 寫了 `[tools] <名字> = "off"`      |
+| `off-by-default` | poly 預設不跑它，`= "on"` 才會                 |
+| `absent`         | 專案自己沒有（eslint／biome 只用專案裝的那份） |
+| `failed`         | 跑了但壞了，exit 2                             |
+
+`files` 是 poly 交給它的檔案數，不是它最後讀了幾個——工具自己的設定（`_typos.toml`
+的 exclude、`buf.yaml` 選的規則）還會再縮一次。Windows 沒有 shellcheck build，所以
+Dockerfile 的 `RUN` 與 workflow 的 `run:` 在那裡是 `missing` 而不是靜靜地跳過。
+
+同一份資料在 `--format json` 的 `summary.coverage`，四個欄位：`tool`、`files`、
+`status`、`reason`。
+
 ### 換個形狀：`--format`
 
 `--format` 只改 stdout 的形狀，**不改判定結果**——exit code 與 stderr 的 summary
@@ -356,11 +626,16 @@ run.sh:2:6   info      shellcheck/SC2086  Double quote to prevent globbing and w
 
 `json` 是給 pipeline 的。位置是 1-based（跟紀錄一致），`message` 完整保留（含引擎畫的
 code frame），`fix` 是跟終端機、編輯器一字不差的同一句話，`fatal` 直接告訴你這一筆在
-當前 `--fail-on` 下算不算擋——消費端不用重寫嚴重度排序：
+當前 `--fail-on` 下算不算擋——消費端不用重寫嚴重度排序。`category` 是**這是哪一類缺
+陷**，全部語言共用同一套詞（`unpinned-dependency`、`unused-code`、`silently-discarded`
+…），所以一份 pipeline 的 findings 可以照類別分組而不是照工具。poly 自己的規則每條都
+有；大部分上游規則是 `null`——ruff、clippy、eslint 各有數百條而且專案可以自由開關，替
+每一條取一個 poly 名字等於再養一套會漂移的規則表。`summary.uncategorized` 就是這一次
+有幾筆沒有類別：
 
 ```jsonc
 {
-  "version": 1,
+  "version": 2,
   "command": "check",
   "issues": [
     {
@@ -372,13 +647,27 @@ code frame），`fix` 是跟終端機、編輯器一字不差的同一句話，`
       "severity": "warning",
       "tool": "ruff",
       "rule": "F401",
+      "category": null,
       "message": "`os` imported but unused",
       "fix": "Remove unused import: `os`",
       "docs": "https://docs.astral.sh/ruff/rules/unused-import",
       "fatal": true
     }
   ],
-  "summary": { "issues": 1, "fatal": 1, "tools_ran": 6, "tools_missing": [], "tools_failed": [] }
+  "summary": {
+    "issues": 1,
+    "fatal": 1,
+    "uncategorized": 1,
+    "coverage": [
+      { "tool": "ruff", "files": 12, "status": "ran", "reason": null },
+      {
+        "tool": "shellcheck",
+        "files": 4,
+        "status": "missing",
+        "reason": "shellcheck has no managed build for win-x64 and is not on PATH"
+      }
+    ]
+  }
 }
 ```
 
@@ -396,6 +685,33 @@ code frame），`fix` 是跟終端機、編輯器一字不差的同一句話，`
 ```
 
 ## 設定
+
+### 要自己在 `settings.json` 設的
+
+poly **不寫使用者的 `settings.json`**（A8），所以下面這些必須自己來。少了它們，功能是
+接好的，只是畫面上什麼都不會出現：
+
+```jsonc
+{
+  // 語言功能（definition／references／inlay hints／call hierarchy…）預設是關的。
+  "poly.languageServers": true,
+  // gopls 出貨時 inlay hint 全關，而且開關是它跟 client 要的（workspace/configuration
+  // 的 gopls 區段）。rust-analyzer 與 clangd 預設就開，不必動。
+  "gopls": {
+    "hints": {
+      "assignVariableTypes": true,
+      "compositeLiteralFields": true,
+      "constantValues": true,
+      "parameterNames": true,
+      "rangeVariableTypes": true
+    }
+  },
+  // 點 `N refs`／`N impl` CodeLens 時開 peek 還是開 References 面板。預設 "peek"。
+  "references.preferredLocation": "view"
+}
+```
+
+### `poly.toml`
 
 `poly.toml` 是選用的。完全沒有設定檔時，語言用內建副檔名表判斷，格式化用各引擎
 預設值，走訪檔案時尊重 git 會尊重的忽略檔——`.gitignore`、`.ignore`、
@@ -437,6 +753,11 @@ use-tabs = false
 
 [lint]
 exclude = ["third_party/**"]
+ignore = ["typos/typo", "unused-code"] # 整個 repo 都不報這些
+
+[lint.severity] # 不同意 poly 的等級就改掉，最精確的那條贏
+unpinned-dependency = "info"
+"poly/docker-latest-base" = "error"
 
 [lint.per-file-ignores] # 只關掉某條規則，檔案照樣 lint
 "tests/fixtures/**" = ["ruff/F401"]
@@ -450,17 +771,65 @@ shellcheck = "C:/tools/shellcheck.exe"
 tflint = "off"
 ```
 
-`[lint.per-file-ignores]` 的規則代碼就是輸出裡印的那個——看到
-`[ruff/F401]` 就複製 `ruff/F401`，沒有第二套語法要查。它與 `exclude` 的差別是範圍：
-exclude 讓整個檔案不進 lint，per-file-ignores 只拿掉那一條，同一個檔的其他問題照
-報。少了工具名的 `"F401"` 會讓 poly.toml 解析失敗，而不是安靜地什麼都沒關掉。編輯
-器與 CI 讀同一份設定，所以關掉的規則在 Problems 裡也不會出現。
+規則代碼就是輸出裡印的那個——看到 `[ruff/F401]` 就複製 `ruff/F401`，沒有第二套語法要
+查。三個地方（`ignore`、`[lint.severity]`、`[lint.per-file-ignores]`）與原始碼裡的註
+釋用的是同一套寫法，差別只在範圍：`exclude` 讓整個檔案不進 lint，`ignore` 是整個 repo
+不報這條，per-file-ignores 只拿掉某個路徑的那一條，註釋只管一行。少了工具名的
+`"F401"` 會讓 poly.toml 解析失敗，而不是安靜地什麼都沒關掉。
 
-語言伺服器只認 VSCode settings 的 `poly.languageServers`，不進 `poly.toml`——那是
-「這台機器上我要不要讓 poly 接管 Go」的個人偏好，CI 根本不跑 `poly lsp`，寫進專案設定
-只會讓兩邊看到一個對方不在乎的鍵。server 一律從 PATH 找，poly 永遠不代裝：它必須
-跟蓋出這個專案的 toolchain 對得上，poly 選版本就是 poly 選錯版本。找不到會在
-`Poly` 輸出頻道說一聲，不會靜默沒作用。
+**也可以寫類別**（`unused-code`、`unpinned-dependency`…）：就是 `--format json` 那個
+`category`，一句話管到所有語言——今天決定「不看沒用到的程式碼」，明天加進來的語言照樣
+算數，不必回頭補 `vulture/*`。`poly config export` 印得出完整清單；打錯字會讓解析失敗，
+因為類別是 poly 自己的封閉集合，拼錯就永遠對不到任何東西。
+
+`[lint.severity]` 是專案跟 poly 的等級意見不同時用的——**最精確的那條贏**，所以類別設
+基準、`tool/rule` 設例外。它同時改終端機印的字、編輯器波浪線的顏色與 `fail-on` 擋不擋，
+三者是同一個決定。編輯器與 CI 讀同一份設定，所以關掉的規則在 Problems 裡也不會出現。
+
+要關掉的只是某一行而不是整個檔案時，把同一組代碼寫成註釋放進原始碼：
+
+```python
+import os  # poly: ignore ruff/F401
+```
+
+```dockerfile
+# poly: ignore poly/docker-apt-get-unpinned, shellcheck/SC2086
+RUN apt-get install -y $PACKAGES
+```
+
+註釋管自己這一行；獨佔一整行時再多管下面一行——長行與用 `\` 續行的指令沒地方擺行尾
+註釋，這個位置就是給它們的。代碼與 `tool/*` 跟設定檔那邊完全一樣，而且對 poly 跑的
+每一支工具都有效，包含下載回來的 shellcheck、actionlint。兩者的分工是：註釋指不到路
+徑，設定檔指不到行。
+
+Dockerfile 只認寫在上一行的形式：`poly fmt` 會把 Dockerfile 的行尾註釋搬到獨立一
+行，搬完就變成在管下一道指令，所以寫在行尾的會被報成 `poly/ignore-syntax`、而且什麼
+都不關——與其讓它現在有效、下次格式化後改去關別行，不如當場說清楚。這是唯一有這條規
+則的語言，其他語言的 formatter 都會把行尾註釋留在原地。
+
+有 `#`／`//`／`--` 行註釋的語言才讀得到；markdown、HTML、CSS 這類沒地方寫，就只剩
+per-file-ignores 一條路。註釋裡寫了 poly 讀不懂的代碼會以 `poly/ignore-syntax` 報出
+來，而不是讓整個 run 中斷——一個檔案裡的一行註釋不值得讓整個 repo 停下來，而且它原
+本想關掉的那條 finding 還是照樣印在旁邊。各工具自己的 `# noqa`、
+`# shellcheck disable=`、`-- selene: allow(...)` 一律照舊有效，poly 不碰。
+
+例外是 `# hadolint ignore=`：hadolint 預設關閉，這行註釋就什麼都關不掉了。poly 會把
+它報成 `poly/ignore-syntax`，並直接告訴你該改寫成哪一行——例如
+`# poly: ignore poly/docker-apt-get-unpinned`。poly **不會**去解讀 hadolint 的語法，
+這是遷移提示不是相容層：講一次，讓你把註釋換掉然後刪了它。把 hadolint 開回來
+（`[tools] hadolint = "on"`）的話這行註釋照常有效，poly 也就不再提。
+
+「要不要開語言伺服器」只認 VSCode settings 的 `poly.languageServers`，不進
+`poly.toml`——那是「這台機器上我要不要讓 poly 接管 Go」的個人偏好，CI 根本不跑
+`poly lsp`，寫進專案設定只會讓兩邊看到一個對方不在乎的鍵。server 一律從 PATH 找，poly
+永遠不代裝：它必須跟蓋出這個專案的 toolchain 對得上，poly 選版本就是 poly 選錯版本。
+找不到會在 `Poly` 輸出頻道說一聲，不會靜默沒作用。
+
+**「用哪一支」則是專案的事，寫在 `[tools]` 裡**，用 poly 啟動它的那個名字
+（`gopls`、`rust-analyzer`、`clangd`、`sourcekit-lsp`、`terraform-ls`、
+`lua-language-server`、`buf`）：`rust-analyzer = "off"` 只關掉 Rust 的語言功能而不動
+其他語言，`rust-analyzer = "/opt/rust-glancer"` 換成別的實作。版本號不是這裡的合法值
+——這些跟著專案 toolchain 走，poly 不下載。
 
 `[format.<lang>]` 只認 `line-width`（1–1000）／`indent-width`（1–16）／`use-tabs`
 三個鍵，拼錯或超出範圍都會直接讓解析失敗而不是靜默忽略；只作用於內嵌引擎，走外部
@@ -480,7 +849,10 @@ poly 壞了。走外部工具的語言不經過這條路，那些工具自己就
 不處理。
 
 完整的鍵、可填的值、每個引擎的預設值都寫在
-[poly.example.toml](poly.example.toml) 裡。
+[poly.example.toml](poly.example.toml) 裡。那份檔案是 `poly config export` 產生
+的，工具名稱、pin 住的版本、語言清單都直接讀自 binary，所以不會跟你手上這一版
+poly 說的不一樣；想拿當下這支 binary 的版本就跑 `poly config export > poly.toml`，
+整份存下來不改任何一行也不會改變 poly 的行為。
 
 ## 從原始碼建置
 

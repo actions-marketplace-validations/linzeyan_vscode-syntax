@@ -5,6 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+# Every job here that touches Rust shares one cache, so they have to agree on
+# the profile that filled it: a different LTO setting is a different fingerprint
+# and therefore a cold build in every job but the first. Set once, at the top,
+# rather than per job -- the docker job disagreeing with the rest is exactly how
+# this drifts back.
+#
+# Dropping fat LTO is safe because nothing in this file ships its binary.
+# build.yml compiles the release profile on four targets, and release.yml is
+# what users install. Here the binary is a test fixture.
+env:
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
 jobs:
   grammars:
     runs-on: ubuntu-latest
@@ -34,9 +47,13 @@ jobs:
       - name: Verify sync output is committed (no drift)
         run: git diff --exit-code
       - name: Tokenize fixtures
+        # Written rather than `pnpm init`ed: pnpm 11's init writes a
+        # devEngines block pinned to `^<current>` with `onFail: download`, so
+        # the next command would fetch whatever 11.x is newest and run this
+        # check on a pnpm the setup step did not pin.
         run: |
           mkdir -p /tmp/tokdeps
-          pnpm --dir /tmp/tokdeps init
+          printf '{"name":"poly-tokdeps","private":true}\n' > /tmp/tokdeps/package.json
           pnpm --dir /tmp/tokdeps add vscode-textmate vscode-oniguruma
           node tools/tokenize-check.mjs /tmp/tokdeps/node_modules
       - name: Package VSIX
@@ -55,8 +72,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: cli
+          shared-key: ci
+          save-if: false
           cache-on-failure: true
-      - name: Stage a binary the way release.yml does
+      # The binary this stages is a fixture, not a shipped artifact: what the
+      # job asks is whether the Dockerfile assembles around a binary and whether
+      # the image can reach the network and git. build.yml is what compiles the
+      # profile users get. Before the shared cache this step paid for a fat-LTO
+      # link nobody read, which is most of why the job took four minutes.
+      - name: Stage a binary for the image
         run: |
           cargo build --release --manifest-path cli/Cargo.toml
           mkdir -p docker
@@ -70,10 +94,19 @@ jobs:
       # Building proves it assembles; running proves the parts fit. The mount
       # is how a CI job would actually use it, and `check` reaches for the
       # network and for git, which is where a too-thin base image shows up.
+      #
+      # --strict is what makes this a check rather than a demo: a linter that
+      # failed to download becomes a failed step instead of a skipped file.
+      # That is also why the paths stop short of `cli/`. The image ships no
+      # language toolchain on purpose, `cargo clippy` only ever comes from one,
+      # and Rust would therefore be missing here forever -- the cli job lints
+      # it on a runner that has cargo. These four cover every tool the image
+      # does download: actionlint, hadolint and shellcheck.
       - name: The image can lint a repository
         run: |
           docker run --rm -v "$PWD:/work" poly:ci --version
-          docker run --rm -v "$PWD:/work" poly:ci check --strict .
+          docker run --rm -v "$PWD:/work" poly:ci check --strict \
+            .github Dockerfile extensions tools
 
   # Same reason as the docker job: an action only exercised by whoever adopts
   # it is an action that breaks for whoever adopts it. `uses: ./` runs the
@@ -102,15 +135,11 @@ jobs:
           test "$(poly --version)" = "poly ${{ steps.setup.outputs.version }}"
           test -x "${{ steps.setup.outputs.path }}"
 
+  # Compilation and the drift gates: everything that needs cargo and nothing
+  # that needs a language server, a browser or an extension host. This is the
+  # job that fills the shared cache, so it is the only one that saves it.
   cli:
     runs-on: ubuntu-latest
-    env:
-      # This job checks behavior, not the artifact — build.yml compiles the
-      # shipped profile on every platform and gates its size. Dropping fat LTO
-      # here lets the tests and the smoke binary share one dependency build
-      # instead of compiling the tree twice (dev, then release).
-      CARGO_PROFILE_RELEASE_LTO: "false"
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -119,6 +148,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: cli
+          shared-key: ci
           cache-on-failure: true
       # rustfmt first: it needs no build, so a formatting slip fails in seconds
       # instead of after the workspace compiles.
@@ -159,70 +189,32 @@ jobs:
               sed -E 's/^test (.+) \.\.\. FAILED$/::error::cargo test: \1/' || true
           fi
           exit $status
+      # Only the binary's half here: the other artifact is poly-editor's preview
+      # bundle, whose tree only pnpm can resolve, and this job has no node. It
+      # is checked in `extensions`, next to the install that makes it readable.
       - name: Third-party notices are current (A9)
         run: |
           python3 tools/third-party-notices.py --self-test
-          python3 tools/third-party-notices.py --check
+          python3 tools/third-party-notices.py --check --scope cargo
       # Offline on purpose: it compares the lock against the registry, nothing
       # upstream. A hand-edited version bump that skips tool-sync.py leaves
       # every platform but the editor's on trust-on-first-use, which looks
       # exactly like a pin until someone else downloads.
       - name: External tool pins are locked
         run: python3 tools/tool-sync.py --check
-      - name: LSP smoke test
+      # The third drift gate, and the only one whose failure lands in
+      # documentation rather than in a build: poly.example.toml is generated, so
+      # a tool poly pins, embeds or stops shipping cannot quietly leave the file
+      # describing a poly that no longer exists. --self-test first for the same
+      # reason the notices gate has one -- this diffs the binary against a file
+      # the binary wrote, so a generator that stopped generating would pass.
+      - name: poly.example.toml is current
         run: |
           cargo build --release --manifest-path cli/Cargo.toml
-          python tools/lsp-smoke.py cli/target/release/poly
-      # The proxy is the one part where poly's own answer is "run someone
-      # else's server", so the gate needs that server present. Installed here
-      # rather than left to the probe's skip: a check that only ever skips is
-      # a check nobody is running.
-      - name: Install language servers
-        run: |
-          go install golang.org/x/tools/gopls@v0.23.0
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          rustup component add rust-analyzer
-          sudo apt-get install -y clangd
-          # terraform-ls is the only server whose binary is not itself the
-          # language server (`terraform-ls serve`), so it is the only thing
-          # exercising the LAUNCH table. Without it that path is untested here.
-          curl -sSLo /tmp/terraform-ls.zip \
-            https://releases.hashicorp.com/terraform-ls/0.39.0/terraform-ls_0.39.0_linux_amd64.zip
-          sudo unzip -q -o -d /usr/local/bin /tmp/terraform-ls.zip
-          # lua carries the probe's only merged-diagnostics case: it is the one
-          # language here where poly runs a linter of its own (selene) while a
-          # server is also publishing, so it is the only thing proving the two
-          # sets are merged rather than one erasing the other.
-          #
-          # The tarball has no top-level directory and the binary needs the
-          # meta/ and script/ trees beside it, so it gets its own prefix rather
-          # than being dropped into /usr/local/bin.
-          curl -sSLo /tmp/lua-ls.tar.gz \
-            https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-linux-x64.tar.gz
-          sudo mkdir -p /opt/lua-language-server
-          sudo tar xzf /tmp/lua-ls.tar.gz -C /opt/lua-language-server
-          echo "/opt/lua-language-server/bin" >> "$GITHUB_PATH"
-      - name: Language server proxy probe
-        run: |
-          # The probe skips a language when its server is missing, which is
-          # right on a developer's machine and wrong here: a gate that silently
-          # turns into a no-op is worse than no gate. Assert each one is
-          # present before running it.
-          #
-          # swift is the one language left out: there is no Swift toolchain on
-          # these runners. It stays verified locally on macOS, and the probe
-          # prints the skip rather than passing quietly.
-          #
-          # buf is absent from this list on purpose, not by oversight: poly
-          # downloads it rather than finding it on PATH, so PATH has nothing to
-          # assert. Its case runs unconditionally for the same reason -- if buf
-          # does not come up, that is the finding.
-          gopls version
-          rust-analyzer --version
-          clangd --version
-          terraform-ls version
-          lua-language-server --version
-          python tools/lsp-proxy-probe.py cli/target/release/poly
+          cli/target/release/poly config export --self-test
+          cli/target/release/poly config export | diff -u poly.example.toml -
+      - name: LSP smoke test
+        run: python tools/lsp-smoke.py cli/target/release/poly
       # Dogfood (M4): the repo's own poly.toml, the binary just built, the same
       # two commands the README tells users to put in their CI. This was a
       # documented gate that was never actually wired, so every dogfood run was
@@ -275,14 +267,171 @@ jobs:
       # from a different tree has to fail here rather than ship.
       - name: Versions agree, in manifests and in prose
         run: python3 tools/bump.py --check cli/target/release/poly
+
+  # The acceptance suites, which is everything that needs somebody else's
+  # toolchain present. Split out of the cli job rather than handed its binary
+  # through an artifact: the cli job is one serial chain, so a `needs:` would
+  # add this job's 3 minutes to its 2.5 instead of overlapping them. Rebuilding
+  # from the shared cache costs about 40 seconds and buys the whole overlap.
+  acceptance:
+    runs-on: ubuntu-latest
+    env:
+      # One place for each pinned version: the install commands and the cache
+      # key both read them here, so a bump cannot move one and not the other --
+      # a stale key would serve yesterday's server to today's probe.
+      GOPLS_VERSION: v0.23.0
+      # Was `@latest`, which made the analyser under test a different program on
+      # different days and gave the cache nothing to key on.
+      DEADCODE_VERSION: v0.49.0
+      TERRAFORM_LS_VERSION: 0.39.0
+      LUA_LS_VERSION: 3.19.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # rust-acceptance drives `cargo clippy` over a fixture, so the
+          # component has to be here rather than added mid-job.
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+          shared-key: ci
+          save-if: false
+          cache-on-failure: true
+      # The pinned half of the toolchain, and the expensive half: `go install
+      # gopls` compiles a large Go program from source, and it did so on every
+      # push. Everything here is content-addressed by version, so the only miss
+      # is a bump.
+      #
+      # They install under $HOME rather than /usr/local and /opt because a cache
+      # cannot restore what it needed sudo to write.
+      - name: Cache the pinned servers and analysers
+        id: servers
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/bin
+            ~/ci-tools
+          key: servers-${{ runner.os }}-gopls${{ env.GOPLS_VERSION }}-deadcode${{ env.DEADCODE_VERSION }}-tfls${{ env.TERRAFORM_LS_VERSION }}-lua${{ env.LUA_LS_VERSION }}
+      - name: Install the pinned servers and analysers
+        if: steps.servers.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/ci-tools/bin"
+          go install "golang.org/x/tools/gopls@$GOPLS_VERSION"
+          # Not part of the Go toolchain: deadcode lives in golang.org/x/tools,
+          # and without it the cross-module section of the Go gate would be the
+          # one thing here nobody measures.
+          go install "golang.org/x/tools/cmd/deadcode@$DEADCODE_VERSION"
+          # terraform-ls is the only server whose binary is not itself the
+          # language server (`terraform-ls serve`), so it is the only thing
+          # exercising the LAUNCH table. Without it that path is untested here.
+          curl -sSLo /tmp/terraform-ls.zip \
+            "https://releases.hashicorp.com/terraform-ls/${TERRAFORM_LS_VERSION}/terraform-ls_${TERRAFORM_LS_VERSION}_linux_amd64.zip"
+          unzip -q -o -d "$HOME/ci-tools/bin" /tmp/terraform-ls.zip
+          # lua carries the probe's only merged-diagnostics case: it is the one
+          # language here where poly runs a linter of its own (selene) while a
+          # server is also publishing, so it is the only thing proving the two
+          # sets are merged rather than one erasing the other.
+          #
+          # The tarball has no top-level directory and the binary needs the
+          # meta/ and script/ trees beside it, so it gets its own prefix rather
+          # than being unpacked next to the loose binaries.
+          curl -sSLo /tmp/lua-ls.tar.gz \
+            "https://github.com/LuaLS/lua-language-server/releases/download/${LUA_LS_VERSION}/lua-language-server-${LUA_LS_VERSION}-linux-x64.tar.gz"
+          mkdir -p "$HOME/ci-tools/lua-language-server"
+          tar xzf /tmp/lua-ls.tar.gz -C "$HOME/ci-tools/lua-language-server"
+      # Runs whether or not the cache hit -- PATH does not survive in a cache.
+      - name: Put them on PATH
+        run: |
+          {
+            echo "$(go env GOPATH)/bin"
+            echo "$HOME/ci-tools/bin"
+            echo "$HOME/ci-tools/lua-language-server/bin"
+          } >> "$GITHUB_PATH"
+      # The two that are not worth caching: both come from a package manager
+      # already on the runner, and neither is compiled here.
+      - name: Install clangd and rust-analyzer
+        run: |
+          sudo apt-get install -y clangd
+          rustup component add rust-analyzer
+      - name: Build poly
+        run: cargo build --release --manifest-path cli/Cargo.toml
+      - name: Language server proxy probe
+        run: |
+          # The probe skips a language when its server is missing, which is
+          # right on a developer's machine and wrong here: a gate that silently
+          # turns into a no-op is worse than no gate. Assert each one is
+          # present before running it. Since the servers are cached, this is
+          # also what catches a cache that restored something unusable.
+          #
+          # swift is the one language left out: there is no Swift toolchain on
+          # these runners. It stays verified locally on macOS, and the probe
+          # prints the skip rather than passing quietly.
+          #
+          # buf is absent from this list on purpose, not by oversight: poly
+          # downloads it rather than finding it on PATH, so PATH has nothing to
+          # assert. Its case runs unconditionally for the same reason -- if buf
+          # does not come up, that is the finding.
+          gopls version
+          rust-analyzer --version
+          clangd --version
+          terraform-ls version
+          lua-language-server --version
+          python tools/lsp-proxy-probe.py cli/target/release/poly
+      # The other half of Go, and the half no gate touched until it was written:
+      # gofumpt and golangci-lint are poly's own to drive, and the Rust tests
+      # only ever covered the path where they do not run. `go` is on the runner
+      # already, and gofmt comes with it -- which the fmt check needs, because
+      # telling gofumpt from gofmt is the point of it.
+      - name: Go support acceptance
+        run: |
+          go version
+          gofmt --help >/dev/null
+          python tools/go-acceptance.py cli/target/release/poly
+      # The second whole-directory linter. Nothing to install: poly downloads
+      # tflint, and the bundled Terraform ruleset needs neither `tflint --init`
+      # nor `terraform init`. It runs here rather than inside the Go step
+      # because what it measures is scope nesting, which Go does not have by
+      # default and Terraform does.
+      - name: Terraform lint acceptance
+        run: python tools/tf-acceptance.py cli/target/release/poly
+      # The third one, and the only one that compiles to answer. The fixture has
+      # no dependencies, so this costs seconds rather than the minutes a real
+      # crate would.
+      - name: Rust lint acceptance
+        run: python tools/rust-acceptance.py cli/target/release/poly
+      # `poly deadcode` outside Go. Neither tool is a poly download -- knip is
+      # an npm dev dependency and vulture is a pip install -- so both are
+      # installed here the way a project would, and the gate skips loudly if
+      # either step fails rather than passing on nothing.
+      - name: Dead code acceptance (knip, vulture)
+        run: |
+          pip install vulture
+          python tools/deadcode-acceptance.py cli/target/release/poly
+
+  # The extension halves. Same reasoning as the acceptance job: this needs a
+  # poly binary and nothing the cli job produces afterwards, so it rebuilds from
+  # the shared cache and runs alongside rather than behind.
+  extensions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+          shared-key: ci
+          save-if: false
+          cache-on-failure: true
+      - name: Build poly
+        run: cargo build --release --manifest-path cli/Cargo.toml
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: extensions/lsp/package.json
-      # Runs here rather than in its own job so it can reuse the binary the
-      # smoke test just built; a separate job would compile the workspace twice.
       # xvfb: the extension host needs a display even with no window on screen.
       - name: Editor end-to-end (real extension host)
         working-directory: extensions/lsp
@@ -305,3 +454,8 @@ jobs:
           pnpm test
           pnpm run build
           pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
+      # The other half of A9, here because it needs the tree the step above just
+      # installed: what the preview bundle carries is decided by pnpm's
+      # resolution, not by a manifest anyone can read without it.
+      - name: poly-editor third-party notices are current (A9)
+        run: python3 tools/third-party-notices.py --check --scope npm

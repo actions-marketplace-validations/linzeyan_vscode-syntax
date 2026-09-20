@@ -51,6 +51,8 @@ func main() {
 \tfmt.Println(strings.ToUpper(os.Getenv("USER")))
 \tunused := 1
 }
+
+//go:generate echo generated
 """
 
 # Same shape in Rust, with the call outside a macro so the definition request
@@ -62,6 +64,18 @@ MAIN_RS = """fn greet(name: &str) -> String {
 fn main() {
     let message = greet("world");
     println!("{message}");
+}
+
+mod helper;
+"""
+
+# Declared at the bottom of main.rs on purpose: every line number in the Rust
+# case is written down, and a `mod` at the top would move all of them. It exists
+# so there is something for a rename to break -- rust-analyzer rewrites the
+# declaration when the file behind it moves, which is the whole reason poly
+# relays `workspace/willRenameFiles`.
+HELPER_RS = """pub fn helped() -> u8 {
+    1
 }
 """
 
@@ -148,6 +162,17 @@ print(message)
 local unused = 1
 """
 
+# `greet` is defined on line 1 and called on line 5, and the call is what the
+# probe asks about. Exported through a NAMESPACE-less package: arity resolves
+# the package from the DESCRIPTION beside it, which is also what decides that
+# `greet` is used rather than an unused binding.
+MAIN_R = """greet <- function(name) {
+  paste0("hello ", name)
+}
+
+message(greet("world"))
+"""
+
 
 @dataclass
 class Second:
@@ -171,7 +196,9 @@ class Case:
     definition_line: int  # 0-based, as LSP counts
     call_line: int
     call_character: int
-    hover_needle: str
+    # `None` where the server's hover comes from an index this probe does not
+    # build; see the hover check for why that is still worth routing.
+    hover_needle: str = None
     # Set where one server covers several languages. clangd is why this
     # exists: it answers for both c and cpp, and there must be one of it.
     second: Second = None
@@ -205,6 +232,44 @@ class Case:
     # moment they fix it. Recorded here so the lie is visible, and so the
     # probe fails loudly if it ever becomes true.
     unsupported: set = field(default_factory=set)
+    # Servers whose call hierarchy is served from an index store this probe
+    # never builds. Not a lie like `unsupported` -- they route correctly and
+    # answer `null`, which is the truth for an unbuilt fixture. Routing is
+    # still asserted; only the follow-up, which needs an item to carry, is not.
+    unindexed: bool = False
+    # A command this server declares that needs arguments, fired with none.
+    # Named here rather than taken off the registered list so the probe never
+    # runs something with a side effect -- `terraform-ls.terraform.init` is on
+    # that list too. `None` means "declares commands, none written down", which
+    # is buf: poly pins it and its list is not measured on this machine.
+    command: str = None
+    # A substring that must appear in some inlay hint label. Only gopls has one
+    # written down: it is the server whose hints this probe can turn on (see
+    # `editor_settings`), and the one whose hints Ricky went looking for.
+    inlay_hint: str = None
+    # `(old, new, needle)` for a `workspace/willRenameFiles` round trip: the
+    # file the probe pretends to move, where to, and something that has to
+    # appear in the WorkspaceEdit that comes back. Only rust-analyzer declares
+    # a `will*` operation, and it is the only one of the six whose answer is an
+    # edit rather than a notification nobody replies to.
+    rename: tuple = None
+    # A substring that must appear in some code lens title. Only gopls has one:
+    # a lens is a command with a label, and gopls is the server whose commands
+    # this probe already knows how to fire. The others declare the capability
+    # and answer an empty list for these fixtures, which is the truth for a file
+    # with nothing to run -- asserting a lens there would need a fixture built
+    # to produce one, and would be testing the server rather than the route.
+    code_lens: str = None
+    # A name that must come back from `workspace/symbol`. Set only where the
+    # server answers from what it has already parsed; the ones that answer out
+    # of an index this probe never builds get the routing check and no more,
+    # the same split `unindexed` makes for call hierarchy.
+    workspace_symbol: str = None
+    # A token type that must appear once the legend is applied. Named rather
+    # than counted for the same reason: the count would be right even if every
+    # index pointed at the wrong entry, which is the failure mode a mangled
+    # legend actually has.
+    semantic_tokens: str = None
     edit: tuple = field(default=("world", "there"))
 
 
@@ -228,6 +293,42 @@ FULL = COMMON | {
     "documentHighlight",
     "foldingRange",
 }
+# The two hierarchies, added 2026-09-02. Deliberately not folded into FULL:
+# only gopls, clangd and sourcekit-lsp declare both, rust-analyzer has call
+# hierarchy and no type hierarchy, and the three thin servers have neither.
+HIERARCHY = {"prepareCallHierarchy", "prepareTypeHierarchy"}
+# The one registration that is not a `textDocument/` method, added 2026-09-03.
+# Every server here declares commands except rust-analyzer, which declares
+# `executeCommandProvider` with an empty list -- so poly registers nothing for
+# it, which is the honest answer and not a gap.
+COMMANDS = {"workspace/executeCommand"}
+# Added 2026-09-04. Six of the seven servers declare it; clangd is the one that
+# does not, which is why this is its own set rather than folded into FULL. The
+# design note in proxy.rs said "6 of 6" before anyone measured -- it was counting
+# servers that have a codeLens story, not servers that declare the capability.
+LENS = {"codeLens"}
+# The one thing all seven declare, and the only registration here that is not
+# per-server: poly registers `workspace/symbol` once and fans each query out.
+# Kept separate from COMMON because it is also the only entry that keeps its
+# namespace -- everything else in these sets is a `textDocument/` method with the
+# prefix dropped.
+SYMBOL = {"workspace/symbol"}
+# Six of the seven. sourcekit-lsp is the exception and an instructive one: it
+# declares `semanticTokensProvider: null` at initialize and then registers
+# `textDocument/semanticTokens` itself, dynamically, once the client says it
+# understands them. poly forwards that registration like any other server
+# request, so Swift does get semantic highlighting -- just not from a
+# registration poly minted, which is why it is absent here.
+SEMTOK = {"semanticTokens"}
+# File operations, added 2026-09-04. No shared set: the three servers that want
+# any want a different one each, and that is the finding. rust-analyzer asks for
+# `willRename` -- the request answered with a WorkspaceEdit, over `**/*.rs` and
+# over any folder -- while gopls asks only to be told about a .go file that
+# appeared, and lua-language-server only about a rename that already happened.
+# clangd, terraform-ls and sourcekit-lsp declare none.
+WILL_RENAME = {"workspace/willRenameFiles"}
+DID_CREATE = {"workspace/didCreateFiles"}
+DID_RENAME = {"workspace/didRenameFiles"}
 
 CASES = [
     Case(
@@ -242,7 +343,32 @@ CASES = [
         diagnostics=True,
         # No declarationProvider: in Go a declaration and a definition are the
         # same thing, so gopls has nothing separate to point at.
-        registers=FULL | {"selectionRange"},
+        registers=FULL
+        | {"selectionRange", "inlayHint"}
+        | HIERARCHY
+        | COMMANDS
+        | LENS
+        | SYMBOL
+        | SEMTOK
+        | DID_CREATE,
+        # What Tooltitude calls `move...`, and the reason commands are
+        # routed at all: gopls answers the code action with this command
+        # and no edit.
+        command="gopls.extract_to_new_file",
+        # `unused := 1` is an untyped assignment, which is what
+        # assignVariableTypes annotates -- the one thing a reader of unfamiliar
+        # Go cannot get from the text in front of them.
+        inlay_hint="int",
+        # The `//go:generate` line at the bottom of MAIN_GO is there for this.
+        # gopls's other lenses live on go.mod (`go mod tidy`, `govulncheck`) or
+        # need `codelenses: {test: true}` from the client (`run test`), so a
+        # generate directive is the one lens a .go file can carry by itself.
+        code_lens="generate",
+        workspace_symbol="Greet",
+        # MAIN_GO's `strings.ToUpper` is the one thing here TextMate cannot
+        # know: the grammar sees an identifier after a dot, and only gopls
+        # knows it is a function in another package.
+        semantic_tokens="function",
     ),
     Case(
         language="rust",
@@ -250,13 +376,24 @@ CASES = [
         files={
             "Cargo.toml": '[package]\nname = "probe"\nversion = "0.0.0"\nedition = "2021"\n',
             "src/main.rs": MAIN_RS,
+            "src/helper.rs": HELPER_RS,
         },
         entry="src/main.rs",
         definition_line=0,
         call_line=5,
         call_character=20,  # inside `greet` on the call line
         hover_needle="greet",
-        registers=FULL | {"selectionRange", "declaration"},
+        # Call hierarchy but no type hierarchy: Rust traits are not a class
+        # tree, and rust-analyzer declares nothing for one.
+        registers=FULL
+        | {"selectionRange", "declaration", "inlayHint", "prepareCallHierarchy"}
+        | LENS
+        | SYMBOL
+        | SEMTOK
+        | WILL_RENAME,
+        # The one server that answers a file operation with an edit, so the one
+        # case that can check the round trip rather than just the registration.
+        rename=("src/helper.rs", "src/renamed.rs", "renamed"),
     ),
     # No compile_commands.json on purpose. clangd falls back to default flags
     # for a standalone file, which is enough for a same-file definition, and
@@ -279,7 +416,13 @@ CASES = [
             call_character=13,  # inside `twice` on the call line
         ),
         chatty="[clangd] I[",
-        registers=FULL | {"selectionRange", "declaration"},
+        registers=FULL
+        | {"selectionRange", "declaration", "inlayHint"}
+        | HIERARCHY
+        | COMMANDS
+        | SYMBOL
+        | SEMTOK,
+        command="clangd.applyTweak",
     ),
     Case(
         language="swift",
@@ -290,13 +433,23 @@ CASES = [
         call_line=4,
         call_character=16,  # inside `greet` on the call line
         hover_needle="greet",
-        # No typeDefinition and no selectionRange; it is the only server here
-        # that has declaration but not selectionRange.
-        registers=(FULL - {"typeDefinition"}) | {"declaration"},
+        # Had neither typeDefinition nor selectionRange when this was first
+        # measured (2026-08-29); the Xcode toolchain's sourcekit-lsp registers
+        # both as of 2026-09-16. Recorded rather than pinned: the table is a
+        # record of what the servers do, and poly's side of it is that whatever
+        # they register is what reaches the editor.
+        registers=FULL
+        | {"declaration", "inlayHint", "selectionRange"}
+        | HIERARCHY
+        | COMMANDS
+        | LENS
+        | SYMBOL,
+        command="semantic.refactor.command",
         # Declares declarationProvider, then answers -32001 "unsupported
         # method". Measured 2026-08-29 against sourcekit-lsp from the Xcode
         # toolchain.
         unsupported={"declaration"},
+        unindexed=True,
     ),
     # The one server here that is not its own entry point: poly has to run
     # `terraform-ls serve`, and without the subcommand the binary prints usage
@@ -313,7 +466,10 @@ CASES = [
         chatty="[terraform-ls] ",
         # The thinnest of the six: no rename, no code actions, and none of the
         # position-scoped extras beyond signatureHelp.
-        registers=COMMON | {"declaration"},
+        registers=COMMON | {"declaration"} | COMMANDS | LENS | SYMBOL | SEMTOK,
+        # Read-only, and the init/validate commands next to it on the list
+        # are exactly why the probe never fires an unnamed one.
+        command="terraform-ls.module.callers",
     ),
     # The one server poly pins itself, and the one that is not a toolchain's:
     # a .proto has no build behind it for buf to match. `buf lsp serve`, so
@@ -330,7 +486,40 @@ CASES = [
         hover_needle="Greeting",
         # No implementation and no signatureHelp: protobuf has neither an
         # interface to implement nor a call to fill in arguments for.
-        registers=FULL - {"implementation", "signatureHelp"},
+        registers=(FULL - {"implementation", "signatureHelp"})
+        | COMMANDS
+        | LENS
+        | SYMBOL
+        | SEMTOK,
+    ),
+    # The second server poly pins, and pinned for buf's reason: an R script has
+    # no build behind it either. `arity lsp`, so it needs its subcommand too.
+    Case(
+        language="r",
+        server="arity",
+        managed=True,
+        files={"DESCRIPTION": "Package: probe\nVersion: 0.0.0\n", "R/main.R": MAIN_R},
+        entry="R/main.R",
+        definition_line=0,
+        call_line=4,
+        call_character=10,  # inside `greet` on the call line
+        # arity's hover is package help harvested by `arity index`, and this
+        # machine has no R for it to harvest.
+        hover_needle=None,
+        # No merged_source, and that is the finding rather than an omission:
+        # arity is R's linter as well as R's server, so poly's own copy of these
+        # findings is dropped for a proxied document. See `Diagnostics::merged`.
+        # No typeDefinition and no implementation: R has neither a type to jump
+        # to nor an interface to implement. The only server here that asks for
+        # both halves of a rename -- the edit before it happens and the news
+        # after -- which is why neither set is shared with anyone.
+        registers=(FULL - {"typeDefinition", "implementation"})
+        | {"selectionRange", "inlayHint"}
+        | HIERARCHY
+        | SYMBOL
+        | SEMTOK
+        | WILL_RENAME
+        | DID_RENAME,
     ),
     Case(
         language="lua",
@@ -342,7 +531,11 @@ CASES = [
         call_character=18,  # inside `greet` on the call line
         hover_needle="greet",
         merged_source="selene",
-        registers=FULL,
+        # The only server measured that asks for inlay hints to be resolved
+        # (`inlayHintProvider.resolveProvider`), which is why poly routes
+        # `inlayHint/resolve` even though nothing registers it.
+        registers=FULL | {"inlayHint"} | COMMANDS | LENS | SYMBOL | SEMTOK | DID_RENAME,
+        command="lua.getConfig",
     ),
 ]
 
@@ -383,6 +576,32 @@ def recv():
     return json.loads(proc.stdout.read(int(headers["content-length"])))
 
 
+# What an editor carrying the settings poly's README asks for would answer.
+#
+# gopls ships every inlay hint off and reads the switches from the client, so a
+# probe that answered `null` was measuring a server it had just told to stay
+# quiet -- and an empty hint list looks identical to a hint request that was
+# never routed. That is why the inlay check below could not exist before this
+# did. Only the `gopls` section is answered, because it is the only server here
+# that asks for one.
+GOPLS_SETTINGS = {
+    "hints": {"assignVariableTypes": True, "parameterNames": True},
+    # The third gopls feature that ships off and is switched on from here, after
+    # inlay hints and the `test` codelens. Without it gopls answers
+    # `{"data": []}` -- a legal, complete, entirely empty highlighting, and one
+    # a check that only counted a routed reply would have called a pass.
+    "semanticTokens": True,
+}
+
+
+def editor_settings(params):
+    """One answer per requested section, which is the shape the request takes."""
+    return [
+        GOPLS_SETTINGS if item.get("section") == "gopls" else None
+        for item in params.get("items") or [{}]
+    ]
+
+
 def pump(want_id=None, want_method=None, limit=2000):
     """Read until the wanted response or notification, answering server requests.
 
@@ -400,10 +619,15 @@ def pump(want_id=None, want_method=None, limit=2000):
         if want_method is not None and msg.get("method") == want_method:
             return msg, INBOX[start:]
         if "method" in msg and "id" in msg:
-            # A request from the server side. Answer everything the same way:
-            # null is a legal answer to registerCapability and to a
-            # configuration request for settings the editor does not have.
-            result = [None] if msg["method"] == "workspace/configuration" else None
+            # A request from the server side. `null` is a legal answer to
+            # registerCapability and to a configuration request for settings
+            # the editor does not have -- but not to every configuration
+            # request, see `editor_settings`.
+            result = (
+                editor_settings(msg["params"])
+                if msg["method"] == "workspace/configuration"
+                else None
+            )
             send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
     raise AssertionError(f"gave up waiting; last messages: {INBOX[-5:]}")
 
@@ -427,10 +651,26 @@ def ask(rid, method, params):
 def on_save_kind(kind):
     """A code action kind VSCode runs on save rather than on request.
 
-    Dot-separated prefix match down the LSP kind hierarchy, the same rule poly
-    applies -- a vendor kind that merely starts with the same letters is not one.
+    Three families, not the whole `source.*` namespace, the same rule poly
+    applies -- `source.organizeImports` and `source.fixAll` are what
+    `codeActionsOnSave` runs before the formatter and what would fight gofumpt
+    over import grouping, and `source.formatAll` *is* a formatter
+    (terraform-ls's `source.formatAll.terraform` is `terraform fmt`). gopls's
+    `source.doc`, `source.addTest`, `source.assembly`, `source.freesymbols` and
+    `source.splitPackage` touch no formatting and belong in the lightbulb.
+
+    Dot-separated prefix match down the LSP kind hierarchy: `source` means all
+    of them and `source.fixAll.foo` is one, while a vendor kind that merely
+    starts with the same letters is not.
     """
-    return bool(kind) and (kind == "source" or kind.startswith("source."))
+    if not kind:
+        return False
+    if kind == "source":
+        return True
+    return any(
+        kind == family or kind.startswith(family + ".")
+        for family in ("source.organizeImports", "source.fixAll", "source.formatAll")
+    )
 
 
 def settle(rid, method, params, ready, what):
@@ -527,6 +767,56 @@ def run(case, logs=True, graceful=True):
                         "definition": {"linkSupport": False},
                         "hover": {"contentFormat": ["markdown", "plaintext"]},
                         "synchronization": {"dynamicRegistration": True},
+                        # The legend a server declares is an answer to what the
+                        # client said it understands, not a fixed property of
+                        # the server: terraform-ls hands back an empty
+                        # `tokenTypes` to a client that did not ask. Under-
+                        # declaring here would have measured a capability no
+                        # real editor would ever see. These are VSCode's own
+                        # lists.
+                        "semanticTokens": {
+                            "dynamicRegistration": True,
+                            "tokenTypes": [
+                                "namespace",
+                                "type",
+                                "class",
+                                "enum",
+                                "interface",
+                                "struct",
+                                "typeParameter",
+                                "parameter",
+                                "variable",
+                                "property",
+                                "enumMember",
+                                "event",
+                                "function",
+                                "method",
+                                "macro",
+                                "keyword",
+                                "modifier",
+                                "comment",
+                                "string",
+                                "number",
+                                "regexp",
+                                "operator",
+                                "decorator",
+                            ],
+                            "tokenModifiers": [
+                                "declaration",
+                                "definition",
+                                "readonly",
+                                "static",
+                                "deprecated",
+                                "abstract",
+                                "async",
+                                "modification",
+                                "documentation",
+                                "defaultLibrary",
+                            ],
+                            "formats": ["relative"],
+                            "requests": {"range": True, "full": {"delta": True}},
+                            "augmentsSyntaxTokens": True,
+                        },
                         # resolveSupport is what makes rust-analyzer turn
                         # resolveProvider on; without it the server declares no
                         # resolve and the check below silently never runs.
@@ -652,15 +942,25 @@ def run(case, logs=True, graceful=True):
 
     # Hover on the same position must come from the server too, not from poly's
     # own sqruff-only hover -- the two share a method and must not shadow.
-    hover = settle(
-        3,
-        "textDocument/hover",
-        at_call,
-        lambda h: case.hover_needle in hover_text(h),
-        "hover",
-    )
-    summary = next(line for line in hover_text(hover).splitlines() if line.strip())
-    print(f"  hover: {summary[:60]}")
+    #
+    # A server with no needle written down is one whose hover text comes out of
+    # an index this probe never builds: arity harvests it from the R packages
+    # installed on the machine, and there is no R here. The same split
+    # `unindexed` makes for call hierarchy -- and the route is already proven
+    # above, by a definition only the server could have resolved.
+    if case.hover_needle is None:
+        settle(3, "textDocument/hover", at_call, lambda h: h is None, "hover")
+        print(f"  hover routed; {case.server} answers from an index, unbuilt here")
+    else:
+        hover = settle(
+            3,
+            "textDocument/hover",
+            at_call,
+            lambda h: case.hover_needle in hover_text(h),
+            "hover",
+        )
+        summary = next(line for line in hover_text(hover).splitlines() if line.strip())
+        print(f"  hover: {summary[:60]}")
 
     if case.second:
         # Opening a file in the server's other language must reach the process
@@ -721,6 +1021,172 @@ def run(case, logs=True, graceful=True):
         print(f"  completion resolved: {resolved['result']['label']}")
     else:
         print(f"  {case.server} declares no resolveProvider; resolve not asked")
+
+    # The hierarchy follow-ups are the only routed requests that name no
+    # textDocument at all: `callHierarchy/incomingCalls` carries the item a
+    # prepare handed back, and poly routes it by the file that item names.
+    # Nothing else here exercises that branch, and getting it wrong means the
+    # request falls through to poly, which has no answer for it.
+    #
+    # Inlay hints, for a server whose hints this probe can actually turn on.
+    # Routing them was never the hard part -- proving they carry anything was,
+    # and it needed `editor_settings` first. The label is asserted rather than
+    # the count: a hint list of the right length saying nothing useful is the
+    # exact failure a count would wave through.
+    if case.inlay_hint:
+        lines = case.files[case.entry].split("\n")
+        hints = settle(
+            13,
+            "textDocument/inlayHint",
+            {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": len(lines) - 1, "character": 0},
+                },
+            },
+            bool,
+            "inlay hints",
+        )
+        labels = [
+            hint["label"]
+            if isinstance(hint["label"], str)
+            else "".join(part["value"] for part in hint["label"])
+            for hint in hints
+        ]
+        assert any(case.inlay_hint in label for label in labels), (
+            f"no hint carried {case.inlay_hint!r}: {labels}"
+        )
+        print(f"  {len(labels)} inlay hint(s), including {case.inlay_hint!r}")
+    elif "inlayHint" in case.registers:
+        print(f"  {case.server} registers inlayHint; no label written down to check")
+
+    # A file the editor is about to move. Nothing else in this file asks about
+    # something that has not happened yet, and that is the point: a watcher sees
+    # a rename only afterwards, by which time the declarations pointing at the
+    # old path are already broken. The server answers with the edit that keeps
+    # them right, and the editor applies it as part of the move.
+    if case.rename:
+        old, new, needle = case.rename
+        edit = settle(
+            40,
+            "workspace/willRenameFiles",
+            {
+                "files": [
+                    {"oldUri": f"file://{root}/{old}", "newUri": f"file://{root}/{new}"}
+                ]
+            },
+            # Rebuilt from an index, so an empty answer early on means "not
+            # ready", the same as everywhere else in this file.
+            lambda result: bool(result and needle in json.dumps(result)),
+            f"a rename edit mentioning {needle!r}",
+        )
+        # The file itself is never touched: the probe is measuring what the
+        # server would have the editor do, and moving it would have the case
+        # clean up a fixture that no longer matches what was opened.
+        print(f"  {old} → {new}: {len(json.dumps(edit))} bytes of edit")
+
+    # Code lenses. Two things have to be true and they fail differently: the
+    # lens has to arrive with a title, and it has to carry a command the editor
+    # can actually run. The second is the whole reason this waited for command
+    # routing -- a lens whose click does nothing is worse than no lens, because
+    # the user is told the action exists.
+    if case.code_lens:
+        lenses = settle(
+            15,
+            "textDocument/codeLens",
+            {"textDocument": {"uri": uri}},
+            bool,
+            "code lenses",
+        )
+        titles = [lens.get("command", {}).get("title", "") for lens in lenses]
+        assert any(case.code_lens in title for title in titles), (
+            f"no lens carried {case.code_lens!r}: {titles}"
+        )
+        # Against the registered command list, not against a hardcoded name:
+        # what makes a lens clickable is that some registration named its
+        # command, and that list is what poly sent the editor.
+        commanded = {
+            lens["command"]["command"] for lens in lenses if lens.get("command")
+        }
+        registered = set(
+            methods["workspace/executeCommand"]["registerOptions"]["commands"]
+        )
+        assert commanded <= registered, (
+            f"lens commands the editor was never told about: "
+            f"{sorted(commanded - registered)}"
+        )
+        print(f"  {len(lenses)} code lens(es) {titles}, every command registered")
+    elif "codeLens" in case.registers:
+        lenses = ask(15, "textDocument/codeLens", {"textDocument": {"uri": uri}})
+        assert "result" in lenses, f"codeLens was not routed: {lenses}"
+        print(f"  codeLens routed; {case.server} offers none for this fixture")
+
+    # Semantic tokens. The registration is the whole risk here: a token names
+    # its type as an *index* into the legend poly registered, so a legend that
+    # arrived reordered, deduplicated or trimmed would not fail anywhere -- it
+    # would colour every identifier as something else. Checking the indices
+    # against the registered legend is what makes that visible.
+    if "semanticTokens" in case.registers:
+        legend = methods["textDocument/semanticTokens"]["registerOptions"]["legend"]
+        tokens = ask(
+            17, "textDocument/semanticTokens/full", {"textDocument": {"uri": uri}}
+        )
+        assert "result" in tokens, f"semanticTokens/full was not routed: {tokens}"
+        data = (tokens["result"] or {}).get("data", [])
+        assert len(data) % 5 == 0, f"a token is five integers, got {len(data)}"
+        kinds = data[3::5]
+        assert all(kind < len(legend["tokenTypes"]) for kind in kinds), (
+            f"{case.server} produced token types outside the legend poly "
+            f"registered ({len(legend['tokenTypes'])} entries): {sorted(set(kinds))}"
+        )
+        if case.semantic_tokens:
+            assert kinds, f"{case.server} highlighted nothing: {tokens['result']}"
+            named = sorted({legend["tokenTypes"][kind] for kind in kinds})
+            assert case.semantic_tokens in named, (
+                f"no {case.semantic_tokens!r} token: {named}"
+            )
+            print(f"  {len(kinds)} semantic token(s): {named}")
+        else:
+            print(f"  semanticTokens routed; {len(kinds)} for this fixture")
+
+    # Ctrl+T. The only request poly sends to every server rather than one, so
+    # "was it routed" and "did it come back exactly once" are different
+    # questions -- `ask` waiting on the id answers the second, because a second
+    # reply on that id would arrive as a stray message the next pump trips over.
+    symbols = ask(16, "workspace/symbol", {"query": case.hover_needle})
+    assert "result" in symbols, f"workspace/symbol was not routed: {symbols}"
+    found = symbols["result"] or []
+    if case.workspace_symbol:
+        # Named, not counted. gopls answers a query over the whole build, so
+        # this fixture comes back with a hundred stdlib symbols that happen to
+        # contain the letters -- a count would pass on any of them.
+        assert any(s["name"] == case.workspace_symbol for s in found), (
+            f"no workspace symbol named {case.workspace_symbol!r} among "
+            f"{len(found)}: {sorted({s['name'] for s in found})[:10]}"
+        )
+        print(f"  workspace symbol {case.workspace_symbol!r} among {len(found)}")
+    else:
+        print(f"  workspace/symbol routed; {len(found)} for this fixture")
+
+    if "prepareCallHierarchy" in case.registers and case.unindexed:
+        prepared = ask(11, "textDocument/prepareCallHierarchy", at_call)
+        assert "result" in prepared, f"prepareCallHierarchy was not routed: {prepared}"
+        print(f"  call hierarchy routed; {case.server} has no index for this fixture")
+    elif "prepareCallHierarchy" in case.registers:
+        items = settle(
+            11,
+            "textDocument/prepareCallHierarchy",
+            at_call,
+            bool,
+            "call hierarchy",
+        )
+        incoming = ask(12, "callHierarchy/incomingCalls", {"item": items[0]})
+        assert "result" in incoming, f"incomingCalls was not routed: {incoming}"
+        callers = [call["from"]["name"] for call in incoming["result"] or []]
+        print(f"  call hierarchy: {items[0]['name']} <- {callers or 'no callers'}")
+    else:
+        print(f"  {case.server} declares no callHierarchyProvider, as expected")
 
     # Rename is the one proxied request that answers with an edit rather than a
     # location. poly never applies it -- the editor does -- but it has to come
@@ -797,6 +1263,55 @@ def run(case, logs=True, graceful=True):
     else:
         print(f"  {case.server} declares no codeActionProvider, as expected")
 
+    # Commands are the other half of the lightbulb. A code action mostly carries
+    # a `command` rather than an `edit` -- every one of gopls's does -- so an
+    # action nobody can execute is an entry that does nothing when clicked, and
+    # that is what gopls's whole refactoring surface was through poly until it
+    # registered these. Registration is what makes the editor send the request
+    # at all; routing is by declared name, since there is no uri in it to route
+    # by.
+    if "workspace/executeCommand" in case.registers:
+        declared = methods["workspace/executeCommand"]["registerOptions"]["commands"]
+        assert declared, f"{case.server} registered an empty command list"
+        # poly declared its own three at initialize, and the client registers a
+        # real editor command per id -- a duplicate throws there and takes the
+        # whole client down with it.
+        mine = [c for c in declared if c.startswith("poly.")]
+        assert not mine, f"poly's own commands leaked into {case.server}'s list: {mine}"
+        print(f"  {len(declared)} command(s) registered for {case.server}")
+
+        if case.command:
+            assert case.command in declared, f"{case.command} was not registered"
+            # Fired with no arguments on purpose: the server complains about the
+            # arguments, and that complaint is the proof the request left poly.
+            # An unrouted command gets poly's own "unknown command" instead,
+            # which is exactly what this used to be.
+            reply = ask(
+                13,
+                "workspace/executeCommand",
+                {"command": case.command, "arguments": []},
+            )
+            message = (reply.get("error") or {}).get("message", "")
+            assert "unknown command" not in message, (
+                f"{case.command} never reached {case.server}: {message}"
+            )
+            print(
+                f"  {case.command} reached {case.server}: {message[:60] or 'no error'}"
+            )
+        else:
+            print(f"  no argument-checking command written down for {case.server}")
+    else:
+        print(f"  {case.server} declares no commands, as expected")
+
+    # A name nobody declared stays poly's to refuse. Routing by name means the
+    # miss has to fall back rather than land on whichever server happens to be
+    # up, and poly's own three commands depend on that same fallback.
+    unknown = ask(
+        14, "workspace/executeCommand", {"command": "poly.notACommand", "arguments": []}
+    )
+    assert "unknown command" in (unknown.get("error") or {}).get("message", ""), unknown
+    print("  an undeclared command is still poly's to refuse")
+
     # The read-only batch. poly implements none of these, and an unrouted
     # request comes back as METHOD_NOT_FOUND -- an error, with no `result`
     # field at all. So the presence of `result` is proof the request reached a
@@ -849,15 +1364,25 @@ def run(case, logs=True, graceful=True):
         # outside kills the probe -- which is a worse failure than the bug.
         # poly answers every request, so the hover always comes back, and any
         # publish sent on the way lands in INBOX before it does.
+        #
+        # The budget is wall clock, not a number of round trips, and that is the
+        # whole of a flake this had: poly answers the hover in milliseconds, so
+        # six attempts finished in a few of them while lua-language-server was
+        # still building its index, and CI went red saying poly had stopped
+        # merging. What the server needs is time; a round trip is what it does
+        # not. Same deadline and same sleep as `settle`, for the same reason,
+        # and the same early exit -- a server that is ready costs one pass.
         both = []
-        for attempt in range(6):
+        deadline = time.time() + 120
+        attempt = 0
+        while True:
             both = [
                 published
                 for published in diagnostics_for(uri)
                 if any(d.get("source") == case.merged_source for d in published)
                 and any(d.get("source") != case.merged_source for d in published)
             ]
-            if both:
+            if both or time.time() > deadline:
                 break
             # A save with no change lints nothing: poly skips a document whose
             # content hash has not moved, so each attempt has to move it.
@@ -878,9 +1403,14 @@ def run(case, logs=True, graceful=True):
                     "params": {"textDocument": {"uri": uri}},
                 }
             )
-            ask(20 + attempt, "textDocument/hover", at_call)
+            # Clear of every fixed id above and of `settle`, which starts under
+            # a hundred and adds a hundred a try for at most this same 120s.
+            ask(900000 + attempt, "textDocument/hover", at_call)
+            time.sleep(0.5)
+            attempt += 1
         assert both, (
-            f"no publish carried both {case.merged_source} and {case.server}: "
+            f"no publish carried both {case.merged_source} and {case.server} "
+            f"in {attempt} tries over 120s: "
             f"{[[d.get('source') for d in p] for p in diagnostics_for(uri)]}"
         )
         sources = sorted({d.get("source") for d in both[-1]})
@@ -987,6 +1517,795 @@ def run(case, logs=True, graceful=True):
     shutil.rmtree(root, ignore_errors=True)
 
 
+# ── Two projects in one window ───────────────────────────────────────────────
+#
+# The scenario the `Poly: Create go.work` command exists for, and the one thing
+# no other check here touches: every case above is one project in one folder,
+# which is the shape that always worked.
+#
+# Both languages that have a project boundary are measured, and they answer
+# differently -- which is the reason the command is Go-only and the reason that
+# is written down here rather than asserted in prose.
+
+GO_LIB = """package liba
+
+func Hello() string {
+\treturn "hi"
+}
+
+// Greeting refers to Hello from inside the module. It is what makes the
+// negative half of the check below mean anything: without an in-module
+// reference to wait for, "gopls found nothing across the boundary" and "gopls
+// has not finished loading" are the same answer, and the probe would be
+// asserting the second while believing the first.
+func Greeting() string {
+\treturn Hello()
+}
+"""
+
+GO_APP = """package main
+
+import (
+\t"fmt"
+
+\t"example.com/liba"
+)
+
+func main() {
+\tfmt.Println(liba.Hello())
+}
+"""
+
+# `replace` rather than a real version, so nothing here needs the network.
+GO_MODULES = {
+    "liba/go.mod": "module example.com/liba\n\ngo 1.21\n",
+    "liba/lib.go": GO_LIB,
+    "appb/go.mod": (
+        "module example.com/appb\n\ngo 1.21\n\n"
+        "require example.com/liba v0.0.0\n\n"
+        "replace example.com/liba => ../liba\n"
+    ),
+    "appb/main.go": GO_APP,
+}
+
+# No second reference inside liba, unlike the Go fixture above. The Rust
+# assertion is the positive one, so the cross-crate hit has to be the only
+# thing settle can wait for -- an in-crate reference would let it return the
+# moment rust-analyzer parsed one file, and the check would be racing the
+# index instead of measuring it.
+RUST_LIB = """pub fn hello() -> &'static str {
+    "hi"
+}
+"""
+
+RUST_APP = """fn main() {
+    println!("{}", liba::hello());
+}
+"""
+
+# A path dependency, which is Rust's `replace`: no network, and the two crates
+# are still two separate cargo projects with no workspace file over them.
+RUST_CRATES = {
+    "liba/Cargo.toml": '[package]\nname = "liba"\nversion = "0.1.0"\nedition = "2021"\n',
+    "liba/src/lib.rs": RUST_LIB,
+    "appb/Cargo.toml": (
+        '[package]\nname = "appb"\nversion = "0.1.0"\nedition = "2021"\n\n'
+        '[dependencies]\nliba = { path = "../liba" }\n'
+    ),
+    "appb/src/main.rs": RUST_APP,
+}
+
+
+@dataclass
+class Cross:
+    """Two projects of one language, and where to ask who refers to what."""
+
+    language: str
+    files: dict
+    # Both are opened: a server only answers about documents it has been given,
+    # and the question spans both projects.
+    opened: tuple
+    declared_in: str
+    line: int  # 0-based, as LSP counts
+    character: int
+
+
+CROSS_GO = Cross(
+    language="go",
+    files=GO_MODULES,
+    opened=("liba/lib.go", "appb/main.go"),
+    declared_in="liba/lib.go",
+    # `func Hello() string {` is line 2, and the name starts at column 5.
+    line=2,
+    character=5,
+)
+
+CROSS_RUST = Cross(
+    language="rust",
+    files=RUST_CRATES,
+    opened=("liba/src/lib.rs", "appb/src/main.rs"),
+    declared_in="liba/src/lib.rs",
+    line=0,
+    character=7,
+)
+
+
+def lay_out(cross, prefix):
+    """Write one Cross fixture to a fresh directory and return its root."""
+    root = tempfile.mkdtemp(prefix=prefix)
+    for name, text in cross.files.items():
+        path = os.path.join(root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+def referrers_to_hello(root, label, cross):
+    """Which files poly reports as referring to `hello`, relative to root.
+
+    A whole poly session per call. `init_params` is captured at initialize and
+    the Go caller writes a go.work between its two calls, so reusing a session
+    would be asking gopls about a workspace it was never told about -- which is
+    also why the editor command restarts the client rather than waiting for a
+    watcher.
+
+    Two workspace folders and neither of them the root: that is what VSCode
+    sends when someone opens two projects in one window, and it is the reason
+    this is worth measuring at all. The go.work ends up in a directory the
+    editor never mentions.
+    """
+    global proc, INBOX, STDERR
+    INBOX, STDERR = [], []
+    folders = [
+        {"uri": f"file://{root}/liba", "name": "liba"},
+        {"uri": f"file://{root}/appb", "name": "appb"},
+    ]
+    proc = subprocess.Popen(
+        [BIN, "lsp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    threading.Thread(target=watch, args=(proc.stderr,), daemon=True).start()
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": None,
+                "rootUri": folders[0]["uri"],
+                "workspaceFolders": folders,
+                "initializationOptions": {
+                    "languageServers": True,
+                    "languageServerLogs": True,
+                },
+                "capabilities": {
+                    "textDocument": {
+                        "synchronization": {"dynamicRegistration": True},
+                        "references": {},
+                    },
+                    "workspace": {"configuration": True, "didChangeConfiguration": {}},
+                },
+            },
+        }
+    )
+    pump(want_id=1)
+    send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+    for name in cross.opened:
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": f"file://{root}/{name}",
+                        "languageId": cross.language,
+                        "version": 1,
+                        "text": cross.files[name],
+                    }
+                },
+            }
+        )
+    pump(want_method="client/registerCapability")
+
+    found = settle(
+        50,
+        "textDocument/references",
+        {
+            "textDocument": {"uri": f"file://{root}/{cross.declared_in}"},
+            "position": {"line": cross.line, "character": cross.character},
+            "context": {"includeDeclaration": False},
+        },
+        bool,
+        f"references ({label})",
+    )
+    files = sorted(
+        {os.path.relpath(location["uri"][len("file://") :], root) for location in found}
+    )
+    send({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": None})
+    pump(want_id=99)
+    send({"jsonrpc": "2.0", "method": "exit", "params": None})
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("poly did not exit")
+    return files
+
+
+def cross_module_go():
+    """Do references cross a module boundary, and does it take a go.work?
+
+    Both halves are asserted. The negative one is not a formality: the whole
+    `Poly: Create go.work` command rests on it, so if gopls ever starts
+    crossing without one, that command stops being load-bearing and this should
+    say so rather than keep passing. Same policy as the `unsupported` field --
+    write the measurement down, and fail when it stops being true.
+    """
+    if not (shutil.which("gopls") and shutil.which("go")):
+        print("SKIPPED cross-module Go: needs gopls and go on PATH")
+        return
+    root = lay_out(CROSS_GO, "poly-proxy-gowork-")
+
+    print("go, two modules in one window:")
+    without = referrers_to_hello(root, "no go.work", CROSS_GO)
+    assert any(f.startswith("liba/") for f in without), (
+        f"gopls did not even find the in-module reference; nothing here is "
+        f"measuring what it claims to: {without}"
+    )
+    crossed = [f for f in without if f.startswith("appb/")]
+    assert not crossed, (
+        "gopls crossed a module boundary with no go.work — it got better, and "
+        f"`Poly: Create go.work` may no longer be needed: {crossed}"
+    )
+    print(f"  without go.work, `replace` alone: {without}")
+
+    # check=False so the assertion below can quote go's own complaint; a
+    # CalledProcessError here would say only that it failed.
+    written = subprocess.run(
+        ["go", "work", "init", "./liba", "./appb"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert written.returncode == 0, f"go work init failed: {written.stderr}"
+    # In the common parent, which is neither workspace folder: gopls walks up
+    # from the module directory to find it, and the editor command relies on
+    # that -- the directory it writes into is usually outside everything open.
+    assert os.path.exists(os.path.join(root, "go.work"))
+
+    with_work = referrers_to_hello(root, "go.work", CROSS_GO)
+    assert any(f.startswith("appb/") for f in with_work), (
+        f"a go.work did not make the reference cross: {with_work}"
+    )
+    print(f"  with a go.work one directory up: {with_work}")
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def cross_crate_rust():
+    """The same question in Rust, and the answer is the opposite one.
+
+    Measured because "Rust needs the go.work treatment too" is the obvious
+    guess and it is wrong: a `path` dependency puts liba into appb's crate
+    graph, and rust-analyzer's reference search covers the whole graph. There
+    is nothing for poly to write, so there is no `Poly: Create Cargo
+    Workspace` -- and this is what that decision rests on.
+
+    Asserted rather than left in prose for the reason the Go half is: if
+    rust-analyzer ever stops crossing, Rust acquires the gap Go has, and the
+    probe should be what says so.
+    """
+    if not (shutil.which("rust-analyzer") and shutil.which("cargo")):
+        print("SKIPPED cross-crate Rust: needs rust-analyzer and cargo on PATH")
+        return
+    root = lay_out(CROSS_RUST, "poly-proxy-crates-")
+
+    print("rust, two crates in one window:")
+    # No workspace file is written anywhere, in either call: that is the point.
+    found = referrers_to_hello(root, "no workspace file", CROSS_RUST)
+    assert any(f.startswith("appb/") for f in found), (
+        "rust-analyzer stopped crossing a crate boundary on a path dependency. "
+        "Rust now has Go's problem, and unlike Go there is no overlay file to "
+        f"write for it: {found}"
+    )
+    print(f"  a path dependency alone, no workspace Cargo.toml: {found}")
+    shutil.rmtree(root, ignore_errors=True)
+
+
+# One directory, two languages, one query. Go and Lua because both servers
+# answer workspace symbols out of what they have already parsed -- no index to
+# build and no toolchain to resolve -- so the only thing being measured is
+# poly's fan-out.
+FANOUT_GO = """package main
+
+func Symbolic() string {
+\treturn "go"
+}
+
+func main() {
+\tprintln(Symbolic())
+}
+"""
+
+# A global, not a local: lua-language-server reports globals as workspace
+# symbols and a `local function` is not one of them.
+FANOUT_LUA = """function Symbolic()
+    return "lua"
+end
+
+print(Symbolic())
+"""
+
+FANOUT_FILES = {
+    "go.mod": "module example.com/fanout\n\ngo 1.21\n",
+    "main.go": FANOUT_GO,
+    "main.lua": FANOUT_LUA,
+}
+
+
+LATE_FOLDER_FILES = {
+    "opened/go.mod": "module example.com/opened\n\ngo 1.21\n",
+    "opened/main.go": 'package main\n\nfunc main() {\n\tprintln("opened")\n}\n',
+    "added/go.mod": "module example.com/added\n\ngo 1.21\n",
+    # The name is deliberately unlike anything in the other module or the
+    # standard library, so a hit can only have come from this folder.
+    "added/lib.go": 'package added\n\nfunc ZarquonBeeblebrox() string {\n\treturn "x"\n}\n',
+}
+
+
+def sees_late_folder(root, announce, start_first):
+    """Does gopls know about a folder that arrived after initialize?
+
+    `announce` sends the didChangeWorkspaceFolders; without it this is the
+    control. `start_first` decides which half is under test: opening the .go
+    before the announcement makes it the broadcast to a running server, opening
+    it after makes it the init_params replay to a server that starts late.
+    """
+    global proc, INBOX, STDERR
+    INBOX, STDERR = [], []
+    opened = f"file://{root}/opened"
+    proc = subprocess.Popen(
+        [BIN, "lsp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    threading.Thread(target=watch, args=(proc.stderr,), daemon=True).start()
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": None,
+                "rootUri": opened,
+                "workspaceFolders": [{"uri": opened, "name": "opened"}],
+                "initializationOptions": {"languageServers": True},
+                "capabilities": {
+                    "textDocument": {"synchronization": {"dynamicRegistration": True}},
+                    "workspace": {
+                        "configuration": True,
+                        "workspaceFolders": True,
+                        "symbol": {},
+                    },
+                },
+            },
+        }
+    )
+    init, _ = pump(want_id=1)
+    # poly has to say it wants them, or the editor never sends any of this.
+    folders = init["result"]["capabilities"]["workspace"]["workspaceFolders"]
+    assert folders["supported"] and folders["changeNotifications"], folders
+    send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+    def open_entry():
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": f"{opened}/main.go",
+                        "languageId": "go",
+                        "version": 1,
+                        "text": LATE_FOLDER_FILES["opened/main.go"],
+                    }
+                },
+            }
+        )
+        pump(want_method="client/registerCapability")
+
+    def announce_folder():
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "workspace/didChangeWorkspaceFolders",
+                "params": {
+                    "event": {
+                        "added": [
+                            {"uri": f"file://{root}/added", "name": "added"},
+                        ],
+                        "removed": [],
+                    }
+                },
+            }
+        )
+
+    if start_first:
+        open_entry()
+        if announce:
+            announce_folder()
+    else:
+        if announce:
+            announce_folder()
+        open_entry()
+
+    # settle, because gopls has to load the new folder before it can answer
+    # about it -- and because the control has to be given the same chance to
+    # succeed as the case, or it proves nothing.
+    deadline = time.time() + (60 if announce else 20)
+    rid = 70
+    found = []
+    while time.time() < deadline:
+        result = ask(rid, "workspace/symbol", {"query": "ZarquonBeeblebrox"})["result"]
+        found = [s for s in result or [] if "/added/" in s["location"]["uri"]]
+        if found:
+            break
+        rid += 1
+        time.sleep(0.5)
+
+    send({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": None})
+    pump(want_id=99)
+    send({"jsonrpc": "2.0", "method": "exit", "params": None})
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("poly did not exit")
+    return bool(found)
+
+
+def a_folder_added_mid_session():
+    """Adding a second project to the window, without reopening it.
+
+    Two halves that fail independently. A server already running is told by the
+    broadcast; a server that starts afterwards is told by `init_params`, which
+    poly has to keep current because it replays it verbatim to each server as it
+    starts. Before this, poly did not even declare `workspace.workspaceFolders`,
+    so the editor sent nothing and both halves were dark.
+
+    The control is what makes it a measurement: the same session without the
+    notification, given a third of the deadline to find the same symbol.
+    """
+    if not (shutil.which("gopls") and shutil.which("go")):
+        print("SKIPPED late workspace folder: needs gopls and go on PATH")
+        return
+    root = os.path.realpath(tempfile.mkdtemp(prefix="poly-proxy-folders-"))
+    for name, text in LATE_FOLDER_FILES.items():
+        path = os.path.join(root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    print("a workspace folder added mid-session:")
+    assert not sees_late_folder(root, announce=False, start_first=True), (
+        "gopls found a symbol in a folder it was never told about; the control "
+        "is not controlling anything and neither assertion below means much"
+    )
+    print("  control: unannounced, gopls cannot see it")
+    assert sees_late_folder(root, announce=True, start_first=True), (
+        "a running gopls was not told the folder appeared — the broadcast half"
+    )
+    print("  announced to a running gopls: found")
+    assert sees_late_folder(root, announce=True, start_first=False), (
+        "a gopls started after the change was handed the folder list from "
+        "initialize — init_params went stale"
+    )
+    print("  announced before gopls started: found")
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def one_query_two_servers():
+    """Ctrl+T with two languages open: one reply, and both servers in it.
+
+    The only request poly turns into several, so it is the only one where the
+    editor can be told the wrong thing in two directions. Answering before the
+    slower server replies loses half the results and looks like a server that
+    "just did not find it"; registering the method once per server makes the
+    editor query poly twice and every symbol appears twice. Neither shows up in
+    a session with one server, which is every other case in this file.
+    """
+    global proc, INBOX, STDERR
+    if not all(shutil.which(tool) for tool in ("gopls", "go", "lua-language-server")):
+        print("SKIPPED symbol fan-out: needs gopls, go and lua-language-server")
+        return
+    root = os.path.realpath(tempfile.mkdtemp(prefix="poly-proxy-fanout-"))
+    for name, text in FANOUT_FILES.items():
+        with open(os.path.join(root, name), "w") as f:
+            f.write(text)
+
+    print("workspace symbols, two servers in one window:")
+    INBOX, STDERR = [], []
+    proc = subprocess.Popen(
+        [BIN, "lsp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    threading.Thread(target=watch, args=(proc.stderr,), daemon=True).start()
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": None,
+                "rootUri": f"file://{root}",
+                "workspaceFolders": [{"uri": f"file://{root}", "name": "fanout"}],
+                "initializationOptions": {"languageServers": True},
+                "capabilities": {
+                    "textDocument": {"synchronization": {"dynamicRegistration": True}},
+                    "workspace": {
+                        "configuration": True,
+                        "symbol": {},
+                        "didChangeConfiguration": {},
+                    },
+                },
+            },
+        }
+    )
+    pump(want_id=1)
+    send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+    for name, language in (("main.go", "go"), ("main.lua", "lua")):
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": f"file://{root}/{name}",
+                        "languageId": language,
+                        "version": 1,
+                        "text": FANOUT_FILES[name],
+                    }
+                },
+            }
+        )
+    # One registration message per server, and `workspace/symbol` may appear in
+    # exactly one of them. Two would make the editor build two providers over
+    # one connection, and every query would be asked -- and answered -- twice.
+    claimed = []
+    for _ in range(2):
+        registration, _ = pump(want_method="client/registerCapability")
+        methods = [r["method"] for r in registration["params"]["registrations"]]
+        claimed.append("workspace/symbol" in methods)
+        send({"jsonrpc": "2.0", "id": registration["id"], "result": None})
+    assert claimed.count(True) == 1, (
+        f"workspace/symbol registered {claimed.count(True)} times across two "
+        "servers; it is one provider for the session, not one per server"
+    )
+    print("  registered once for the session, not once per server")
+
+    # Both, so a reply that arrived before the slower server spoke fails here
+    # rather than passing with half an answer.
+    found = settle(
+        60,
+        "workspace/symbol",
+        {"query": "Symbolic"},
+        lambda result: len({s["location"]["uri"] for s in result or []}) >= 2,
+        "symbols from both servers",
+    )
+    files = sorted(
+        {os.path.relpath(s["location"]["uri"][len("file://") :], root) for s in found}
+    )
+    assert "main.go" in files and "main.lua" in files, (
+        f"one query has to reach every running server: {files}"
+    )
+    print(f"  one reply carried {len(found)} symbol(s) from {files}")
+
+    send({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": None})
+    pump(want_id=99)
+    send({"jsonrpc": "2.0", "method": "exit", "params": None})
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("poly did not exit")
+    shutil.rmtree(root, ignore_errors=True)
+
+
+# A language server whose only reply is to a cancellation.
+#
+# Every other case in this file measures a real server, on purpose. This one
+# cannot: whether a real server is still working when the cancel lands is a
+# race, so "it answered" would prove nothing and "it answered -32800" would be
+# flaky. A server that holds every request open forever inverts that -- the
+# probe gets an answer only if the notification arrived, and a poly that drops
+# cancels hangs instead of passing. It is reached through poly.toml's `[tools]`
+# override, the same one that swaps rust-analyzer for a drop-in replacement, so
+# no part of poly is in test mode.
+CANCEL_SERVER = r"""#!/usr/bin/env python3
+import json
+import sys
+
+
+def read():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+
+
+def write(msg):
+    data = json.dumps(msg).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(data) + data)
+    sys.stdout.buffer.flush()
+
+
+held = set()
+while True:
+    message = read()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write({
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {"capabilities": {"definitionProvider": True}},
+        })
+    elif method == "shutdown":
+        write({"jsonrpc": "2.0", "id": message["id"], "result": None})
+    elif method == "exit":
+        break
+    elif method == "$/cancelRequest":
+        # An id this server never saw is one the spec lets it ignore, and
+        # answering it anyway would invent a reply the editor is not waiting
+        # for. That distinction is half of what the probe checks.
+        rid = message["params"]["id"]
+        if rid in held:
+            held.discard(rid)
+            write({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {"code": -32800, "message": "cancelled"},
+            })
+    elif method is not None and "id" in message:
+        held.add(message["id"])
+"""
+
+
+def a_cancelled_request_reaches_the_server():
+    """Escape mid-request: the cancel travels, and only the named one dies.
+
+    An editor cancels constantly -- every keystroke abandons the completion and
+    the symbol query before it. poly forwarded requests and dropped the cancels,
+    so a downstream server kept computing answers for a cursor that had moved
+    on; the editor throws those away, and in a large Go project the work is not
+    small. Cancels are broadcast rather than routed because they name an id and
+    no document, which is only safe because poly forwards requests with the
+    editor's own id untouched -- so the second half of this checks that a server
+    which never saw the id stays quiet about it.
+    """
+    global proc, INBOX, STDERR
+    root = os.path.realpath(tempfile.mkdtemp(prefix="poly-proxy-cancel-"))
+    server = os.path.join(root, "cancel-server.py")
+    with open(server, "w") as f:
+        f.write(CANCEL_SERVER)
+    os.chmod(server, 0o755)
+    with open(os.path.join(root, "poly.toml"), "w") as f:
+        f.write(f'[tools]\nlua-language-server = "{server}"\n')
+    with open(os.path.join(root, "main.lua"), "w") as f:
+        f.write(FANOUT_LUA)
+
+    print("a request cancelled while a server is still holding it:")
+    INBOX, STDERR = [], []
+    proc = subprocess.Popen(
+        [BIN, "lsp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    threading.Thread(target=watch, args=(proc.stderr,), daemon=True).start()
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": None,
+                "rootUri": f"file://{root}",
+                "workspaceFolders": [{"uri": f"file://{root}", "name": "cancel"}],
+                "initializationOptions": {"languageServers": True},
+                "capabilities": {
+                    "textDocument": {"synchronization": {"dynamicRegistration": True}},
+                    "workspace": {"configuration": True, "didChangeConfiguration": {}},
+                },
+            },
+        }
+    )
+    pump(want_id=1)
+    send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": f"file://{root}/main.lua",
+                    "languageId": "lua",
+                    "version": 1,
+                    "text": FANOUT_LUA,
+                }
+            },
+        }
+    )
+
+    def cancelled(rid):
+        """Ask, cancel, and insist on the reply the cancel is the only source of."""
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": {"uri": f"file://{root}/main.lua"},
+                    "position": {"line": 4, "character": 6},
+                },
+            }
+        )
+        send({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": rid}})
+        # Without this the regression is a hang rather than a failure: nothing
+        # else in the session is ever going to answer that id.
+        guard = threading.Timer(30, proc.kill)
+        guard.start()
+        try:
+            reply, _ = pump(want_id=rid)
+        except EOFError:
+            raise AssertionError(
+                f"no reply to request {rid} within 30s — the cancel never "
+                "reached the server, so nothing was left to answer it"
+            ) from None
+        finally:
+            guard.cancel()
+        assert (reply.get("error") or {}).get("code") == -32800, (
+            f"expected the cancelled request to end as -32800, got {reply}"
+        )
+
+    cancelled(61)
+    print("  the cancel reached the server holding the request")
+
+    # An id no request ever used. It goes to the same server, because poly
+    # cannot know which one holds an id without tracking every request; what it
+    # must not do is produce a reply for it.
+    send({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": 777}})
+    cancelled(62)
+    stray = [m for m in INBOX if m.get("id") == 777]
+    assert not stray, f"a cancel for an id nobody asked about was answered: {stray}"
+    print("  a cancel for an unknown id was ignored, and the session survived it")
+
+    send({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": None})
+    pump(want_id=99)
+    send({"jsonrpc": "2.0", "method": "exit", "params": None})
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("poly did not exit")
+    shutil.rmtree(root, ignore_errors=True)
+
+
 ran = []
 for probe in CASES:
     # A managed server is poly's to produce, so there is nothing to skip on:
@@ -1043,6 +2362,12 @@ if rude:
     print(f"  {rude.server} was shut down properly, not just abandoned")
 elif ran:
     print("SKIPPED rude-exit check: needs rust-analyzer, the server that reports it")
+
+cross_module_go()
+cross_crate_rust()
+one_query_two_servers()
+a_folder_added_mid_session()
+a_cancelled_request_reaches_the_server()
 
 if not ran:
     print("PROXY PROBE SKIPPED: no language server on PATH")

@@ -20,9 +20,15 @@ use poly_core::diag::{FailOn, Severity};
 use poly_tools::run::FileIssue;
 use serde_json::{json, Value};
 
+use crate::coverage::Coverage;
+
 /// Bumped when a field changes meaning or leaves. A new field does not bump it:
 /// a consumer reading `issues[].file` is unaffected by a sibling appearing.
-const SCHEMA_VERSION: u32 = 1;
+///
+/// 2: `tools_ran`, `tools_missing` and `tools_failed` left, replaced by
+/// `coverage` -- three summaries of one list, none of which could say why a
+/// tool did not run.
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Format {
@@ -139,6 +145,12 @@ fn json_issue(found: &FileIssue, fail_on: FailOn) -> Value {
         "severity": i.severity.as_str(),
         "tool": i.source,
         "rule": i.code,
+        // What kind of defect this is, in one vocabulary for every language --
+        // `null` for the upstream rules poly has not classified, which is most
+        // of them and says so rather than guessing. A consumer grouping a
+        // pipeline's findings wants this; `tool`/`rule` stay because they are
+        // what the tool's own documentation is filed under.
+        "category": poly_core::catalog::category_of(i.source, &i.code),
         "message": i.message,
         // The rendered sentence rather than the variant: the terminal, the
         // editor hover and this have to word a remedy identically, or a reader
@@ -262,9 +274,7 @@ fn table_markdown(issues: &[FileIssue]) -> String {
 pub struct Check<'a> {
     pub issues: &'a [FileIssue],
     pub fail_on: FailOn,
-    pub ran: usize,
-    pub missing: &'a [String],
-    pub failed: &'a [String],
+    pub coverage: &'a Coverage,
 }
 
 impl Check<'_> {
@@ -284,12 +294,19 @@ impl Check<'_> {
                 json!({
                     "issues": self.issues.len(),
                     "fatal": self.fatal(),
-                    "tools_ran": self.ran,
-                    // Named, not counted: "2 tools missing" sends a reader back
-                    // to the stderr log to find out which, which is the whole
-                    // thing these formats exist to avoid.
-                    "tools_missing": self.missing,
-                    "tools_failed": self.failed,
+                    // How many findings no category covers. A count rather than
+                    // a list because the reader who needs the detail already
+                    // has it -- every issue above carries its own `category`,
+                    // or `null`. What this answers in one number is "can I
+                    // group this run's findings by kind, or only some of it".
+                    "uncategorized": self.uncategorized(),
+                    // Named and explained, not counted: "2 tools missing" sends
+                    // a reader back to the stderr log to find out which and
+                    // why, which is the whole thing these formats exist to
+                    // avoid. Every checker the walk found files for is here,
+                    // the ones that ran included -- "what did not run" is only
+                    // half of what a pipeline needs to trust a green result.
+                    "coverage": self.coverage.json(),
                 }),
             ),
         }
@@ -299,6 +316,13 @@ impl Check<'_> {
         self.issues
             .iter()
             .filter(|i| self.fail_on.fails(i.issue.severity))
+            .count()
+    }
+
+    fn uncategorized(&self) -> usize {
+        self.issues
+            .iter()
+            .filter(|i| poly_core::catalog::category_of(i.issue.source, &i.issue.code).is_none())
             .count()
     }
 }
@@ -354,6 +378,15 @@ impl Fmt<'_> {
 
 /// The severity a `poly fmt --check` finding carries, shared with `main` so the
 /// exit code and the `fatal` field cannot disagree about it.
+///
+/// Warning, where the levels in `severity_of` would say info: formatting is
+/// style, and nothing about an unformatted file is wrong at run time. It is the
+/// one place that reading loses, because this severity is not only a label --
+/// `poly fmt --check` exits on `fail_on.fails(UNFORMATTED)`, so info would make
+/// the command print "file is not formatted" and exit 0 for every repo that set
+/// `fail-on = "warning"`, which is a check that no longer checks. A finding
+/// that decides its own command's exit code is not in the same business as one
+/// that adds a line to a report.
 pub const UNFORMATTED: Severity = Severity::Warning;
 
 #[cfg(test)]
@@ -435,16 +468,21 @@ mod tests {
             }),
             Some("https://docs.astral.sh/ruff/rules/unused-import"),
         )];
+        let mut coverage = Coverage::default();
+        coverage.record("ruff", 4, crate::coverage::Status::Ran);
+        coverage.record(
+            "tflint",
+            2,
+            crate::coverage::Status::Missing("not on PATH".to_string()),
+        );
         let report = Check {
             issues: &found,
             fail_on: FailOn::Severity(Severity::Error),
-            ran: 3,
-            missing: &["tflint".to_string()],
-            failed: &[],
+            coverage: &coverage,
         };
         let doc: Value = serde_json::from_str(&report.render(Format::Json, false)).unwrap();
 
-        assert_eq!(doc["version"], 1);
+        assert_eq!(doc["version"], SCHEMA_VERSION);
         assert_eq!(doc["command"], "check");
         let issue = &doc["issues"][0];
         assert_eq!(issue["file"], "lint.py");
@@ -469,7 +507,44 @@ mod tests {
         assert_eq!(issue["fatal"], false);
         assert_eq!(doc["summary"]["fatal"], 0);
         assert_eq!(doc["summary"]["issues"], 1);
-        assert_eq!(doc["summary"]["tools_missing"][0], "tflint");
+        // A checker that did not run says so *and* says why, in the same
+        // document as the findings: a consumer deciding whether a green result
+        // is trustworthy has no other place to look.
+        let coverage = &doc["summary"]["coverage"];
+        assert_eq!(coverage[1]["tool"], "tflint");
+        assert_eq!(coverage[1]["status"], "missing");
+        assert_eq!(coverage[1]["reason"], "not on PATH");
+        assert_eq!(coverage[0]["tool"], "ruff");
+        assert_eq!(coverage[0]["status"], "ran");
+    }
+
+    /// A finding says what kind of defect it is, and says nothing rather than
+    /// guessing when poly has not classified the rule.
+    ///
+    /// Both halves matter to the same consumer: one grouping a pipeline's
+    /// findings by kind needs to know how much of the run it can group, and a
+    /// category invented for `ruff/F401` would be poly paraphrasing somebody
+    /// else's rule -- the thing `rule_doc` refuses to do for the same reason.
+    #[test]
+    fn json_carries_the_category_and_counts_what_has_none() {
+        let mut root = issue(None, None);
+        root.issue.source = "poly";
+        root.issue.code = "docker-root-user".to_string();
+        let found = [root, issue(None, None)];
+        let doc: Value = serde_json::from_str(
+            &Check {
+                issues: &found,
+                fail_on: FailOn::default(),
+                coverage: &Coverage::default(),
+            }
+            .render(Format::Json, false),
+        )
+        .unwrap();
+
+        assert_eq!(doc["issues"][0]["category"], "excess-privilege");
+        assert_eq!(doc["issues"][1]["tool"], "ruff");
+        assert!(doc["issues"][1]["category"].is_null());
+        assert_eq!(doc["summary"]["uncategorized"], 1);
     }
 
     /// A tool that said nothing about a remedy has to serialize as null, not as
@@ -481,9 +556,7 @@ mod tests {
             &Check {
                 issues: &found,
                 fail_on: FailOn::default(),
-                ran: 1,
-                missing: &[],
-                failed: &[],
+                coverage: &Coverage::default(),
             }
             .render(Format::Json, false),
         )

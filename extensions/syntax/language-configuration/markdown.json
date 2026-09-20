@@ -5,6 +5,22 @@
       "action": { "indent": "none", "appendText": "- [ ] " }
     },
     {
+      "beforeText": "^\\s*\\* \\[[ xX]\\] .+",
+      "action": { "indent": "none", "appendText": "* [ ] " }
+    },
+    {
+      "beforeText": "^\\s*\\+ \\[[ xX]\\] .+",
+      "action": { "indent": "none", "appendText": "+ [ ] " }
+    },
+    {
+      "beforeText": "^\\s*\\d+\\. \\[[ xX]\\] .+",
+      "action": { "indent": "none", "appendText": "1. [ ] " }
+    },
+    {
+      "beforeText": "^\\s*\\d+\\) \\[[ xX]\\] .+",
+      "action": { "indent": "none", "appendText": "1) [ ] " }
+    },
+    {
       "beforeText": "^\\s*- .+",
       "action": { "indent": "none", "appendText": "- " }
     },
@@ -15,6 +31,14 @@
     {
       "beforeText": "^\\s*\\+ .+",
       "action": { "indent": "none", "appendText": "+ " }
+    },
+    {
+      "beforeText": "^\\s*\\d+\\. .+",
+      "action": { "indent": "none", "appendText": "1. " }
+    },
+    {
+      "beforeText": "^\\s*\\d+\\) .+",
+      "action": { "indent": "none", "appendText": "1) " }
     },
     {
       "beforeText": "^\\s*> .+",

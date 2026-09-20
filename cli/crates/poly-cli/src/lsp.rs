@@ -33,7 +33,7 @@ const METHOD_NOT_FOUND: i32 = -32601;
 const FORMAT_PATHS: &str = "poly.formatPaths";
 const MINIFY_JSON: &str = "poly.minifyJsonEdits";
 const EDITOR_CONFIG: &str = "poly.editorConfig";
-const EXECUTE_COMMANDS: &[&str] = &[FORMAT_PATHS, MINIFY_JSON, EDITOR_CONFIG];
+pub(crate) const EXECUTE_COMMANDS: &[&str] = &[FORMAT_PATHS, MINIFY_JSON, EDITOR_CONFIG];
 
 pub fn run() -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
@@ -59,7 +59,7 @@ pub fn run() -> Result<()> {
 /// binary as protobuf's formatter and linter. Making it PATH-only would mean
 /// downloading buf to format a file and then refusing to use it to navigate
 /// the same file. See `server_command`.
-const LANGUAGE_SERVERS: &[(&str, &str)] = &[
+pub(crate) const LANGUAGE_SERVERS: &[(&str, &str)] = &[
     ("go", "gopls"),
     ("rust", "rust-analyzer"),
     ("c", "clangd"),
@@ -71,6 +71,10 @@ const LANGUAGE_SERVERS: &[(&str, &str)] = &[
     ("terraform", "terraform-ls"),
     ("lua", "lua-language-server"),
     ("protobuf", "buf"),
+    // buf's reasoning again: an R script has no build behind it, so there is no
+    // toolchain for `arity lsp` to be out of step with, and poly already pins
+    // this exact binary as R's formatter and linter.
+    ("r", "arity"),
 ];
 
 /// What a binary needs before it is a language server at all.
@@ -79,7 +83,11 @@ const LANGUAGE_SERVERS: &[(&str, &str)] = &[
 /// its usage and exits, because the language server is a subcommand of it.
 /// buf is the same shape -- it is a whole protobuf toolkit, and the server is
 /// one verb of it. Every other server here is its own entry point.
-const LAUNCH: &[(&str, &[&str])] = &[("terraform-ls", &["serve"]), ("buf", &["lsp", "serve"])];
+const LAUNCH: &[(&str, &[&str])] = &[
+    ("terraform-ls", &["serve"]),
+    ("buf", &["lsp", "serve"]),
+    ("arity", &["lsp"]),
+];
 
 /// How poly gets hold of a language server binary.
 ///
@@ -91,7 +99,15 @@ const LAUNCH: &[(&str, &[&str])] = &[("terraform-ls", &["serve"]), ("buf", &["ls
 /// that governs it as a formatter, rather than through a second setting that
 /// says the same thing.
 fn server_command(name: &str, config: &poly_core::Config) -> Option<PathBuf> {
-    if poly_tools::tool(name).is_some() {
+    // A `[tools]` entry decides first, registry member or not. For buf that is
+    // the version poly pins; for the PATH-only servers it is the two answers a
+    // project may need and previously had no way to give: `off` turns one
+    // server off without turning the proxy off, and a path runs a different
+    // binary in its place -- which is how a drop-in replacement (rust-glancer
+    // for rust-analyzer) gets used without poly holding an opinion about which
+    // of them is better. Both were silently ignored before, because `resolve`
+    // was only consulted for tools poly downloads.
+    if poly_tools::tool(name).is_some() || config.tools.contains_key(name) {
         return poly_tools::resolve(name, config, false)
             .command()
             .map(Path::to_path_buf);
@@ -113,6 +129,16 @@ fn server_for(language: &str) -> Option<&'static str> {
         .iter()
         .find(|(known, _)| *known == language)
         .map(|(_, name)| *name)
+}
+
+/// Is `name` a binary poly runs as a language server?
+///
+/// Asked of a *finding's* source, which is why it is a membership test rather
+/// than a name: it is how `merged` tells "poly ran a linter the proxied server
+/// is not" (selene, swiftlint) from "poly ran the proxied server's own linter"
+/// (arity), without either side having to be listed twice.
+fn is_language_server(name: &str) -> bool {
+    LANGUAGE_SERVERS.iter().any(|(_, server)| *server == name)
 }
 
 /// Every language a server answers for.
@@ -158,6 +184,14 @@ struct Server {
     last_completion: Option<String>,
     /// The same, for `codeAction/resolve`.
     last_code_action: Option<String>,
+    /// The same, for `inlayHint/resolve`. No server measured so far asks for
+    /// resolution, but the flag that turns it on is the server's own and rides
+    /// through the registration untouched, so the route has to exist.
+    last_inlay_hint: Option<String>,
+    /// The same, for `codeLens/resolve`. Same reason as inlay hints: whether a
+    /// resolve ever arrives is decided by the server's own
+    /// `codeLensProvider.resolveProvider`, which poly relays rather than reads.
+    last_code_lens: Option<String>,
     /// Editor ids of `textDocument/codeAction` requests still in flight.
     ///
     /// A response carries an id and no method, so this is the only way the pump
@@ -165,10 +199,91 @@ struct Server {
     /// thread is where it has to be told, because a downstream response never
     /// reaches the main loop. Shared for the same reason `diagnostics` is.
     code_action_ids: Arc<Mutex<HashSet<lsp_server::RequestId>>>,
+    /// `workspace/symbol` requests still collecting answers, by editor id.
+    ///
+    /// Shared with the pump threads for the same reason `code_action_ids` is:
+    /// the answers arrive there, one per server, and the editor gets one reply
+    /// only once the last of them has landed.
+    symbol_fanouts: Arc<Mutex<HashMap<lsp_server::RequestId, FanOut>>>,
+    /// Whether the editor has been told poly answers `workspace/symbol`.
+    ///
+    /// Once per session, not once per server: see `workspace_symbol_registration`.
+    workspace_symbol_registered: bool,
     /// Content hash at last lint per document: external linters cost tens of
     /// ms to seconds, so an unchanged save republishes nothing.
     lint_hashes: HashMap<Url, u64>,
+    /// Scopes a whole-package lint has already been asked for. Opening a second
+    /// file in a module poly has already looked at costs nothing; golangci-lint
+    /// type-checks the package, so the first look is the expensive one and there
+    /// is no reason to repeat it until a save. The linter is part of the key
+    /// because one directory can be both — a Go module with .tf files in it is
+    /// two scopes that happen to share a path.
+    package_roots: HashSet<(PackageLinter, PathBuf)>,
+    /// Queue for the package-lint worker, created on first use. Most sessions
+    /// never open a Go or Terraform file and should not pay for a thread that
+    /// would spend them blocked on an empty channel.
+    package_jobs: Option<std::sync::mpsc::Sender<PackageJob>>,
     diagnostics: Arc<Mutex<Diagnostics>>,
+}
+
+/// One `workspace/symbol` query, waiting on the servers it was sent to.
+struct FanOut {
+    /// How many servers still owe an answer. The editor's reply goes out when
+    /// this reaches zero, whether the answers were symbols, nulls or errors —
+    /// a query that silently never completes leaves Ctrl+T spinning forever.
+    pending: usize,
+    answers: Vec<serde_json::Value>,
+}
+
+/// A linter that answers about a whole directory tree rather than a buffer.
+///
+/// Three of them, and they disagree about what a scope is: golangci-lint reads
+/// a Go module and everything under it, clippy reads a cargo workspace and
+/// every crate in it, tflint reads one directory and does not descend. That
+/// difference is why the findings are keyed by the run that produced them
+/// rather than by a path prefix.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum PackageLinter {
+    Golangci,
+    Clippy,
+    Tflint,
+}
+
+impl PackageLinter {
+    /// The name `[tools]` resolves it under, which is also the name in the log.
+    ///
+    /// `cargo` and not `clippy`: clippy is a cargo subcommand, so cargo is the
+    /// binary poly resolves and the one `[tools] cargo = "off"` turns off.
+    fn tool(self) -> &'static str {
+        match self {
+            Self::Golangci => "golangci-lint",
+            Self::Clippy => "cargo",
+            Self::Tflint => "tflint",
+        }
+    }
+
+    /// The same call `poly check` makes over the same scope. Anything cheaper —
+    /// one package, one file, a cached subset — would be a second opinion, and
+    /// the editor and CI holding two of those is what A4 forbids.
+    fn run(self, cmd: &Path, root: &Path) -> Result<Vec<poly_tools::run::FileIssue>> {
+        match self {
+            Self::Golangci => poly_tools::run::golangci_module(cmd, root),
+            Self::Clippy => poly_tools::run::clippy_workspace(cmd, root),
+            Self::Tflint => poly_tools::run::tflint_dir(cmd, root),
+        }
+    }
+}
+
+/// One whole-package lint to run.
+struct PackageJob {
+    linter: PackageLinter,
+    root: PathBuf,
+    /// Whether a language server answers for this scope's files, read at queue
+    /// time because the worker cannot ask: the map that knows lives on the main
+    /// thread. A whole-scope linter only reports on the language that queued it
+    /// — .go files in a Go module, .tf files in a Terraform directory — so one
+    /// answer covers the run.
+    proxied: bool,
 }
 
 /// Every source of diagnostics for a document, in one place.
@@ -183,6 +298,17 @@ struct Server {
 #[derive(Default)]
 struct Diagnostics {
     lint: HashMap<Url, Vec<lsp_types::Diagnostic>>,
+    /// Findings from a linter that answers about a whole scope at once, so they
+    /// arrive for files nobody opened. Kept apart from `lint` because they are
+    /// replaced as a set per run rather than per file: the only way to know a
+    /// finding is fixed is that the next run did not repeat it.
+    ///
+    /// Keyed by the run — the linter and the directory it ran in — because that
+    /// is the unit being replaced. Asking "which findings did the last run own"
+    /// with a path prefix is wrong as soon as scopes nest, and with tflint they
+    /// nest by default: linting `envs/prod` must not erase what the run in
+    /// `envs/prod/modules/db` found and is not going to repeat.
+    package: HashMap<(PackageLinter, PathBuf), HashMap<Url, Vec<lsp_types::Diagnostic>>>,
     format: HashMap<Url, lsp_types::Diagnostic>,
     downstream: HashMap<Url, Vec<lsp_types::Diagnostic>>,
 }
@@ -196,9 +322,32 @@ impl Diagnostics {
     /// Lint findings are not dropped — selene and swiftlint report things no
     /// language server looks for, and silently losing them on a setting the
     /// user turned on for *more* information would be the wrong trade.
+    ///
+    /// One lint source is the exception, and it is the exception by identity
+    /// rather than by opinion: arity is R's linter *and* R's language server,
+    /// so on a proxied document arity has already published exactly these
+    /// findings under its own name. Keeping poly's copy would print every R
+    /// finding twice — the failure `[tools] hadolint` and actionlint's
+    /// shellcheck pass were both turned off to avoid. Nothing is lost: the
+    /// findings are the same ones, from the same binary, and `poly check` in CI
+    /// (where there is no server) still reports them itself.
+    ///
+    /// The formatter is dropped on an unparsable document for a third reason,
+    /// and this one applies whether or not a server is proxying: see
+    /// `says_it_does_not_parse`.
     fn merged(&self, uri: &Url, proxied: bool) -> Vec<lsp_types::Diagnostic> {
         let mut all = self.lint.get(uri).cloned().unwrap_or_default();
-        if !proxied {
+        all.extend(
+            self.package
+                .values()
+                .filter_map(|found| found.get(uri))
+                .flatten()
+                .cloned(),
+        );
+        if proxied {
+            all.retain(|d| !d.source.as_deref().is_some_and(is_language_server));
+        }
+        if !proxied && !all.iter().any(says_it_does_not_parse) {
             all.extend(self.format.get(uri).cloned());
         }
         all.extend(self.downstream.get(uri).cloned().unwrap_or_default());
@@ -207,9 +356,46 @@ impl Diagnostics {
 
     fn forget(&mut self, uri: &Url) {
         self.lint.remove(uri);
+        for found in self.package.values_mut() {
+            found.remove(uri);
+        }
         self.format.remove(uri);
         self.downstream.remove(uri);
     }
+}
+
+/// Whether a lint finding is the claim "this file does not parse".
+///
+/// Five rules make it -- `toml/syntax`, `typescript/syntax`, `graphql/syntax`,
+/// `php/syntax` and arity's `syntax-error` -- and when one of them has spoken,
+/// the formatter's error on save is the same sentence in the same place. It is
+/// the formatter's copy that goes: `toml/syntax` carries a category, a rule
+/// doc and a suppression key, and `poly/format` carries none of the three.
+/// Measured by hand on one broken file per language: four of the five arrive at
+/// the identical line *and* column, and three of those repeat the parser's
+/// sentence verbatim.
+///
+/// The whole format error goes rather than only the ones that carry a position,
+/// which was the obvious rule and is wrong: arity reports "input contains 2
+/// parser diagnostic(s)" with no position at all, so the obvious rule would
+/// have left R -- the one language where the duplicate is *three* findings --
+/// exactly as it was.
+///
+/// What that gives up is a format error of the other kind, one saying the
+/// formatter is missing or that it refused an option, on a file that also does
+/// not parse. In practice there is almost nothing there to give up: for a rule
+/// above to have fired, that language's parser has to have run, and in four of
+/// the five it is the formatter's own parser. The fifth is arity, which is R's
+/// linter and R's formatter in one binary -- if it were missing there would be
+/// no `arity/syntax-error` either. And the message is not lost, only deferred:
+/// it comes back the moment the file parses, which is the moment the user could
+/// have acted on it.
+fn says_it_does_not_parse(found: &lsp_types::Diagnostic) -> bool {
+    matches!(
+        &found.code,
+        Some(lsp_types::NumberOrString::String(code))
+            if code == "syntax" || code == "syntax-error"
+    )
 }
 
 fn serve(connection: Connection) -> Result<()> {
@@ -240,6 +426,19 @@ fn serve(connection: Connection) -> Result<()> {
             commands: EXECUTE_COMMANDS.iter().map(|c| c.to_string()).collect(),
             ..Default::default()
         }),
+        // Declared for the downstream servers rather than for poly, which has
+        // no use for a folder list of its own. Without it the editor never
+        // sends `workspace/didChangeWorkspaceFolders` at all, and adding a
+        // second project to the window leaves every running server resolving
+        // imports against the tree that was open at startup — and every server
+        // started afterwards being told the same stale list.
+        workspace: Some(lsp_types::WorkspaceServerCapabilities {
+            workspace_folders: Some(lsp_types::WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(OneOf::Left(true)),
+            }),
+            file_operations: None,
+        }),
         ..Default::default()
     };
     let init_params = connection.initialize(serde_json::to_value(capabilities)?)?;
@@ -264,8 +463,14 @@ fn serve(connection: Connection) -> Result<()> {
         downstream: HashMap::new(),
         last_completion: None,
         last_code_action: None,
+        last_inlay_hint: None,
+        last_code_lens: None,
         code_action_ids: Arc::new(Mutex::new(HashSet::new())),
+        symbol_fanouts: Arc::new(Mutex::new(HashMap::new())),
+        workspace_symbol_registered: false,
         lint_hashes: HashMap::new(),
+        package_roots: HashSet::new(),
+        package_jobs: None,
         diagnostics: Arc::new(Mutex::new(Diagnostics::default())),
     };
 
@@ -333,11 +538,31 @@ impl Server {
     /// replies to one id is a protocol violation, and the editor believes the
     /// first. `Ok(Some(request))` hands it back for poly to answer itself.
     fn route(&mut self, request: lsp_server::Request) -> Result<Option<lsp_server::Request>> {
-        if !crate::proxy::PROXIED
+        // The one request that goes to every server instead of one. It names no
+        // document, so there is nothing to pick a server by, and the honest
+        // answer is the union of what they all say.
+        if request.method == "workspace/symbol" {
+            return self.fan_out_symbols(request);
+        }
+        // A file operation names files that are about to move rather than a
+        // document that is open, so nothing in `PROXIED` can describe it and
+        // the ordinary uri lookup would come up empty on a folder.
+        if let Some((_, key)) = crate::proxy::FILE_OPERATIONS
+            .iter()
+            .find(|(method, _)| *method == request.method)
+        {
+            return self.route_file_operation(key, request);
+        }
+        let routable = crate::proxy::PROXIED
             .iter()
             .any(|(method, _)| *method == request.method)
-            && !crate::proxy::EXTRA_ROUTED.contains(&request.method.as_str())
-        {
+            || crate::proxy::EXTRA_ROUTED.contains(&request.method.as_str())
+            || crate::proxy::SEMANTIC_TOKENS.contains(&request.method.as_str())
+            // The one method both sides answer: poly declared three commands of
+            // its own at initialize and each server registers its own list, so
+            // the gate lets it through and the command name decides below.
+            || request.method == "workspace/executeCommand";
+        if !routable {
             return Ok(Some(request));
         }
         // completionItem/resolve names no document -- it is a follow-up about
@@ -354,12 +579,10 @@ impl Server {
             // "whichever server answered last" would be the wrong one. The
             // lightbulb is one list at a time, like a completion list.
             "codeAction/resolve" => self.last_code_action.clone(),
-            _ => request
-                .params
-                .get("textDocument")
-                .and_then(|d| d.get("uri"))
-                .and_then(serde_json::Value::as_str)
-                .and_then(|uri| Url::parse(uri).ok())
+            "inlayHint/resolve" => self.last_inlay_hint.clone(),
+            "codeLens/resolve" => self.last_code_lens.clone(),
+            "workspace/executeCommand" => self.server_for_command(&request.params),
+            _ => request_uri(&request.params)
                 .and_then(|uri| self.server_of(&uri))
                 .map(str::to_string),
         };
@@ -369,8 +592,14 @@ impl Server {
         if request.method == "textDocument/completion" {
             self.last_completion = Some(name.clone());
         }
+        if request.method == "textDocument/inlayHint" {
+            self.last_inlay_hint = Some(name.clone());
+        }
+        if request.method == "textDocument/codeLens" {
+            self.last_code_lens = Some(name.clone());
+        }
         if request.method == "textDocument/codeAction" {
-            if crate::proxy::only_source_actions(&request.params) {
+            if crate::proxy::only_withheld_actions(&request.params) {
                 // The save asking for kinds poly does not hand over. An empty
                 // list is the honest answer and it costs no round trip.
                 let empty = Response {
@@ -409,6 +638,137 @@ impl Server {
         }
     }
 
+    /// Hand a `workspace/will*Files` request to the server that asked for it.
+    ///
+    /// Not a fan-out, unlike `workspace/symbol`: the answer is a WorkspaceEdit
+    /// the editor applies to the user's files, and two servers editing the same
+    /// rename would be two opinions about one set of bytes. One server it is.
+    ///
+    /// Which one is usually not a question — the editor only sends this because
+    /// poly registered the method, with that server's own filters on it, so a
+    /// single registration means a single candidate. The uri is consulted only
+    /// when two servers want the same operation, and it can legitimately fail
+    /// to answer: rust-analyzer registers folders as well as files, and a
+    /// folder has no extension to read a language off.
+    fn route_file_operation(
+        &mut self,
+        key: &str,
+        request: lsp_server::Request,
+    ) -> Result<Option<lsp_server::Request>> {
+        let targets = self.file_operation_servers(key);
+        let name = match targets.as_slice() {
+            // Nothing registered it, so this should not have arrived. Null is
+            // "no edit", which is exactly what poly has to offer, and it lets
+            // the rename go through instead of failing it with an error.
+            [] => {
+                self.connection
+                    .sender
+                    .send(Message::Response(crate::proxy::nothing(request.id)))?;
+                return Ok(None);
+            }
+            [only] => only.clone(),
+            several => {
+                let picked = file_operation_uri(&request.params)
+                    .and_then(|uri| self.server_of(&uri))
+                    .filter(|name| several.iter().any(|target| target == name));
+                match picked {
+                    Some(name) => name.to_string(),
+                    None => {
+                        eprintln!(
+                            "[poly] {}: {} servers want it and the path names no language",
+                            request.method,
+                            several.len()
+                        );
+                        self.connection
+                            .sender
+                            .send(Message::Response(crate::proxy::nothing(request.id)))?;
+                        return Ok(None);
+                    }
+                }
+            }
+        };
+        match self.downstream.get_mut(&name) {
+            Some(Some(server)) => {
+                server.send(Message::Request(request))?;
+                Ok(None)
+            }
+            _ => {
+                self.connection
+                    .sender
+                    .send(Message::Response(crate::proxy::nothing(request.id)))?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// The running servers that asked to hear about one kind of file operation.
+    fn file_operation_servers(&self, key: &str) -> Vec<String> {
+        self.downstream
+            .iter()
+            .filter(|(_, server)| {
+                server.as_ref().is_some_and(|server| {
+                    crate::proxy::answers_file_operation(&server.capabilities, key)
+                })
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Ask every running server that answers `workspace/symbol`, and reply once.
+    ///
+    /// The one place poly turns a single request into several. Each server gets
+    /// the request with the editor's own id, unchanged, so the answers all come
+    /// back carrying it — which is exactly what the accumulator keys on. Telling
+    /// them apart is not needed; counting them is.
+    fn fan_out_symbols(
+        &mut self,
+        request: lsp_server::Request,
+    ) -> Result<Option<lsp_server::Request>> {
+        let targets: Vec<String> = self
+            .downstream
+            .iter()
+            .filter(|(_, server)| {
+                server.as_ref().is_some_and(|server| {
+                    crate::proxy::answers_workspace_symbol(&server.capabilities)
+                })
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if targets.is_empty() {
+            // Nothing registered the method, so this should not arrive at all.
+            // Handing it back gets the editor a `-32601` rather than silence.
+            return Ok(Some(request));
+        }
+        // Recorded before the first send, not after the last: the pump threads
+        // are already running, and a fast server can answer while the next one
+        // is still being written to.
+        self.symbol_fanouts.lock().expect("symbol lock").insert(
+            request.id.clone(),
+            FanOut {
+                pending: targets.len(),
+                answers: Vec::new(),
+            },
+        );
+        for name in &targets {
+            let sent = match self.downstream.get_mut(name) {
+                Some(Some(server)) => server.send(Message::Request(request.clone())),
+                // Gone between the filter above and here, which nothing in this
+                // loop can do — but the count is already committed, so it has to
+                // be settled either way.
+                _ => Err(anyhow::anyhow!("{name} is no longer running")),
+            };
+            if let Err(e) = sent {
+                eprintln!("[poly] {name}: {e:#}");
+                // Its share of the reply is never coming. Settle it here or the
+                // fan-out waits on it forever.
+                if let Some(done) = settle_symbols(&self.symbol_fanouts, &request.id, None) {
+                    self.connection.sender.send(Message::Response(done))?;
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// A reply from the editor: to poly's own registration, or to a request a
     /// downstream server made through poly.
     fn on_client_response(&mut self, response: Response) {
@@ -425,7 +785,12 @@ impl Server {
             return; // not ours and not theirs; nothing to do with it
         };
         if let Some(Some(server)) = self.downstream.get_mut(&name) {
-            let restored = Response { id, ..response };
+            // `answered`, not a bare restore: the editor's reply to a
+            // `client/registerCapability` is `"result": null`, which lsp_server
+            // parses to `None` and then does not serialise at all. The server
+            // receives a response with neither result nor error and is entitled
+            // to reject it — sourcekit-lsp does, once, and then stops answering.
+            let restored = crate::proxy::answered(Response { id, ..response });
             if let Err(e) = server.send(Message::Response(restored)) {
                 eprintln!("[poly] {name}: {e:#}");
             }
@@ -465,6 +830,7 @@ impl Server {
         let sender = self.connection.sender.clone();
         let diagnostics = Arc::clone(&self.diagnostics);
         let code_action_ids = Arc::clone(&self.code_action_ids);
+        let symbol_fanouts = Arc::clone(&self.symbol_fanouts);
         let started = Instant::now();
         let server = crate::proxy::Downstream::start(
             name,
@@ -474,12 +840,17 @@ impl Server {
             self.language_server_logs,
             &self.init_params,
             Box::new(move |message| {
-                // Two things cannot just be passed along. A publishDiagnostics
+                // Three things cannot just be passed along. A publishDiagnostics
                 // replaces the whole set for the uri, so forwarding it verbatim
                 // erases poly's own findings; a code action list may carry the
-                // on-save kinds poly promised the editor it does not offer.
+                // on-save kinds poly promised the editor it does not offer; and
+                // a workspace symbol answer is one server's share of a reply
+                // the editor must receive exactly once.
                 let message = merge_publish(&diagnostics, message);
-                let _ = sender.send(strip_source_actions(&code_action_ids, message));
+                let message = strip_source_actions(&code_action_ids, message);
+                if let Some(message) = collect_symbols(&symbol_fanouts, message) {
+                    let _ = sender.send(message);
+                }
             }),
         );
         match server {
@@ -504,8 +875,17 @@ impl Server {
     /// languages. Nothing was declared at initialize, so until this lands the
     /// editor offers none of them.
     fn register_downstream(&mut self, server: &crate::proxy::Downstream) {
-        let registrations =
+        let mut registrations =
             crate::proxy::registrations(&server.capabilities, &server.name, &server.languages);
+        // Not part of `registrations`, which is per-server: this one is per
+        // session. Whoever comes up first claims it and every server that
+        // starts later joins the fan-out without registering again.
+        if !self.workspace_symbol_registered
+            && crate::proxy::answers_workspace_symbol(&server.capabilities)
+        {
+            self.workspace_symbol_registered = true;
+            registrations.push(crate::proxy::workspace_symbol_registration());
+        }
         if registrations.is_empty() {
             eprintln!("[poly] {} declared nothing poly proxies", server.name);
             return;
@@ -530,6 +910,28 @@ impl Server {
     /// The server poly would route this document to, running or not.
     fn server_of(&self, uri: &Url) -> Option<&'static str> {
         self.language_of(uri).as_deref().and_then(server_for)
+    }
+
+    /// Which running server declared this command, if any.
+    ///
+    /// A command names no document, so nothing in the request locates it: the
+    /// only thing that can is the list each server declared at initialize. Those
+    /// are namespaced (`gopls.*`, `rust-analyzer.*`) so a name matches at most
+    /// one, and poly's own three are in nobody's list — `None` here is what
+    /// hands them to `on_execute_command`.
+    ///
+    /// This is what makes gopls's refactorings work at all. Every code action it
+    /// offers carries a `command` and no `edit`, so `Extract declarations to new
+    /// file` and `Change signature` are one request each and were doing nothing
+    /// until poly forwarded it.
+    fn server_for_command(&self, params: &serde_json::Value) -> Option<String> {
+        let command = params.get("command")?.as_str()?;
+        self.downstream.iter().find_map(|(name, server)| {
+            crate::proxy::server_commands(&server.as_ref()?.capabilities)
+                .iter()
+                .any(|declared| declared == command)
+                .then(|| name.clone())
+        })
     }
 
     fn stop_downstream(&mut self) {
@@ -699,6 +1101,8 @@ impl Server {
 
     fn on_notification(&mut self, notification: Notification) -> Result<()> {
         self.sync_downstream(&notification);
+        self.broadcast_downstream(&notification);
+        self.file_operation_downstream(&notification);
         match notification.method.as_str() {
             "textDocument/didOpen" => {
                 let params: DidOpenTextDocumentParams =
@@ -708,6 +1112,7 @@ impl Server {
                     .insert(uri.clone(), params.text_document.text);
                 if self.lint_on_save {
                     self.publish_lint(&uri)?;
+                    self.queue_package_lint(&uri, false);
                 }
             }
             "textDocument/didChange" => {
@@ -723,7 +1128,15 @@ impl Server {
                     serde_json::from_value(notification.params)?;
                 if self.lint_on_save {
                     self.publish_lint(&params.text_document.uri)?;
+                    self.queue_package_lint(&params.text_document.uri, true);
                 }
+            }
+            "workspace/didChangeWorkspaceFolders" => {
+                // The running servers were told by `broadcast_downstream`
+                // above. This is for the ones not started yet.
+                let folders = folders_after(&self.init_params, &notification.params);
+                eprintln!("[poly] workspace folders: {}", folders.len());
+                self.init_params["workspaceFolders"] = serde_json::Value::Array(folders);
             }
             "textDocument/didClose" => {
                 let params: DidCloseTextDocumentParams =
@@ -747,6 +1160,45 @@ impl Server {
     /// editor holds unsaved edits, and every answer is quietly one save
     /// behind. `didOpen` is also the only signal poly gets that this session
     /// is going to need the server at all.
+    /// Hand a notification to every running server.
+    ///
+    /// Nothing in it says which one it is for, and that is not a gap: each
+    /// server registered the globs it cares about, so a file it has no interest
+    /// in is one it ignores.
+    fn broadcast_downstream(&mut self, notification: &Notification) {
+        if !crate::proxy::BROADCAST.contains(&notification.method.as_str()) {
+            return;
+        }
+        for server in self.downstream.values_mut().flatten() {
+            if let Err(e) = server.send(Message::Notification(notification.clone())) {
+                eprintln!("[poly] {}: {e:#}", server.name);
+            }
+        }
+    }
+
+    /// Deliver a `workspace/did*Files` notification to the servers that asked.
+    ///
+    /// Addressed rather than broadcast, which is the opposite of what
+    /// `didChangeWatchedFiles` does one function up — and the difference is
+    /// that poly knows the answer here. A watcher is registered by the server
+    /// straight through poly, which never sees who wanted what; a file
+    /// operation is declared in the capabilities poly reads at startup.
+    fn file_operation_downstream(&mut self, notification: &Notification) {
+        let Some((_, key)) = crate::proxy::FILE_OPERATIONS
+            .iter()
+            .find(|(method, _)| *method == notification.method)
+        else {
+            return;
+        };
+        for name in self.file_operation_servers(key) {
+            if let Some(Some(server)) = self.downstream.get_mut(&name) {
+                if let Err(e) = server.send(Message::Notification(notification.clone())) {
+                    eprintln!("[poly] {name}: {e:#}");
+                }
+            }
+        }
+    }
+
     fn sync_downstream(&mut self, notification: &Notification) {
         if !crate::proxy::SYNCED.contains(&notification.method.as_str()) {
             return;
@@ -803,6 +1255,47 @@ impl Server {
         self.publish_all(uri)
     }
 
+    /// Ask for a whole-package lint of the module this document belongs to.
+    ///
+    /// `fresh` is what separates the two callers. A save wants a new answer and
+    /// says so; an open only wants the module looked at once, because ten files
+    /// opened from one module are one module's worth of findings and ten
+    /// compiles. Nothing happens here beyond queueing — golangci-lint takes
+    /// seconds on a real module, and the main loop is where the editor's
+    /// requests are answered.
+    fn queue_package_lint(&mut self, uri: &Url, fresh: bool) {
+        let path = uri_path(uri);
+        let Some((linter, root)) = self
+            .language_of(uri)
+            .and_then(|language| package_lint_scope(&language, &path))
+        else {
+            return;
+        };
+        let first = self.package_roots.insert((linter, root.clone()));
+        if !fresh && !first {
+            return;
+        }
+        if self.package_jobs.is_none() {
+            let (jobs, queue) = std::sync::mpsc::channel();
+            let store = Arc::clone(&self.diagnostics);
+            let sender = self.connection.sender.clone();
+            std::thread::spawn(move || {
+                package_lint_worker(&queue, &store, |message| {
+                    let _ = sender.send(message);
+                });
+            });
+            self.package_jobs = Some(jobs);
+        }
+        let job = PackageJob {
+            linter,
+            root,
+            proxied: self.is_proxied(uri),
+        };
+        // A send error means the worker died, which it only does when the queue
+        // is dropped with the server. Nothing useful to say at that point.
+        let _ = self.package_jobs.as_ref().expect("package queue").send(job);
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Diagnostics> {
         // Poisoned means a thread panicked mid-update. The critical sections
         // here are map reads and inserts, so that cannot happen without a bug
@@ -847,6 +1340,37 @@ impl Server {
 fn uri_path(uri: &Url) -> PathBuf {
     uri.to_file_path()
         .unwrap_or_else(|_| PathBuf::from(uri.path()))
+}
+
+/// The document a routed request is about.
+///
+/// `textDocument.uri` is the ordinary shape. The hierarchy follow-ups name no
+/// textDocument at all — `callHierarchy/incomingCalls` carries the item a
+/// `prepare` handed back — but that item names its own file, which is what
+/// makes them routable at all. They could have gone the way of
+/// `completionItem/resolve` and followed the last server to answer; they do
+/// not, because "the file this item is in" is the true answer and "whoever
+/// spoke last" is only usually the same thing.
+/// The first path a file-operation request names.
+///
+/// `oldUri` for a rename, `uri` for a create or a delete. Only the first entry:
+/// the editor batches a multi-file move into one request, and poly picking one
+/// server per request means picking one path to read it off. A batch spanning
+/// two languages would be routed by whichever came first — an honest limit,
+/// and one nothing in the reply could paper over anyway, since a WorkspaceEdit
+/// is one server's answer or the other's.
+fn file_operation_uri(params: &serde_json::Value) -> Option<Url> {
+    let first = params.get("files")?.as_array()?.first()?;
+    let uri = first.get("oldUri").or_else(|| first.get("uri"))?;
+    Url::parse(uri.as_str()?).ok()
+}
+
+fn request_uri(params: &serde_json::Value) -> Option<Url> {
+    let uri = params
+        .get("textDocument")
+        .and_then(|document| document.get("uri"))
+        .or_else(|| params.get("item").and_then(|item| item.get("uri")))?;
+    Url::parse(uri.as_str()?).ok()
 }
 
 /// Underline from the reported position to the end of that line.
@@ -895,6 +1419,15 @@ fn formatted_text(uri: &Url, text: &str) -> Result<Option<String>> {
     // Rediscover per call: an upward stat chain is cheap (<1ms) and picks up
     // poly.toml edits without a watcher.
     let config = poly_core::Config::discover(&path).unwrap_or_else(|_| poly_core::Config::empty());
+    // `[format] exclude` is the project saying another program owns these
+    // bytes — a lockfile, generated output, a byte-exact fixture. `poly fmt`
+    // honours it and so does the lint side below, so format-on-save has to as
+    // well: without this, opening one of those files and saving rewrites on the
+    // spot exactly what CI is required never to touch, and `pnpm install
+    // --frozen-lockfile` fails on a file nobody edited.
+    if config.excluded(&path, poly_core::Scope::Format) {
+        return Ok(None);
+    }
     let Some(lang) = config.language(&path) else {
         return Ok(None);
     };
@@ -1006,12 +1539,6 @@ fn resolved_tool(name: &str, config: &poly_core::Config) -> Option<PathBuf> {
     path
 }
 
-fn is_workflow_file(path: &Path) -> bool {
-    path.to_str()
-        .map(|s| s.replace('\\', "/"))
-        .is_some_and(|s| s.contains(".github/workflows/"))
-}
-
 fn external_lint(
     lang: &str,
     path: &Path,
@@ -1019,29 +1546,6 @@ fn external_lint(
     config: &poly_core::Config,
 ) -> anyhow::Result<Vec<poly_core::diag::Issue>> {
     let mut issues = Vec::new();
-
-    // typos has no language of its own: `poly check` runs it repo-wide over
-    // the walk roots, which is why a misspelling could fail CI while the
-    // editor never mentioned it -- the last editor/CI split A4 forbids.
-    //
-    // Handed the path rather than the buffer, even though typos does read
-    // stdin: on stdin the document is called `-`, so the per-extension config
-    // (`[type.*]`, keyed off the file name) does not apply and the editor
-    // would answer differently from CI for exactly the repos that configure
-    // it. Reading from disk is what didOpen and didSave already guarantee is
-    // current, the same trade biome makes above.
-    if let Some(cmd) = resolved_tool("typos", config) {
-        issues.extend(
-            poly_tools::run::typos_paths(
-                &cmd,
-                &[path.to_path_buf()],
-                &config.lint_exclude,
-                config.root.as_deref(),
-            )?
-            .into_iter()
-            .map(|f| f.issue),
-        );
-    }
 
     // biome and eslint are project-local only and never managed, so they
     // resolve through the same detection `poly check` uses rather than the
@@ -1063,15 +1567,43 @@ fn external_lint(
             issues.extend(poly_tools::run::eslint_stdin(&bin, path, text)?);
         }
     }
+    // R goes through the file for the reason biome does, and for a second one
+    // that is stronger: arity's stdin mode has no package around it, so every
+    // symbol another file in the package defines becomes `undefined-symbol`.
+    // On dplyr's `mutate.R` that is 87 findings against the 1 `poly check`
+    // reports -- an editor full of squiggles CI has never heard of, which is
+    // the split A4 exists to prevent.
+    if lang == "r" {
+        if let Some(bin) = resolved_tool("arity", config) {
+            let root = poly_tools::run::r_package_root(path);
+            issues.extend(
+                poly_tools::run::arity_dir(&bin, &root, &[path.to_path_buf()])?
+                    .into_iter()
+                    .map(|f| f.issue),
+            );
+        }
+    }
+
+    // Shell embedded in a file that is not a shell script: a Dockerfile `RUN`,
+    // a workflow `run:`. Independent of the tool below, and it has to be — the
+    // editor squiggle and `poly check`'s output are one answer (R5/A4), and
+    // `poly check` runs this over the same files.
+    //
+    // The snippets are extracted before shellcheck is resolved, so a Dockerfile
+    // whose every `RUN` is exec form never triggers a download.
+    let snippets = poly_engines::shell::embedded(lang, path, text);
+    if !snippets.is_empty() {
+        if let Some(shellcheck) = resolved_tool("shellcheck", config) {
+            issues.extend(crate::embedded_shell(&shellcheck, &snippets, text)?);
+        }
+    }
 
     // Managed tool for the language, if any. Independent of the above: a
     // project can run both, and their findings do not overlap.
     let name = match lang {
         "shellscript" => "shellcheck",
         "dockerfile" => "hadolint",
-        "yaml" if is_workflow_file(path) => "actionlint",
-        "python" => "ruff",
-        "lua" => "selene",
+        "yaml" if poly_core::is_workflow_file(path) => "actionlint",
         "swift" => "swiftlint",
         _ => return Ok(issues),
     };
@@ -1081,16 +1613,9 @@ fn external_lint(
     issues.extend(match name {
         "shellcheck" => poly_tools::run::shellcheck_stdin(&cmd, text)?,
         "hadolint" => poly_tools::run::hadolint_stdin(&cmd, text)?,
-        // The editor has to see the same SC findings CI does, which means
-        // handing actionlint the shellcheck poly resolves rather than hoping
-        // one is on PATH.
-        "actionlint" => poly_tools::run::actionlint_stdin(
-            &cmd,
-            text,
-            resolved_tool("shellcheck", config).as_deref(),
-        )?,
-        "ruff" => poly_tools::run::ruff_stdin(&cmd, path, text)?,
-        "selene" => poly_tools::run::selene_stdin(&cmd, path, text)?,
+        // Its own checks only: the shell in every `run:` block was already
+        // checked above, at the offending word rather than at the key.
+        "actionlint" => poly_tools::run::actionlint_stdin(&cmd, text)?,
         "swiftlint" => poly_tools::run::swiftlint_stdin(&cmd, path, text)?,
         _ => unreachable!(),
     });
@@ -1155,12 +1680,277 @@ fn strip_source_actions(
     {
         return Message::Response(response);
     }
-    response.result = response.result.map(crate::proxy::without_source_actions);
+    response.result = response.result.map(crate::proxy::without_withheld_actions);
     Message::Response(response)
+}
+
+/// The workspace folders after applying one `didChangeWorkspaceFolders` event.
+///
+/// `init_params` is the editor's own InitializeParams, replayed verbatim to
+/// each server as it starts — and servers start lazily, so one that comes up an
+/// hour into the session would otherwise be handed the folders that happened to
+/// be open at startup. gopls resolves imports against that list; being wrong
+/// about it is being wrong about what the project *is*.
+///
+/// `rootUri` and `rootPath` are left alone. They are deprecated, they name the
+/// folder the window was opened with rather than the current set, and rewriting
+/// them would move the root out from under a server that is already indexing
+/// against it.
+fn folders_after(
+    init_params: &serde_json::Value,
+    params: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let uri_of = |folder: &serde_json::Value| {
+        folder
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let mut folders: Vec<serde_json::Value> = init_params
+        .get("workspaceFolders")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(event) = params.get("event") else {
+        return folders;
+    };
+    // Removed before added, and matched by uri rather than by position: the
+    // editor sends the folders it changed, not the list it now has.
+    let removed: HashSet<String> = event
+        .get("removed")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| list.iter().filter_map(uri_of).collect())
+        .unwrap_or_default();
+    folders.retain(|folder| !uri_of(folder).is_some_and(|uri| removed.contains(&uri)));
+    if let Some(added) = event.get("added").and_then(serde_json::Value::as_array) {
+        folders.extend(added.iter().cloned());
+    }
+    folders
+}
+
+/// The scope a whole-package linter would run over for this document, if poly
+/// runs one for the language.
+///
+/// Three languages, because three of the linters poly drives cannot answer
+/// about a single buffer: golangci-lint type-checks the package, clippy
+/// compiles the crate, and tflint reads a directory as one Terraform module.
+/// Those are the languages where `poly check` reported findings the editor
+/// never showed. Every other linter poly drives takes a file on stdin and is
+/// handled by `lint_document`.
+///
+/// The units are the tools' own: a Go module, a cargo workspace, and one
+/// Terraform directory — tflint does not descend, so neither does this. All
+/// three match what `poly check` groups by, which is the point (A4).
+fn package_lint_scope(language: &str, path: &Path) -> Option<(PackageLinter, PathBuf)> {
+    match language {
+        "go" => poly_tools::run::go_module_root(path).map(|root| (PackageLinter::Golangci, root)),
+        "rust" => {
+            poly_tools::run::cargo_workspace_root(path).map(|root| (PackageLinter::Clippy, root))
+        }
+        "terraform" => path
+            .parent()
+            .map(|dir| (PackageLinter::Tflint, dir.to_path_buf())),
+        _ => None,
+    }
+}
+
+/// Run queued package lints, one at a time, forever.
+///
+/// Serial on purpose: golangci-lint refuses to run twice at once in the same
+/// module, and two modules compiling in parallel is a lot of machine for
+/// something nobody is waiting on.
+fn package_lint_worker(
+    queue: &std::sync::mpsc::Receiver<PackageJob>,
+    store: &Mutex<Diagnostics>,
+    send: impl Fn(Message),
+) {
+    // A receive error means the queue was dropped with the server.
+    while let Ok(job) = queue.recv() {
+        // Saves that arrived while the previous run was compiling are still
+        // waiting. Collapse them by root: golangci-lint reads the module from
+        // disk, so three saves in a row would compile three times to report the
+        // same thing three times.
+        let mut batch = vec![job];
+        while let Ok(queued) = queue.try_recv() {
+            batch.push(queued);
+        }
+        batch.sort_by(|a, b| (a.linter.tool(), &a.root).cmp(&(b.linter.tool(), &b.root)));
+        batch.dedup_by(|a, b| a.linter == b.linter && a.root == b.root);
+        for job in batch {
+            run_package_lint(&job, store, &send);
+        }
+    }
+}
+
+/// Swap in a run's new findings and say which documents changed hands.
+///
+/// What that run recorded last time *is* the previous report — nothing else
+/// records what it said — so dropping it is how a fixed finding disappears. The
+/// answer is the union of old and new, not just what was found: a uri that
+/// appears only in the previous report needs an empty publish, or the finding
+/// the user just fixed stays on screen until they close the file.
+///
+/// Only this run's own entry is touched. The per-file linters, any language
+/// server, and any *other* whole-scope run have their own entries for these
+/// same documents, and this run knows nothing about what they found.
+fn replace_package_findings(
+    store: &mut Diagnostics,
+    job: &PackageJob,
+    fresh: HashMap<Url, Vec<lsp_types::Diagnostic>>,
+) -> Vec<Url> {
+    let previous = store
+        .package
+        .remove(&(job.linter, job.root.clone()))
+        .unwrap_or_default();
+    let mut affected: HashSet<Url> = previous.into_keys().collect();
+    affected.extend(fresh.keys().cloned());
+    store.package.insert((job.linter, job.root.clone()), fresh);
+    affected.into_iter().collect()
+}
+
+/// Lint one scope and publish what changed.
+fn run_package_lint(job: &PackageJob, store: &Mutex<Diagnostics>, send: &impl Fn(Message)) {
+    let config =
+        poly_core::Config::discover(&job.root).unwrap_or_else(|_| poly_core::Config::empty());
+    let Some(cmd) = resolved_tool(job.linter.tool(), &config) else {
+        return;
+    };
+    let started = Instant::now();
+    let found = match job.linter.run(&cmd, &job.root) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("[poly] {} {}: {e:#}", job.linter.tool(), job.root.display());
+            return;
+        }
+    };
+    let mut fresh: HashMap<Url, Vec<lsp_types::Diagnostic>> = HashMap::new();
+    // Whole-scope linters report on files no editor has open, so the
+    // suppressions have to be read from disk here. `lint_document` reads the
+    // buffer instead, which is the only difference between the two.
+    let mut inline = poly_core::InlineCache::new();
+    for mut found in found {
+        // The same filters `lint_document` applies, for the same reason: a rule
+        // silenced in poly.toml or in the file itself has to be silent in
+        // Problems too.
+        if config.excluded(&found.file, poly_core::Scope::Lint)
+            || config.lint_ignored(&found.file, found.issue.source, &found.issue.code)
+            || inline.for_file(&found.file, &config).suppresses(
+                found.issue.line,
+                found.issue.source,
+                &found.issue.code,
+            )
+        {
+            continue;
+        }
+        if let Some(severity) = config.lint_severity(found.issue.source, &found.issue.code) {
+            found.issue.severity = severity;
+        }
+        let Ok(uri) = Url::from_file_path(&found.file) else {
+            continue;
+        };
+        fresh
+            .entry(uri)
+            .or_default()
+            .push(lint_diagnostic(found.issue));
+    }
+    eprintln!(
+        "[poly] {} {} {:.1}ms ({} files)",
+        job.linter.tool(),
+        job.root.display(),
+        started.elapsed().as_secs_f64() * 1000.0,
+        fresh.len()
+    );
+
+    let publishes = {
+        let mut store = store.lock().expect("diagnostics lock");
+        replace_package_findings(&mut store, job, fresh)
+            .into_iter()
+            .map(|uri| {
+                let diagnostics = store.merged(&uri, job.proxied);
+                (uri, diagnostics)
+            })
+            .collect::<Vec<_>>()
+    };
+    for (uri, diagnostics) in publishes {
+        send(Message::Notification(Notification::new(
+            "textDocument/publishDiagnostics".to_string(),
+            PublishDiagnosticsParams {
+                uri,
+                diagnostics,
+                version: None,
+            },
+        )));
+    }
+}
+
+/// Record one server's share of a fan-out, and hand back the editor's reply
+/// once every server has answered.
+///
+/// `answer` is the server's result, or `None` for a share that is never coming —
+/// a server that errored, or one that could not be written to at all. Both count
+/// as answered: the editor is owed exactly one reply and waiting on a server
+/// that has nothing left to say is how Ctrl+T ends up spinning forever.
+fn settle_symbols(
+    fanouts: &Mutex<HashMap<lsp_server::RequestId, FanOut>>,
+    id: &lsp_server::RequestId,
+    answer: Option<serde_json::Value>,
+) -> Option<Response> {
+    let mut fanouts = fanouts.lock().expect("symbol lock");
+    let fanout = fanouts.get_mut(id)?;
+    fanout.answers.extend(answer);
+    // Saturating, so a server that answers one id twice costs a duplicated
+    // symbol rather than a count that never reaches zero.
+    fanout.pending = fanout.pending.saturating_sub(1);
+    if fanout.pending > 0 {
+        return None;
+    }
+    let fanout = fanouts.remove(id)?;
+    Some(Response {
+        id: id.clone(),
+        result: Some(crate::proxy::merge_symbols(fanout.answers)),
+        error: None,
+    })
+}
+
+/// Hold a downstream response back if it is one server's share of a fan-out.
+///
+/// `None` means the message was swallowed: it was a share, and either more are
+/// outstanding or the merged reply is being returned in its place. Here rather
+/// than in the main loop for the same reason `strip_source_actions` is — a
+/// downstream response only exists on the pump thread.
+///
+/// Every other response travels on. A fan-out is keyed by the editor's own
+/// request id, which is unique across the session, so nothing else can match.
+fn collect_symbols(
+    fanouts: &Mutex<HashMap<lsp_server::RequestId, FanOut>>,
+    message: Message,
+) -> Option<Message> {
+    let Message::Response(response) = &message else {
+        return Some(message);
+    };
+    if !fanouts
+        .lock()
+        .expect("symbol lock")
+        .contains_key(&response.id)
+    {
+        return Some(message);
+    }
+    // An error is a server declining to answer, not a reason to lose the ones
+    // that did — it goes on stderr and its share settles as nothing.
+    if let Some(error) = &response.error {
+        eprintln!("[poly] workspace/symbol: {}", error.message);
+    }
+    settle_symbols(fanouts, &response.id, response.result.clone()).map(Message::Response)
 }
 
 fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
     let config = poly_core::Config::discover(path).unwrap_or_else(|_| poly_core::Config::empty());
+    // The same reading of poly.toml `poly check` prints, on the channel the
+    // daemon has: the editor shows the server's stderr as poly's output. A
+    // `[tools]` name that turns nothing off is a mistake worth the same
+    // sentence in both places, and the editor is where most people meet it
+    // first -- CI only sees the file once it is pushed.
+    crate::settings::report(&config);
     // A file `[lint] exclude` drops has to come back clean here too, or
     // Problems shows findings no `poly check` run will ever produce. Naming a
     // file on the command line still beats the exclude (batch::resolve_targets
@@ -1173,21 +1963,54 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
     let Some(lang) = config.language(path) else {
         return Vec::new();
     };
-    let mut issues = match poly_engines::lint::lint(&lang, path, text) {
-        Ok(issues) => issues,
-        Err(e) => {
-            eprintln!("[poly] lint error {}: {e:#}", path.display());
-            Vec::new()
-        }
+    // Asked before linting rather than dispatching straight into the engines,
+    // because for JavaScript and TypeScript the answer is "eslint has this
+    // file" -- and `poly check` steps back there too. An engine only one of
+    // them runs is the editor/CI split A4 exists to prevent.
+    let mut issues = match crate::lint_engine(&lang, path) {
+        None => Vec::new(),
+        Some(_) => match poly_engines::lint::lint(&lang, path, text) {
+            Ok(issues) => issues,
+            Err(e) => {
+                eprintln!("[poly] lint error {}: {e:#}", path.display());
+                Vec::new()
+            }
+        },
     };
+    // Spelling is asked separately because it has no language to dispatch on,
+    // and from disk rather than from the buffer: on stdin the document is
+    // called `-`, so the per-type config keyed off the file name stops applying
+    // and the editor would answer differently from CI for exactly the repos
+    // that configure it. didOpen and didSave are what make the file on disk the
+    // current one — the same trade biome makes in `external_lint`.
+    match poly_engines::lint::spell(path) {
+        Ok(found) => issues.extend(found),
+        Err(e) => eprintln!("[poly] spell error {}: {e:#}", path.display()),
+    }
     match external_lint(&lang, path, text, &config) {
         Ok(more) => issues.extend(more),
         Err(e) => eprintln!("[poly] external lint error {}: {e:#}", path.display()),
     }
-    // Same call `poly check` makes, so a rule silenced in poly.toml is silent
-    // in Problems too. A suppression only one side honors is the editor/CI
-    // split A4 exists to prevent.
-    issues.retain(|i| !config.lint_ignored(path, i.source, &i.code));
+    // Same two calls `poly check` makes, so a rule silenced in poly.toml or in
+    // the file itself is silent in Problems too. A suppression only one side
+    // honors is the editor/CI split A4 exists to prevent.
+    //
+    // Scanned from the buffer rather than from disk: the comment the user is
+    // typing is the one that should apply, and a squiggle that only clears on
+    // save is a suppression that looks broken.
+    let inline = poly_core::InlineIgnores::scan(Some(&lang), text);
+    issues.extend(inline.syntax_issues(crate::hadolint_is_off(&config)));
+    issues.retain(|i| {
+        !config.lint_ignored(path, i.source, &i.code)
+            && !inline.suppresses(i.line, i.source, &i.code)
+    });
+    // The colour of the squiggle is the project's decision too, and it is the
+    // same call `poly check` makes before it decides the exit code.
+    for issue in &mut issues {
+        if let Some(severity) = config.lint_severity(issue.source, &issue.code) {
+            issue.severity = severity;
+        }
+    }
     issues.into_iter().map(lint_diagnostic).collect()
 }
 
@@ -1373,11 +2196,87 @@ fn full_range(text: &str) -> Range {
 mod tests {
     use super::*;
 
+    /// `[format] exclude` has to reach format-on-save, not just `poly fmt`.
+    ///
+    /// The list is how a project says another program owns a file's bytes: a
+    /// lockfile, generated output, a byte-exact fixture. Honouring it in the
+    /// batch path alone means CI leaves the file alone and the editor rewrites
+    /// it the moment somebody opens and saves — the editor/CI split A4 exists
+    /// to prevent, and a `pnpm install --frozen-lockfile` failure on a file
+    /// nobody edited. Found by `tools/lsp-fmt-diff.py`, which asks both paths
+    /// about the same file; this repo's own poly.toml excludes
+    /// `extensions/*/pnpm-lock.yaml` for exactly that reason.
+    #[test]
+    fn format_on_save_honours_the_format_exclude_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("poly.toml"),
+            "[format]\nexclude = [\"vendor/**\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.join("vendor")).unwrap();
+        let messy = "a:   1\n";
+
+        let excluded = Url::from_file_path(root.join("vendor").join("a.yaml")).unwrap();
+        assert_eq!(
+            formatted_text(&excluded, messy).unwrap(),
+            None,
+            "an excluded file must come back with no edits"
+        );
+
+        // The control: without it this test would pass on a formatter that had
+        // stopped working at all.
+        let ordinary = Url::from_file_path(root.join("a.yaml")).unwrap();
+        assert!(
+            formatted_text(&ordinary, messy).unwrap().is_some(),
+            "a file outside the list still formats"
+        );
+    }
+
+    /// The hierarchy follow-ups are routable only because their item names a
+    /// file. Without this the request falls through to poly, which answers
+    /// nothing, and the References panel's call tree is empty for no visible
+    /// reason.
+    #[test]
+    fn a_hierarchy_item_routes_by_its_own_file() {
+        let ordinary = serde_json::json!({
+            "textDocument": {"uri": "file:///p/main.go"},
+            "position": {"line": 1, "character": 2},
+        });
+        assert_eq!(
+            request_uri(&ordinary).unwrap().as_str(),
+            "file:///p/main.go"
+        );
+
+        // callHierarchy/incomingCalls and the three like it.
+        let follow_up = serde_json::json!({
+            "item": {"name": "Greet", "uri": "file:///p/other.go", "kind": 12},
+        });
+        assert_eq!(
+            request_uri(&follow_up).unwrap().as_str(),
+            "file:///p/other.go"
+        );
+
+        // completionItem/resolve names neither, which is why it is routed by
+        // the last server to answer instead.
+        assert!(request_uri(&serde_json::json!({"label": "x"})).is_none());
+        assert!(request_uri(&serde_json::json!({"item": {"name": "x"}})).is_none());
+    }
+
     fn diagnostic(source: &str) -> lsp_types::Diagnostic {
         lsp_types::Diagnostic {
             source: Some(source.to_string()),
             message: source.to_string(),
             ..Default::default()
+        }
+    }
+
+    /// The same, reporting a named rule: `merged` reads the code, not the name.
+    fn finding(source: &str, code: &str) -> lsp_types::Diagnostic {
+        lsp_types::Diagnostic {
+            code: Some(lsp_types::NumberOrString::String(code.to_string())),
+            ..diagnostic(source)
         }
     }
 
@@ -1390,6 +2289,50 @@ mod tests {
 
     fn uri() -> Url {
         Url::parse("file:///a.lua").expect("valid uri")
+    }
+
+    /// `proxied` plays no part in which findings a run owns, so it is fixed.
+    fn package_job(linter: PackageLinter, root: &str) -> PackageJob {
+        PackageJob {
+            linter,
+            root: PathBuf::from(root),
+            proxied: true,
+        }
+    }
+
+    /// A file operation names files that are moving, not a document that is
+    /// open, so the ordinary uri lookup finds nothing in it.
+    ///
+    /// The folder case is the one that matters and the one with no answer:
+    /// rust-analyzer registers `**` for folders, and a directory has no
+    /// extension to read a language off. That is survivable only because a
+    /// single registration means a single candidate — `route_file_operation`
+    /// asks this question at all only when two servers want the same operation.
+    #[test]
+    fn a_file_operation_is_located_by_the_path_it_names() {
+        let rename = serde_json::json!({
+            "files": [{"oldUri": "file:///w/src/old.rs", "newUri": "file:///w/src/new.rs"}]
+        });
+        assert_eq!(
+            file_operation_uri(&rename).as_ref().map(Url::as_str),
+            Some("file:///w/src/old.rs"),
+            "the language is the one the file has now, not the one it is moving to"
+        );
+
+        // Create and delete name the file directly.
+        let created = serde_json::json!({"files": [{"uri": "file:///w/src/new.rs"}]});
+        assert_eq!(
+            file_operation_uri(&created).as_ref().map(Url::as_str),
+            Some("file:///w/src/new.rs")
+        );
+
+        // A folder rename parses to a uri like any other; it is `language_of`
+        // that has nothing to say about it, one layer up.
+        let folder = serde_json::json!({
+            "files": [{"oldUri": "file:///w/src", "newUri": "file:///w/lib"}]
+        });
+        assert!(file_operation_uri(&folder).is_some());
+        assert!(file_operation_uri(&serde_json::json!({"files": []})).is_none());
     }
 
     /// A server command id must never be an id the extension contributes.
@@ -1425,21 +2368,27 @@ mod tests {
     /// A language poly detects but the editor does not is a file poly formats
     /// from the CLI and never in an editor.
     ///
-    /// `.bats` and `.azcli` are shell that VSCode's built-in shellscript does
-    /// not claim, so both extensions declare them: poly-syntax-highlight owns
-    /// language declarations, but the three extensions are independent and
-    /// someone running only poly-lsp would otherwise get a plain-text file with
-    /// no formatter bound to it. Two manifests saying the same thing is the
-    /// cost, and this is what stops them drifting -- a third extension added to
-    /// one and not the other formats or does not depending on what is installed.
+    /// Some associations are ours to add: `.bats` and `.azcli` are shell that
+    /// VSCode's built-in shellscript does not claim, `.mdx` is markdown that
+    /// nothing built-in claims. Both extensions have to declare them.
+    /// poly-syntax-highlight owns language declarations, but the three
+    /// extensions are independent, and someone running only poly-lsp would
+    /// otherwise get a plain-text file with no formatter bound to it. Two
+    /// manifests saying the same thing is the cost, and this is what stops them
+    /// drifting -- an extension added to one and not the other formats or does
+    /// not depending on what is installed.
     ///
-    /// Only one of the two is edited by hand. extensions/syntax/package.json is
-    /// generated from grammars/sources.json, and CI regenerates it and fails on
-    /// any diff -- a hand edit there survives `make gates` and dies in the
-    /// grammars job.
+    /// Keyed off whatever poly-lsp declares rather than a list written here:
+    /// the next association to be added is covered without anyone remembering
+    /// to widen this test, which is the failure mode a hard-coded list has.
+    ///
+    /// Only one of the two manifests is edited by hand.
+    /// extensions/syntax/package.json is generated from grammars/sources.json,
+    /// and CI regenerates it and fails on any diff -- a hand edit there
+    /// survives `make gates` and dies in the grammars job.
     #[test]
-    fn both_manifests_teach_the_editor_the_same_shell_extensions() {
-        let declared = |extension: &str| -> Vec<String> {
+    fn both_manifests_teach_the_editor_the_same_extensions() {
+        let declared = |extension: &str, id: &str| -> Vec<String> {
             let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join(format!("../../../extensions/{extension}/package.json"));
             let text = std::fs::read_to_string(&manifest).expect("the extension manifest");
@@ -1449,25 +2398,52 @@ mod tests {
                 .as_array()
                 .expect("contributes.languages")
                 .iter()
-                .filter(|l| l["id"] == "shellscript")
+                .filter(|l| l["id"] == id)
                 .flat_map(|l| l["extensions"].as_array().cloned().unwrap_or_default())
                 .filter_map(|e| e.as_str().map(str::to_string))
                 .collect()
         };
+        let ids = |extension: &str| -> Vec<String> {
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../../extensions/{extension}/package.json"));
+            let text = std::fs::read_to_string(&manifest).expect("the extension manifest");
+            let package: serde_json::Value =
+                serde_json::from_str(&text).expect("valid package.json");
+            package["contributes"]["languages"]
+                .as_array()
+                .expect("contributes.languages")
+                .iter()
+                .filter_map(|l| l["id"].as_str().map(str::to_string))
+                .collect()
+        };
 
-        let lsp = declared("lsp");
-        assert_eq!(lsp, declared("syntax"), "the two manifests have drifted");
-        // And what they declare has to be what poly itself detects, or the
-        // editor names a language the CLI would not have picked.
-        for extension in &lsp {
-            let name = format!("a{extension}");
+        let declaring = ids("lsp");
+        assert!(!declaring.is_empty(), "poly-lsp declares no languages");
+        for id in &declaring {
+            let lsp = declared("lsp", id);
             assert_eq!(
-                poly_core::builtin_language(Path::new(&name)),
-                Some("shellscript"),
-                "{extension} is declared to the editor but poly does not detect it"
+                lsp,
+                declared("syntax", id),
+                "{id}: the two manifests have drifted"
             );
+            // And what they declare has to be what poly itself detects, or the
+            // editor names a language the CLI would not have picked.
+            for extension in &lsp {
+                let name = format!("a{extension}");
+                assert_eq!(
+                    poly_core::builtin_language(Path::new(&name)),
+                    Some(id.as_str()),
+                    "{extension} is declared to the editor but poly does not detect it as {id}"
+                );
+            }
         }
-        assert!(lsp.contains(&".bats".to_string()), "{lsp:?}");
+        // The two that motivated this, so the loop above cannot pass by
+        // iterating over nothing.
+        assert!(
+            declaring.contains(&"shellscript".to_string()),
+            "{declaring:?}"
+        );
+        assert!(declaring.contains(&"markdown".to_string()), "{declaring:?}");
     }
 
     /// The extension asks for a file it may never have shown poly, so this has
@@ -1536,6 +2512,27 @@ mod tests {
         );
     }
 
+    /// ...except when the linter and the server are the same binary.
+    ///
+    /// arity is R's linter and R's language server, so a proxied R document
+    /// gets arity's findings from arity itself and poly's copy is the same
+    /// finding a second time. selene is the control: lua-language-server is a
+    /// different tool looking for different things, so it stays either way.
+    #[test]
+    fn a_proxied_document_drops_the_linter_that_is_also_the_server() {
+        let mut store = Diagnostics::default();
+        store
+            .lint
+            .insert(uri(), vec![diagnostic("selene"), diagnostic("arity")]);
+        store.downstream.insert(uri(), vec![diagnostic("arity")]);
+
+        // Proxied: arity speaks once, as itself.
+        assert_eq!(sources(&store.merged(&uri(), true)), ["selene", "arity"]);
+        // Not proxied: nobody else is reporting, so poly's copy is the answer.
+        store.downstream.remove(&uri());
+        assert_eq!(sources(&store.merged(&uri(), false)), ["selene", "arity"]);
+    }
+
     /// The formatter's parse failure is the one thing a server does replace,
     /// with a range covering the problem rather than the point rustfmt gave up.
     #[test]
@@ -1549,6 +2546,295 @@ mod tests {
             ["selene", "poly/format"]
         );
         assert_eq!(sources(&store.merged(&uri(), true)), ["selene"]);
+    }
+
+    /// A file that does not parse says so once, not twice.
+    ///
+    /// The linter reports `toml/syntax` on change and the formatter fails on
+    /// the same error on save, at the same line and column and in the same
+    /// words. Both were published, so the editor drew two squiggles over one
+    /// character -- and the second of them had no rule doc to hover and no
+    /// code to suppress.
+    #[test]
+    fn the_formatter_does_not_repeat_a_parse_failure() {
+        let mut store = Diagnostics::default();
+        store.format.insert(uri(), diagnostic("poly/format"));
+
+        // The control: a finding about something other than parsing leaves the
+        // formatter alone. A file can be misspelt *and* badly formatted, and
+        // those are two things to say.
+        store.lint.insert(uri(), vec![finding("typos", "spelling")]);
+        assert_eq!(
+            sources(&store.merged(&uri(), false)),
+            ["typos", "poly/format"]
+        );
+
+        store.lint.insert(uri(), vec![finding("toml", "syntax")]);
+        assert_eq!(sources(&store.merged(&uri(), false)), ["toml"]);
+
+        // arity spells the same claim differently, and it is the case a rule
+        // keyed on "does the format error carry a position" would have missed:
+        // arity's does not carry one.
+        store
+            .lint
+            .insert(uri(), vec![finding("arity", "syntax-error")]);
+        assert_eq!(sources(&store.merged(&uri(), false)), ["arity"]);
+    }
+
+    /// The rules the editor treats as "this file does not parse" are exactly
+    /// the ones the catalog has.
+    ///
+    /// Both directions matter and they fail differently. A new syntax rule
+    /// spelled some third way keeps the double report and nobody would notice;
+    /// a rule renamed *into* this shape starts silencing the formatter on files
+    /// that parse perfectly well.
+    #[test]
+    fn the_parse_failures_the_editor_knows_are_the_ones_the_catalog_has() {
+        let mut ids: Vec<&str> = poly_core::catalog::catalog()
+            .values()
+            .flatten()
+            .filter(|id| {
+                let (_, rule) = id.split_once('/').expect("a tool/rule id");
+                says_it_does_not_parse(&finding("t", rule))
+            })
+            .map(String::as_str)
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            [
+                "arity/syntax-error",
+                "graphql/syntax",
+                "php/syntax",
+                "toml/syntax",
+                "typescript/syntax",
+            ]
+        );
+    }
+
+    /// Four publishers, one uri, and `publishDiagnostics` replaces the whole
+    /// set: every one of them has to survive the others.
+    ///
+    /// This is the shape of the bug package lint could have introduced. gopls
+    /// publishes on its own schedule, the per-file linters publish on save, and
+    /// golangci-lint publishes whenever a module finishes compiling — three
+    /// independent clocks. If any of them sent only its own half, saving a Go
+    /// file would erase the module's findings and the next module run would
+    /// erase gopls's.
+    #[test]
+    fn no_publisher_erases_another() {
+        let mut store = Diagnostics::default();
+        store.lint.insert(uri(), vec![diagnostic("typos")]);
+        store.package.insert(
+            (PackageLinter::Golangci, PathBuf::from("/w")),
+            HashMap::from([(uri(), vec![diagnostic("golangci-lint")])]),
+        );
+        store.format.insert(uri(), diagnostic("poly/format"));
+        store.downstream.insert(uri(), vec![diagnostic("gopls")]);
+
+        assert_eq!(
+            sources(&store.merged(&uri(), true)),
+            ["typos", "golangci-lint", "gopls"],
+            "the format error is the only thing a server replaces"
+        );
+        assert_eq!(
+            sources(&store.merged(&uri(), false)),
+            ["typos", "golangci-lint", "poly/format", "gopls"]
+        );
+    }
+
+    /// A module's report is replaced as a set, and a fixed finding only
+    /// disappears because the next run did not repeat it.
+    #[test]
+    fn a_fixed_package_finding_is_published_away() {
+        let job = package_job(PackageLinter::Golangci, "/w/api");
+        let fixed = Url::parse("file:///w/api/fixed.go").expect("valid uri");
+        let broken = Url::parse("file:///w/api/broken.go").expect("valid uri");
+        // A second module, mid-run in the same session. Its findings are no
+        // business of this run and must outlive it.
+        let elsewhere = Url::parse("file:///w/cli/main.go").expect("valid uri");
+
+        let mut store = Diagnostics::default();
+        store.package.insert(
+            (PackageLinter::Golangci, PathBuf::from("/w/api")),
+            HashMap::from([
+                (fixed.clone(), vec![diagnostic("unused")]),
+                (broken.clone(), vec![diagnostic("errcheck")]),
+            ]),
+        );
+        store.package.insert(
+            (PackageLinter::Golangci, PathBuf::from("/w/cli")),
+            HashMap::from([(elsewhere.clone(), vec![diagnostic("errcheck")])]),
+        );
+        // gopls also has something to say about the file that was fixed. The
+        // whole-module run knows nothing about it and must not take it away.
+        store
+            .downstream
+            .insert(fixed.clone(), vec![diagnostic("gopls")]);
+
+        let fresh = HashMap::from([(broken.clone(), vec![diagnostic("errcheck")])]);
+        let mut affected = replace_package_findings(&mut store, &job, fresh);
+        affected.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        assert_eq!(
+            affected,
+            [broken.clone(), fixed.clone()],
+            "the cleared file is republished too, or the squiggle never goes away"
+        );
+        assert_eq!(sources(&store.merged(&fixed, true)), ["gopls"]);
+        assert_eq!(sources(&store.merged(&broken, true)), ["errcheck"]);
+        assert_eq!(
+            sources(&store.merged(&elsewhere, true)),
+            ["errcheck"],
+            "another module's report is not this run's to clear"
+        );
+    }
+
+    /// Two whole-scope runs that cover overlapping paths keep their own reports.
+    ///
+    /// This is why the store is keyed by the run and not by a path prefix. Both
+    /// halves are ordinary layouts rather than corner cases: tflint reads one
+    /// directory and does not descend, so a repository with `envs/prod` and
+    /// `envs/prod/modules/db` in it has two runs whose findings both stand; and
+    /// a Go module with .tf files in it is one directory that is two scopes. A
+    /// prefix answer to "what did the last run own" would have a save in the
+    /// parent erase the nested report, and a save of the .tf file erase what
+    /// golangci-lint said about the .go file beside it — in both cases with
+    /// nothing left to put it back.
+    #[test]
+    fn one_run_does_not_clear_another_that_overlaps_it() {
+        let nested = Url::parse("file:///w/envs/prod/modules/db/main.tf").expect("valid uri");
+        let parent = Url::parse("file:///w/envs/prod/main.tf").expect("valid uri");
+        let beside = Url::parse("file:///w/envs/prod/main.go").expect("valid uri");
+
+        let mut store = Diagnostics::default();
+        store.package.insert(
+            (
+                PackageLinter::Tflint,
+                PathBuf::from("/w/envs/prod/modules/db"),
+            ),
+            HashMap::from([(nested.clone(), vec![diagnostic("tflint")])]),
+        );
+        store.package.insert(
+            (PackageLinter::Golangci, PathBuf::from("/w/envs/prod")),
+            HashMap::from([(beside.clone(), vec![diagnostic("errcheck")])]),
+        );
+
+        let job = package_job(PackageLinter::Tflint, "/w/envs/prod");
+        let fresh = HashMap::from([(parent.clone(), vec![diagnostic("tflint")])]);
+        let affected = replace_package_findings(&mut store, &job, fresh);
+
+        assert_eq!(
+            affected,
+            std::slice::from_ref(&parent),
+            "a run republishes what it owns, and it owns neither of the others"
+        );
+        assert_eq!(
+            sources(&store.merged(&nested, false)),
+            ["tflint"],
+            "the directory below has its own run and tflint never descended into it"
+        );
+        assert_eq!(
+            sources(&store.merged(&beside, false)),
+            ["errcheck"],
+            "the other linter's report shares a directory, not a run"
+        );
+    }
+
+    /// A server that starts an hour into the session has to be told about the
+    /// folders open now, not the ones open at startup.
+    ///
+    /// The event carries what changed, never the resulting list, so poly has to
+    /// keep the list itself. Matching removals by uri rather than by position
+    /// is the part worth pinning: the editor is under no obligation to send
+    /// back the same object it was given, and a `name` differing by a character
+    /// would leave a removed folder in the list forever.
+    #[test]
+    fn workspace_folders_track_what_the_editor_reports() {
+        let folder =
+            |name: &str| serde_json::json!({"uri": format!("file:///w/{name}"), "name": name});
+        let init = serde_json::json!({
+            "rootUri": "file:///w/api",
+            "workspaceFolders": [folder("api"), folder("cli")],
+        });
+
+        let swap = serde_json::json!({
+            "event": {
+                // Same uri, different name than the editor first sent.
+                "added": [folder("web")],
+                "removed": [{"uri": "file:///w/cli", "name": "renamed since"}],
+            }
+        });
+        let after = folders_after(&init, &swap);
+        assert_eq!(
+            after
+                .iter()
+                .filter_map(|f| f["uri"].as_str())
+                .collect::<Vec<_>>(),
+            ["file:///w/api", "file:///w/web"]
+        );
+
+        // A window opened on a single file has no folders at all, and the first
+        // one added must not be lost to that.
+        let bare = serde_json::json!({"rootUri": serde_json::Value::Null});
+        let added = serde_json::json!({"event": {"added": [folder("api")], "removed": []}});
+        assert_eq!(folders_after(&bare, &added).len(), 1);
+
+        // An event poly cannot read leaves the list as it was. Dropping every
+        // folder would be a far worse answer than ignoring the notification.
+        assert_eq!(folders_after(&init, &serde_json::json!({})).len(), 2);
+    }
+
+    /// Which files a whole-scope linter is asked about has to mean the same
+    /// thing in the editor as in `poly check` (A4), and the two tools that have
+    /// one do not agree about what a scope is.
+    #[test]
+    fn a_package_scope_is_whatever_the_tool_itself_reads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("real path");
+        std::fs::write(root.join("go.mod"), "module x\n").expect("write go.mod");
+        let nested = root.join("internal/api");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        let file = nested.join("api.go");
+        std::fs::write(&file, "package api\n").expect("write api.go");
+
+        // Go: up to the module, however deep the file is.
+        assert_eq!(
+            package_lint_scope("go", &file),
+            Some((PackageLinter::Golangci, root.clone()))
+        );
+        // Terraform: the file's own directory and no further, because that is
+        // all tflint reads. `poly check` groups .tf files by parent dir for the
+        // same reason.
+        let plan = nested.join("main.tf");
+        assert_eq!(
+            package_lint_scope("terraform", &plan),
+            Some((PackageLinter::Tflint, nested.clone()))
+        );
+        // Rust: past the member crate to the workspace, because that is the
+        // scope cargo itself resolves. Stopping at the member would give one
+        // scope per crate in a workspace and a target directory each.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"api\"]\n",
+        )
+        .expect("write workspace");
+        let member = root.join("api");
+        std::fs::create_dir_all(member.join("src")).expect("mkdir");
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"api\"\n")
+            .expect("write member");
+        let source = member.join("src/lib.rs");
+        std::fs::write(&source, "pub fn f() {}\n").expect("write lib.rs");
+        assert_eq!(
+            package_lint_scope("rust", &source),
+            Some((PackageLinter::Clippy, root.clone()))
+        );
+        // Everything else is a stdin-sized linter, and nothing else may queue a
+        // whole-directory run.
+        assert_eq!(package_lint_scope("python", &file), None);
+        // A .go file outside any module: no root, nothing to run.
+        let orphan = dir.path().parent().expect("parent").join("nowhere.go");
+        assert_eq!(package_lint_scope("go", &orphan), None);
     }
 
     /// The downstream half arrives as a notification poly has to rewrite in
@@ -1591,6 +2877,126 @@ mod tests {
             panic!("untouched");
         };
         assert_eq!(out.method, "window/logMessage");
+    }
+
+    /// One query, several servers, exactly one reply — and not before the last
+    /// of them has spoken.
+    ///
+    /// Replying early is the failure worth guarding: it looks right, because the
+    /// first server's symbols do show up, and the rest are simply missing. A
+    /// second reply on the same id is a protocol violation the editor answers by
+    /// believing the first, so the bug would be invisible from the outside.
+    #[test]
+    fn a_symbol_query_answers_once_the_last_server_has() {
+        let id = lsp_server::RequestId::from(7);
+        let fanouts = Mutex::new(HashMap::from([(
+            id.clone(),
+            FanOut {
+                pending: 2,
+                answers: Vec::new(),
+            },
+        )]));
+        let share = |name: &str| {
+            Message::Response(Response {
+                id: id.clone(),
+                result: Some(serde_json::json!([{"name": name}])),
+                error: None,
+            })
+        };
+
+        assert!(
+            collect_symbols(&fanouts, share("Greet")).is_none(),
+            "one server in, one still owing: nothing may reach the editor yet"
+        );
+        let Some(Message::Response(reply)) = collect_symbols(&fanouts, share("greet")) else {
+            panic!("the last answer completes the query");
+        };
+        assert_eq!(
+            reply.result,
+            Some(serde_json::json!([{"name": "Greet"}, {"name": "greet"}])),
+            "both servers' symbols, in one list"
+        );
+        assert!(
+            fanouts.lock().expect("lock").is_empty(),
+            "a finished query is forgotten, or the map grows for the session"
+        );
+    }
+
+    /// A server that declines still owes the count, or Ctrl+T spins forever.
+    ///
+    /// Three ways to decline and all of them arrive here: an error response, a
+    /// `null` result, and — through `settle_symbols(.., None)` — a server poly
+    /// could not even write to.
+    #[test]
+    fn a_server_that_declines_still_completes_the_query() {
+        let id = lsp_server::RequestId::from(7);
+        let fanouts = Mutex::new(HashMap::from([(
+            id.clone(),
+            FanOut {
+                pending: 3,
+                answers: Vec::new(),
+            },
+        )]));
+
+        let refused = Message::Response(Response {
+            id: id.clone(),
+            result: None,
+            error: Some(lsp_server::ResponseError {
+                code: INTERNAL_ERROR,
+                message: "not indexed".to_string(),
+                data: None,
+            }),
+        });
+        assert!(collect_symbols(&fanouts, refused).is_none());
+
+        let nothing = Message::Response(Response {
+            id: id.clone(),
+            result: Some(serde_json::Value::Null),
+            error: None,
+        });
+        assert!(collect_symbols(&fanouts, nothing).is_none());
+
+        let Some(Message::Response(reply)) = collect_symbols(
+            &fanouts,
+            Message::Response(Response {
+                id: id.clone(),
+                result: Some(serde_json::json!([{"name": "Greet"}])),
+                error: None,
+            }),
+        ) else {
+            panic!("the third answer completes the query");
+        };
+        assert_eq!(
+            reply.result,
+            Some(serde_json::json!([{"name": "Greet"}])),
+            "the one server that answered is not lost to the two that did not"
+        );
+    }
+
+    /// The pump sees every response, and only a fan-out's shares are its
+    /// business. A hover reply held back is a request the editor waits on for
+    /// the rest of the session.
+    #[test]
+    fn only_a_fanned_out_reply_is_held_back() {
+        let fanouts = Mutex::new(HashMap::from([(
+            lsp_server::RequestId::from(7),
+            FanOut {
+                pending: 1,
+                answers: Vec::new(),
+            },
+        )]));
+        let hover = Message::Response(Response {
+            id: lsp_server::RequestId::from(8),
+            result: Some(serde_json::json!({"contents": "docs"})),
+            error: None,
+        });
+        assert!(collect_symbols(&fanouts, hover).is_some());
+
+        let notification = Message::Notification(Notification::new(
+            "window/logMessage".to_string(),
+            serde_json::json!({"type": 3, "message": "hi"}),
+        ));
+        assert!(collect_symbols(&fanouts, notification).is_some());
     }
 
     /// A publishDiagnostics poly cannot parse still has to reach the editor:
@@ -1667,6 +3073,39 @@ mod tests {
         assert_eq!(server_for("c"), server_for("cpp"));
         // A language poly formats but has no server for stays poly's alone.
         assert_eq!(server_for("typescript"), None);
+    }
+
+    /// `[tools]` reaches the language servers too, not just the tools poly
+    /// downloads.
+    ///
+    /// Both answers were silently ignored before: a project could not turn one
+    /// server off without turning the whole proxy off, and could not point at a
+    /// drop-in replacement at all. Silently, because a server that never starts
+    /// looks exactly like a server that is not installed.
+    #[test]
+    fn a_project_can_disable_or_replace_a_path_only_server() {
+        let entry = |value: &str| {
+            let mut config = poly_core::Config::empty();
+            config
+                .tools
+                .insert("rust-analyzer".to_string(), value.to_string());
+            config
+        };
+        assert_eq!(server_command("rust-analyzer", &entry("off")), None);
+
+        // A path that is not there is a failure, not a fall back to PATH: the
+        // project said which binary it wanted.
+        assert_eq!(
+            server_command("rust-analyzer", &entry("./bin/rust-glancer")),
+            None
+        );
+
+        // No entry, so PATH decides as it always did.
+        let empty = poly_core::Config::empty();
+        assert_eq!(
+            server_command("rust-analyzer", &empty),
+            poly_tools::find_on_path("rust-analyzer")
+        );
     }
 
     /// poly passes arguments only where the binary is not itself the server.
@@ -1940,6 +3379,139 @@ mod tests {
 
         assert!(lint_document(&root.join("vendor/a.sql"), sql).is_empty());
         assert!(!lint_document(&root.join("src/a.sql"), sql).is_empty());
+    }
+
+    /// `[lint.severity]` colours the squiggle, and `[lint] ignore` removes it.
+    ///
+    /// The daemon's half of `tests/check.rs`'s category cases. A level that
+    /// moved the terminal's word and the exit code but left the editor showing
+    /// the old colour would be the editor/CI split A4 exists to prevent, read
+    /// in its subtlest form: the finding is in both places and the two disagree
+    /// about how much it matters.
+    #[test]
+    fn the_editor_reads_the_projects_severity_and_its_ignores() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let file = root.join("Dockerfile");
+        let text = "FROM alpine:3.19\nRUN apk add curl\n";
+        std::fs::write(&file, text).expect("write Dockerfile");
+
+        let level = |found: &[lsp_types::Diagnostic], code: &str| {
+            found
+                .iter()
+                .find(
+                    |d| matches!(&d.code, Some(lsp_types::NumberOrString::String(c)) if c == code),
+                )
+                .and_then(|d| d.severity)
+        };
+
+        let found = lint_document(&file, text);
+        assert_eq!(
+            level(&found, "docker-apk-unpinned"),
+            Some(lsp_types::DiagnosticSeverity::WARNING)
+        );
+
+        std::fs::write(
+            root.join("poly.toml"),
+            "[lint]\nignore = [\"wasted-bytes\"]\n\n\
+             [lint.severity]\nunpinned-dependency = \"hint\"\n",
+        )
+        .expect("write poly.toml");
+        let found = lint_document(&file, text);
+        assert_eq!(
+            level(&found, "docker-apk-unpinned"),
+            Some(lsp_types::DiagnosticSeverity::HINT)
+        );
+        assert_eq!(level(&found, "docker-apk-no-cache"), None);
+    }
+
+    /// `.proto` got nothing in the editor until now: `buf lint` ran only from
+    /// `poly check`, and `external_lint` never had a protobuf arm, so a field
+    /// named `BadField` was a finding in CI and a clean file on screen. The
+    /// fixture is `tests/check.rs`'s, and the numbers are asserted rather than
+    /// the emptiness, so a rule that stops firing fails here too.
+    ///
+    /// The protocol-level half of this — real `publishDiagnostics` against real
+    /// `poly check` output — is in `tests/check.rs`, because this is a library
+    /// call and that is a daemon.
+    #[test]
+    fn a_proto_is_linted_in_the_editor_at_the_same_positions_as_the_cli() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("a.proto");
+        let text = "syntax = \"proto3\";\npackage a.b;\nmessage bad {\n  string X = 1;\n}\n";
+        std::fs::write(&file, text).expect("write proto");
+
+        let found = lint_document(&file, text);
+        let mut seen: Vec<(String, u32, u32)> = found
+            .iter()
+            .filter_map(|d| match &d.code {
+                Some(lsp_types::NumberOrString::String(code)) => {
+                    Some((code.clone(), d.range.start.line, d.range.start.character))
+                }
+                _ => None,
+            })
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                ("proto-field-lower-snake-case".to_string(), 3, 9),
+                ("proto-message-pascal-case".to_string(), 2, 8),
+            ]
+        );
+        assert!(found.iter().all(|d| d.source.as_deref() == Some("poly")));
+
+        // And the project's own `buf.yaml` narrows the editor exactly as it
+        // narrows CI -- a selection only one side honours is the same split.
+        std::fs::write(
+            dir.path().join("buf.yaml"),
+            "version: v2\nlint:\n  use: [MESSAGE_PASCAL_CASE]\n",
+        )
+        .expect("write buf.yaml");
+        assert_eq!(lint_document(&file, text).len(), 1);
+    }
+
+    /// The daemon's half of `tests/check.rs`'s inline suppression cases, on the
+    /// same fixtures.
+    ///
+    /// Both sides call the same `InlineIgnores`, and this is what keeps that
+    /// true: a comment that silences a finding in CI and leaves the squiggle on
+    /// screen is the editor/CI split A4 exists to prevent, and it is the split
+    /// nobody notices until they are staring at a Problems panel that disagrees
+    /// with a green build.
+    #[test]
+    fn an_inline_comment_is_silent_in_the_editor_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let codes = |name: &str, text: &str| -> Vec<String> {
+            lint_document(&root.join(name), text)
+                .into_iter()
+                .filter_map(|d| match d.code {
+                    Some(lsp_types::NumberOrString::String(code)) => Some(code),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Trailing: LT01 on this line is gone, CP01 on the next is not.
+        assert_eq!(
+            codes(
+                "trailing.sql",
+                "select a,b from t  -- poly: ignore sqruff/LT01\nWHERE x = 1;\n"
+            ),
+            ["CP01"]
+        );
+        // On its own line, for the line below.
+        assert!(codes(
+            "above.sql",
+            "select a, b from t\n-- poly: ignore sqruff/CP01\nWHERE x = 1;\n"
+        )
+        .is_empty());
+        // A comment poly cannot read is a diagnostic of its own here too, and
+        // the finding it was aimed at stays on screen.
+        let found = codes("bad.sql", "select a,b from t  -- poly: ignore LT01\n");
+        assert!(found.contains(&"ignore-syntax".to_string()), "{found:?}");
+        assert!(found.contains(&"LT01".to_string()), "{found:?}");
     }
 
     /// The squiggle's position is scraped out of prose, so the prose is a

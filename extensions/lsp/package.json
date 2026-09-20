@@ -2,7 +2,7 @@
   "name": "poly-lsp",
   "displayName": "Poly LSP",
   "description": "Unified lint/format via the poly daemon: format-on-save, lint-on-save diagnostics, batch commands.",
-  "version": "0.9.0",
+  "version": "0.13.2",
   "publisher": "ricky",
   "license": "MIT",
   "engines": {
@@ -21,6 +21,10 @@
     "onLanguage:json",
     "onLanguage:jsonc",
     "onLanguage:markdown",
+    "onLanguage:prompt",
+    "onLanguage:instructions",
+    "onLanguage:chatagent",
+    "onLanguage:skill",
     "onLanguage:toml",
     "onLanguage:css",
     "onLanguage:scss",
@@ -34,6 +38,7 @@
     "onLanguage:svelte",
     "onLanguage:astro",
     "onLanguage:graphql",
+    "onLanguage:php",
     "onLanguage:dockerfile",
     "onLanguage:shellscript",
     "onLanguage:rust",
@@ -44,6 +49,10 @@
     "onLanguage:terraform",
     "onLanguage:swift",
     "onLanguage:protobuf",
+    "onLanguage:r",
+    "onLanguage:handlebars",
+    "onLanguage:dockercompose",
+    "onLanguage:github-actions-workflow",
     "workspaceContains:.editorconfig"
   ],
   "contributes": {
@@ -53,6 +62,12 @@
         "extensions": [
           ".bats",
           ".azcli"
+        ]
+      },
+      {
+        "id": "markdown",
+        "extensions": [
+          ".mdx"
         ]
       }
     ],
@@ -82,6 +97,10 @@
         "title": "Poly: Lint (poly check)"
       },
       {
+        "command": "poly.analyzeDeadCode",
+        "title": "Poly: Analyze Dead Code"
+      },
+      {
         "command": "poly.minifyJson",
         "title": "Poly: Minify JSON"
       },
@@ -92,6 +111,10 @@
       {
         "command": "poly.showOutput",
         "title": "Poly: Show Log"
+      },
+      {
+        "command": "poly.createGoWork",
+        "title": "Poly: Create go.work for the Open Go Modules"
       }
     ],
     "menus": {
@@ -118,6 +141,11 @@
           "type": "boolean",
           "default": true,
           "description": "Publish lint diagnostics when a supported file is opened or saved."
+        },
+        "poly.deadCodeCodeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show an `analyze dead code` link on the first line of code in every file poly can answer about: Go (golang.org/x/tools/cmd/deadcode), TypeScript and JavaScript (knip), Python (vulture). Clicking it runs `poly deadcode` in a terminal over that file's whole project — the go.work build list, the npm project, the Python project. Nothing runs until it is clicked: whole-program reachability costs a build, so it is asked rather than watched."
         },
         "poly.languageServers": {
           "type": "boolean",
@@ -150,6 +178,10 @@
       "[json]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[jsonc]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[markdown]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[prompt]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[instructions]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[chatagent]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[skill]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[toml]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[css]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[scss]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
@@ -163,6 +195,7 @@
       "[svelte]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[astro]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[graphql]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[php]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[dockerfile]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[shellscript]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[lua]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
@@ -172,7 +205,11 @@
       "[cpp]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[swift]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
       "[terraform]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
-      "[protobuf]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true }
+      "[protobuf]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[r]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[handlebars]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[dockercompose]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true },
+      "[github-actions-workflow]": { "editor.defaultFormatter": "ricky.poly-lsp", "editor.formatOnSave": true }
     }
   },
   "packageManager": "pnpm@11.5.3",
@@ -180,7 +217,7 @@
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
     "typecheck": "tsc --noEmit",
     "test:build": "pnpm run build && tsc -p tsconfig.test.json",
-    "test": "pnpm run test:build && node out/runTest.js"
+    "test": "pnpm run test:build && node out/test/runTest.js"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

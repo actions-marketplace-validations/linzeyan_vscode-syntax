@@ -135,6 +135,41 @@ fn fmt_preserves_crlf_line_endings() {
     );
 }
 
+/// The third convention, and the one poly used to destroy: a lone `\r`.
+///
+/// Nothing writes classic Mac endings any more, which is exactly why this is
+/// worth a test -- the file is rare enough that nobody would look, and the
+/// failure is not a wrong byte somewhere but every line of the file rewritten
+/// on the first save. Found by running `poly fmt` and `ruff format` over ruff's
+/// own fixtures, two of which are there because ruff cares about the same case.
+#[test]
+fn fmt_preserves_lone_cr_line_endings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.json"), "{\"b\":1,\r  \"a\":2}").unwrap();
+    std::fs::write(root.join("clean.json"), "{ \"b\": 1, \"a\": 2 }\r").unwrap();
+
+    let (code, stdout, _) = poly(root, &["fmt", "--check", "."]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(
+        !stdout.contains("clean.json"),
+        "CR alone must not count as unformatted: {stdout}"
+    );
+
+    let (code, _, stderr) = poly(root, &["fmt", "."]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.json")).unwrap(),
+        "{ \"b\": 1, \"a\": 2 }\r",
+        "formatter must write back the file's own line ending"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("clean.json")).unwrap(),
+        "{ \"b\": 1, \"a\": 2 }\r",
+        "an already-formatted CR file must be left byte-identical"
+    );
+}
+
 /// `[format.<lang>]` has to reach the embedded engines, or the setting is a
 /// lie the user only discovers by diffing output.
 #[test]

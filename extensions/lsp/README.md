@@ -11,9 +11,32 @@
   換行、行尾字元。**包括 poly 不格式化的檔案**（`.ini`、Makefile……）——poly 會格的
   檔案交給 formatter，不會兩邊同時改一次存檔。答案與 `poly fmt` 出自同一次解析，所以
   打字時的行為跟存檔後的結果不會各說各話。`charset` 與 `max_line_length` 不處理。
-- **Lint**：存檔即時 diagnostics（shellcheck／hadolint／actionlint／ruff／
-  selene／sqruff，以及專案內的 biome／eslint）；`Poly: Lint (poly check)`
+- **Lint**：存檔即時 diagnostics（shellcheck／actionlint／ruff／
+  selene／sqruff，以及專案內的 biome／eslint；ruff、selene、sqruff 是編進
+  binary 的，其餘是受管下載；hadolint 預設關閉，`[tools] hadolint = "on"`
+  可開回來）；`Poly: Lint (poly check)`
   在終端跑完整 CLI，輸出與 CI 一致。
+- **整包範圍的 lint**：有三個工具讀不了單一 buffer，所以它們跑的是整個範圍，而那個
+  範圍是工具自己的定義——**golangci-lint** 讀一個 Go module（含底下所有 package）、
+  **cargo clippy** 讀一個 cargo workspace（含所有 crate）、**tflint** 讀一個目錄
+  且不往下走。三者在編輯器與 `poly check` 是同一次呼叫、同一個答案（A4）。它們比
+  單檔 linter 慢——clippy 要編譯——所以答案是存檔後幾秒才到，不是即時的。
+  clippy 用 `target/poly` 當 build 目錄，才不會跟你自己的 `cargo test` 搶鎖。
+- **`Poly: Analyze Dead Code`**：走不到的程式碼。**Go／TypeScript／JavaScript／Python
+  都有**，因為這三個語言各自已經有人做好了整體可達性分析，poly 只負責調度：Go 是
+  `golang.org/x/tools/cmd/deadcode`，JS／TS 是 knip，Python 是 vulture。每個這些語言的
+  檔案，**第一行程式碼**上面會有一條 `analyze dead code` lens（不是第 0 行——shebang、
+  版權標頭、`//go:build` 都在那上面），點了在終端跑 `poly deadcode`，跟 lint 一樣是同一支
+  CLI、同一個答案。
+  - **範圍不是那個檔，是那個專案**：Go 往上找到 `go.work` 就用它（整個 build list），
+    否則最近的 `go.mod`；JS／TS 是那個 knip 旁邊的 package.json；Python 是最近的
+    `pyproject.toml`／`setup.py`／`setup.cfg`。一個檔一條 lens 不是一個函式一條——分析
+    本來就是整個 program 的，一個函式一條只是同一個答案的 N 個入口。
+  - **Rust 沒有，而且那是誠實的空白**：rustc 自己的 `dead_code` 已經隨 `cargo clippy`
+    每次存檔就到了，而跨 crate 的那一問沒有主流工具在回答。
+  - 三支工具 poly 都不代裝，各自來自該語言的 toolchain：`go install
+    golang.org/x/tools/cmd/deadcode@latest`／`npm install --save-dev knip`／
+    `pip install vulture`。`poly.deadCodeCodeLens.enabled` 可關。
 - **`Poly: Minify JSON`**：把當前 JSON／JSONC buffer 壓成一行（移除空白與註解，
   保留 key 順序與字串內容）。命令面板執行。刻意不進 format-on-save：它是格式化的
   反向，下一次 `poly fmt` 就會還原。CLI 對應 `poly minify <路徑>`。
@@ -27,9 +50,116 @@
   module 時 buf 會拿當前工作目錄當根目錄，`PACKAGE_DIRECTORY_MATCH` 就會對完全正常
   的 package 亂噴，而且噴什麼取決於你從哪個目錄執行。導航、補全與 hover 另外由
   `poly.languageServers`（預設關閉）控制，打開後走的是同一支 buf。
-- Jupyter notebook（`.ipynb`）由 ruff 整份處理：cell 內的 Python 會被格式化與
-  檢查，outputs／markdown cell 原樣保留。VSCode 的 notebook editor 不走 LSP
+- Jupyter notebook（`.ipynb`）由內嵌的 ruff 整份處理：cell 內的 Python 會被逐格
+  格式化與檢查，outputs／markdown cell 原樣保留，診斷訊息會標上 `cell N:` 因為
+  行號是相對於 cell 的。VSCode 的 notebook editor 不走 LSP
   文字文件，所以要用批次命令（Format Folder／Workspace）或 `poly fmt`。
+
+## 語言功能（`poly.languageServers`，預設關閉）
+
+打開之後，poly 把請求轉給**專案自己 toolchain 裡的** language server——gopls、
+rust-analyzer、clangd、sourcekit-lsp、terraform-ls、lua-language-server，以及 poly
+自己代管的 buf。poly 不實作任何一行語意分析（A6），只做路由，所以答案的品質是那些
+server 的，不是 poly 的。
+
+轉的是：hover、definition／typeDefinition／implementation／declaration、
+**references**、documentSymbol、completion、rename、code action、signatureHelp、
+documentHighlight、foldingRange、selectionRange，以及 **inlay hints**、
+**call hierarchy**、**type hierarchy**、**server 自己的命令**。註冊哪些由 server
+自己宣告什麼決定——poly 不會替它宣稱一個它沒有的能力。
+
+### 重構為什麼要靠「server 自己的命令」
+
+燈泡裡的東西大多不是一份編輯，而是一個**命令**——gopls 的每一個 code action 都是。
+所以 `Extract declarations to new file`（`gopls.extract_to_new_file`）、
+`Change signature`（`gopls.change_signature`）這些能不能用，取決於 poly 有沒有把
+`workspace/executeCommand` 轉下去。**0.9.0 之前沒有**，點下去毫無反應也沒有錯誤訊息。
+現在 poly 照每個 server 自己宣告的命令清單註冊，依命令名稱路由。
+
+存檔時會跑的三族 code action（`source.organizeImports`／`source.fixAll`／
+`source.formatAll`）poly 不轉——VSCode 在 formatter **之前**跑它們，等於讓 gopls 的
+organizeImports 跟 poly 的 gofumpt 在同一次存檔搶著改同一段 import。其餘的 `source.*`
+（`Browse documentation`、`Add test`、`Split package`……）照常出現在燈泡裡。
+
+### Inlay hints 要另外開
+
+**gopls 預設不出 inlay hint**，而且它是跟 client 要設定的（`workspace/configuration`
+的 `gopls` 區段），所以要在 `settings.json` 裡開：
+
+```jsonc
+{
+  "gopls": {
+    "hints": {
+      "assignVariableTypes": true,
+      "compositeLiteralFields": true,
+      "constantValues": true,
+      "parameterNames": true,
+      "rangeVariableTypes": true
+    }
+  }
+}
+```
+
+rust-analyzer 與 clangd 的 hint 預設是開的，不必動。
+
+### Code lens
+
+server 對整個檔案提供的動作會出現在程式碼上方。gopls 給的是 `//go:generate` 那一行上的
+`run go generate`，以及 `go.mod` 上的 `go mod tidy`／`govulncheck`。
+
+**`run test` 預設不出**，和 inlay hint 同一個原因——開關在 gopls 跟 client 要的設定裡：
+
+```jsonc
+{
+  "gopls": {
+    "codelenses": { "test": true }
+  }
+}
+```
+
+rust-analyzer 的 `Run | Debug` lens **不是** server 給的，是它自家 extension 註冊的命令，
+所以裝了 poly 也不會出現。
+
+poly-editor 的 `N refs`／`N impls` 是另一回事，兩者會一起顯示。
+
+### 語意上色（semantic tokens）
+
+語法上色來自文法檔，語意上色來自 language server——文法看到 `strings.ToUpper` 只知道那是
+「點後面的識別字」，只有 gopls 知道那是另一個 package 的函式。兩層會疊在一起，由主題決定
+要不要採用（`editor.semanticHighlighting.enabled`，VSCode 預設 `configuredByTheme`）。
+
+**gopls 出貨時是關的**，第三個這種形狀的設定：
+
+```jsonc
+{
+  "gopls": {
+    "semanticTokens": true
+  }
+}
+```
+
+rust-analyzer、clangd、lua-language-server、terraform-ls、buf 預設就有。Swift 也有，只是
+sourcekit-lsp 是等編輯器表示看得懂之後才自己註冊的，時機比其他 server 晚一點。
+
+### 一個 window 開多個 Go 專案：`Poly: Create go.work for the Open Go Modules`
+
+**跨 module 的引用只有在有 `go.work` 時才找得到。** 實測 gopls 1.26，兩個 module
+當成兩個 workspace folder、`appb` 用 `replace` 指向 `liba`，問誰呼叫 `liba.Hello`：
+
+| 情境                              | 結果       |
+| --------------------------------- | ---------- |
+| 兩個 module ＋ replace，只開 liba | 找不到     |
+| 兩個 module ＋ replace，兩邊都開  | 找不到     |
+| 上面兩個 module ＋ `go.work`      | **找得到** |
+
+原因是 gopls 每個 module 建一個 view，reference 搜尋不出那個 view。`go.work` 才讓兩者
+變成同一個 build——而且它**不必是 workspace folder**，放在共同父目錄就行，gopls 會
+往上走去找。
+
+這個命令就是把 window 裡所有 `go.mod` 找出來、算出共同父目錄、跑 `go work init`／
+`use`。**寫檔前一定會問**，而且對話框寫明完整路徑，因為那個父目錄通常在你開的資料夾
+**外面**。寫完會重啟 language server（外面的檔案編輯器不會 watch，所以不能等通知）。
+需要 `go` 在 PATH 上——gopls 本來就要它。
 
 ## 更新
 
@@ -42,7 +172,7 @@
 這個 extension 0.6.0 前叫 `poly-lint`（另一個叫 `poly-syntax`）。id 換了就是新
 extension，只能手動裝。
 
-0.5.0 的更新提示還是會跳，但按下 Install 必定失敗（它找的是 `poly-syntax-0.9.0.vsix`
+0.5.0 的更新提示還是會跳，但按下 Install 必定失敗（它找的是 `poly-syntax-0.13.2.vsix`
 這個已經不存在的檔名），而且錯誤訊息會說「The VSIX files were downloaded」——
 其實一個都沒下載，所以「Show Files」也沒東西可看。那段程式碼凍在已安裝的 0.5.0
 裡，改不了。

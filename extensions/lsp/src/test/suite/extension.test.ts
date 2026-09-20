@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 import * as vscode from "vscode";
 
+import { commonRoot, useLines } from "../../gowork";
+
 const EXTENSION_ID = "ricky.poly-lsp";
 
 const COMMANDS = [
@@ -14,8 +16,10 @@ const COMMANDS = [
   "poly.formatGitRepo",
   "poly.formatGitChanged",
   "poly.lintPath",
+  "poly.analyzeDeadCode",
   "poly.checkForUpdates",
   "poly.showOutput",
+  "poly.createGoWork",
 ];
 
 function workspaceRoot(): string {
@@ -90,7 +94,7 @@ suite("poly-lsp in a real editor", () => {
   // so the pair the test host just wired up has to agree. A mismatch here is
   // the same defect a user would see as a warning badge, caught before release
   // rather than by whoever installs it.
-  test("the binary it talks to is its own version", async () => {
+  test("the binary it talks to is its own version", () => {
     const extension = vscode.extensions.getExtension(EXTENSION_ID);
     const serverPath = vscode.workspace
       .getConfiguration("poly")
@@ -115,6 +119,101 @@ suite("poly-lsp in a real editor", () => {
   // VSCode ships no formatter for either language, so any edit at all can only
   // have come from poly's client — which is exactly the registration that
   // broke twice while the protocol tests stayed green.
+  // The go.work command's own body needs a modal answer and two real modules,
+  // neither of which a test host can supply. What it can pin down is the part
+  // that decides where the file lands -- and landing it in the wrong directory
+  // is the failure mode that matters, because that directory is usually
+  // outside every folder the window has open.
+  // The lens is the only entry point most people will ever see for
+  // `poly deadcode`, and the thing that breaks it is invisible from a unit
+  // test: headers push the first real line well off line 0, and a lens
+  // anchored to the wrong line silently stops rendering.
+  async function deadCodeLenses(uri: vscode.Uri): Promise<vscode.CodeLens[]> {
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+    const lenses = await eventually("the dead code lens", async () => {
+      const found = await vscode.commands.executeCommand<vscode.CodeLens[]>(
+        "vscode.executeCodeLensProvider",
+        uri,
+        10,
+      );
+      return found && found.length > 0 ? found : undefined;
+    });
+    return lenses.filter((lens) => lens.command?.command === "poly.analyzeDeadCode");
+  }
+
+  test("a Go file's lens lands past its build tag and licence header", async () => {
+    const mine = await deadCodeLenses(
+      writeFile(
+        "buildtagged.go",
+        "//go:build linux\n\n// Copyright somebody.\n\npackage main\n\nfunc main() {}\n",
+      ),
+    );
+    assert.strictEqual(mine.length, 1, "expected exactly one dead code lens");
+    assert.strictEqual(mine[0].range.start.line, 4, "lens is not on the package clause");
+  });
+
+  // Every language `poly deadcode` can answer about gets the same lens, and
+  // each one hides its first real line behind something different: a shebang
+  // in Python, a block comment in TypeScript.
+  test("a Python file's lens lands past its shebang and header comment", async () => {
+    const mine = await deadCodeLenses(
+      writeFile(
+        "headed.py",
+        "#!/usr/bin/env python3\n# Copyright somebody.\n\nimport os\n\nprint(os.name)\n",
+      ),
+    );
+    assert.strictEqual(mine.length, 1, "expected exactly one dead code lens");
+    assert.strictEqual(mine[0].range.start.line, 3, "lens is not on the first statement");
+  });
+
+  test("a TypeScript file's lens lands past its block comment", async () => {
+    const mine = await deadCodeLenses(
+      writeFile(
+        "headed.ts",
+        "/*\n * Copyright somebody.\n */\n\nexport const answer = 42;\n",
+      ),
+    );
+    assert.strictEqual(mine.length, 1, "expected exactly one dead code lens");
+    assert.strictEqual(mine[0].range.start.line, 4, "lens is not on the first statement");
+  });
+
+  // Rust has no whole-program dead code analysis to dispatch to, so the lens
+  // must not appear: an entry point to a command that answers "nothing to
+  // analyse" is worse than no entry point.
+  test("a language with no dead code analysis gets no lens", async () => {
+    const uri = writeFile("plain.rs", "pub fn f() {}\n");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+    const found = await vscode.commands.executeCommand<vscode.CodeLens[]>(
+      "vscode.executeCodeLensProvider",
+      uri,
+      10,
+    );
+    const mine = (found ?? []).filter(
+      (lens) => lens.command?.command === "poly.analyzeDeadCode",
+    );
+    assert.deepStrictEqual(mine, [], "Rust has no deadcode tool to offer");
+  });
+
+  test("a go.work goes to the deepest directory covering every module", () => {
+    const root = commonRoot([join("/a", "liba"), join("/a", "appb")]);
+    assert.strictEqual(root, "/a");
+    assert.deepStrictEqual(useLines(root!, [join("/a", "liba"), join("/a", "appb")]), [
+      "./appb",
+      "./liba",
+    ]);
+
+    // A module at the root itself is `.`, which is what go writes.
+    assert.deepStrictEqual(useLines("/a", ["/a", join("/a", "sub")]), [".", "./sub"]);
+
+    // One module is its own root; nested modules resolve to the outer one.
+    assert.strictEqual(commonRoot([join("/a", "one")]), join("/a", "one"));
+    assert.strictEqual(commonRoot([join("/a", "one"), join("/a", "one", "in")]), join("/a", "one"));
+
+    // Nothing to cover, and nothing in common: both have to say so rather than
+    // return a root that would put the file somewhere arbitrary.
+    assert.strictEqual(commonRoot([]), undefined);
+  });
+
   test("registers a formatter for sql", async () => {
     const text = await formatted(writeFile("messy.sql", "select a,b from t\n"));
     assert.strictEqual(text, "select a, b from t\n");
@@ -255,6 +354,44 @@ func main() {
     );
   });
 
+  // The other half of the test above. YAML has no poly rule that reports a
+  // parse failure, so there the formatter's error is the only report of it;
+  // TypeScript has one, and a broken .ts used to draw two squiggles over the
+  // same character -- `typescript/syntax` from the linter on change and
+  // `poly/format` from the formatter on save, same line, same column, the same
+  // sentence. Only the real editor can show which of them the Problems panel
+  // ends up with, because the merge happens on the way out of the server.
+  //
+  // TypeScript rather than TOML, which is where this test started: the host
+  // runs poly-lsp alone, and the `toml` language id comes from poly-highlight,
+  // so a .toml file is plaintext here and never reaches the document selector.
+  test("a file that does not parse reports it once", async () => {
+    const uri = writeFile("broken.ts", "const = 1\n");
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document);
+    await eventually(
+      "the syntax finding",
+      () => vscode.languages.getDiagnostics(uri).find((d) => d.source === "typescript"),
+    );
+    // The server publishes before it answers this request and the client
+    // handles messages in order, so anything the formatter had to say has
+    // arrived by the time this resolves -- no sleep, and no false pass.
+    await vscode.commands.executeCommand(
+      "vscode.executeFormatDocumentProvider",
+      uri,
+      { tabSize: 2, insertSpaces: true },
+    );
+    // `ts` is the built-in TypeScript service, entitled to its own opinion
+    // about the same file. `poly` is the formatter's copy of the linter's, and
+    // it is the only source this test is about.
+    const sources = vscode.languages.getDiagnostics(uri).map((d) => d.source);
+    assert.ok(sources.includes("typescript"), `lost the syntax finding: ${sources}`);
+    assert.ok(
+      !sources.includes("poly"),
+      `the formatter repeated a parse failure the linter already reported: ${sources}`,
+    );
+  });
+
   // The batch commands go through workspace/executeCommand rather than the
   // document APIs, so they exercise a path no formatting test touches.
   test("Format Folder rewrites files on disk", async () => {
@@ -283,7 +420,7 @@ func main() {
   // survives between runs: a stale copy naming the pre-rename extension id sat
   // there passing this test for the wrong reason. Delete that directory if this
   // ever disagrees with package.json.
-  test("format-on-save is on for a poly language out of the box", async () => {
+  test("format-on-save is on for a poly language out of the box", () => {
     const uri = writeFile("defaults.py", "x = 1\n");
     const editor = vscode.workspace.getConfiguration("editor", {
       uri,

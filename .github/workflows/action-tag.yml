@@ -10,7 +10,10 @@ name: Action tag
 # can do on a bad day is nothing.
 on:
   schedule:
-    - cron: "0 7 * * 1"
+    # The 1st, 07:00 UTC, between Grammar Sync and Tool Sync. release.yml is
+    # what actually keeps the tag current, so this only has to run often
+    # enough to catch a release that went out some other way.
+    - cron: "0 7 1 * *"
   workflow_dispatch:
 
 permissions:

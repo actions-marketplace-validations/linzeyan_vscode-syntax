@@ -17,23 +17,33 @@ pub fn formattable(lang: &str) -> bool {
             lang,
             "rust"
                 | "shellscript"
+                | "zsh"
                 | "go"
-                | "lua"
                 | "c"
                 | "cpp"
                 | "terraform"
                 | "swift"
-                | "jupyter"
                 | "protobuf"
+                | "r"
         )
 }
 
-/// Does this file use CRLF? Prettier's rule: whichever ending the *first* line
-/// uses wins, so one stray ending in a large file does not flip the verdict.
-fn is_crlf(text: &str) -> bool {
-    match text.find('\n') {
-        Some(i) => i > 0 && text.as_bytes()[i - 1] == b'\r',
-        None => false,
+/// Which line ending does this file use? Prettier's rule: whichever ending the
+/// *first* line uses wins, so one stray ending in a large file does not flip
+/// the verdict.
+///
+/// A lone `\r` is the classic Mac ending. Nothing writes it any more, but
+/// files carrying it still exist, and every formatter poly dispatches to reads
+/// it as a line break and answers in `\n` — so leaving it out of this function
+/// does not mean "poly ignores those files", it means poly silently rewrites
+/// every line of one. A file with no line break at all is `\n` because the
+/// answer cannot matter.
+fn line_ending(text: &str) -> &'static str {
+    match text.find(['\n', '\r']) {
+        Some(i) if text.as_bytes()[i] == b'\n' => "\n",
+        Some(i) if text[i..].starts_with("\r\n") => "\r\n",
+        Some(_) => "\r",
+        None => "\n",
     }
 }
 
@@ -50,17 +60,21 @@ pub fn format_text(
     text: &str,
     config: &poly_core::Config,
 ) -> Result<Option<String>> {
-    if !is_crlf(text) {
+    let eol = line_ending(text);
+    if eol == "\n" {
         return dispatch(lang, path, text, config);
     }
-    let lf = text.replace("\r\n", "\n");
+    // Both replacements, in this order: a file whose first line ends in a lone
+    // \r can still hold a CRLF further down, and replacing the bare \r first
+    // would turn each of those into two line breaks.
+    let lf = text.replace("\r\n", "\n").replace('\r', "\n");
     let Some(formatted) = dispatch(lang, path, &lf, config)? else {
         return Ok(None);
     };
     // Safe as a blanket replace: the formatter saw LF-only input, so any \n it
     // emitted is a bare one. Mixed-ending files get normalized to the dominant
     // ending, which is what git would do on the next commit anyway.
-    let restored = formatted.replace('\n', "\r\n");
+    let restored = formatted.replace('\n', eol);
     Ok((restored != text).then_some(restored))
 }
 
@@ -125,15 +139,54 @@ fn dispatch(
         return poly_tools::run::buf_format(&bin, path, text);
     }
 
+    // arity reads air.toml/arity.toml from the working directory, not from the
+    // filename it is handed, so this one runs where the package is. Its own
+    // call rather than a row in the table below for that reason alone -- see
+    // `format_stdin_in`.
+    if lang == "r" {
+        // poly was contradicting itself on these files. `poly check` hands
+        // arity paths and arity applies its own exclusions, so a generated file
+        // reports nothing; `poly fmt` hands it a buffer, where
+        // `--stdin-filename` picks the grammar and nothing else, so the same
+        // file in the same run came back "not formatted" and got rewritten.
+        //
+        // The buffer says which it is, which is what makes this safe in the
+        // editor: the copy on disk is the stale one poly must not consult (A4),
+        // and the claim is in the text being formatted. Measured over 1,464
+        // files from seven R packages -- arity skips 19, the 11 generated ones
+        // all carry the line, and not one of the 1,445 it does format carries
+        // it.
+        //
+        // The other eight are `revdep/` scripts, and poly formats those. They
+        // are hand-written, arity skips them because they are not package
+        // source, and a directory name is not a claim the file makes about
+        // itself. Only R checks this, because R is where poly disagreed with
+        // poly: gofumpt and the rest exclude nothing, so there is no second
+        // answer to reconcile.
+        if declares_itself_generated(text) {
+            return Ok(None);
+        }
+        let Some(bin) = cached_tool("arity", config) else {
+            return Ok(None);
+        };
+        let root = poly_tools::run::r_package_root(path);
+        let path_arg = path.to_string_lossy();
+        return poly_tools::run::format_stdin_in(
+            &bin,
+            &root,
+            &["format", "--stdin-filename", &path_arg, "-"],
+            text,
+        );
+    }
+
     let path_arg = path.to_string_lossy();
     let (tool, args): (&str, Vec<&str>) = match lang {
-        "shellscript" => ("shfmt", vec!["--filename", &path_arg]),
-        // The embedded ruff formatter takes Python source; only the ruff
-        // binary knows the notebook container, and it round-trips the whole
-        // .ipynb through stdin.
-        "jupyter" => ("ruff", vec!["format", "--stdin-filename", &path_arg, "-"]),
+        // `--filename` is what carries the dialect: shfmt's `-ln=auto` reads
+        // the extension, so a .zsh file is parsed as zsh rather than as the
+        // bash poly's other shell id means. That is the whole reason zsh can
+        // keep its formatter while losing its linter.
+        "shellscript" | "zsh" => ("shfmt", vec!["--filename", &path_arg]),
         "go" => ("gofumpt", vec![]),
-        "lua" => ("stylua", vec!["-"]),
         "c" | "cpp" => ("clang-format", vec!["--assume-filename", &path_arg]),
         "terraform" => ("terraform", vec!["fmt", "-"]),
         "swift" => ("swift-format", vec![]),
@@ -143,6 +196,27 @@ fn dispatch(
         return Ok(None);
     };
     poly_tools::run::format_stdin(&bin, &args, text)
+}
+
+/// Whether the buffer opens by saying a generator owns it.
+///
+/// "do not edit" rather than "generated by", which was the other candidate and
+/// is the looser of the two: every file arity excludes for this reason carries
+/// the first phrase, and the second also appears in prose that is describing a
+/// generator rather than declaring one. The same phrase is what Go's own
+/// specified header says (`// Code generated ... DO NOT EDIT.`), so the day
+/// another formatter needs this the phrase does not have to change -- only the
+/// caller.
+///
+/// Eight lines because a generated file leads with the claim; further down it
+/// would be a file discussing generated code rather than being one. It has to
+/// be a comment for the same reason: the words in a string literal are the
+/// program's data, not its own description.
+fn declares_itself_generated(text: &str) -> bool {
+    text.lines().take(8).any(|line| {
+        let line = line.trim_start();
+        line.starts_with('#') && line.to_ascii_lowercase().contains("do not edit")
+    })
 }
 
 /// Project-tool detection walks directories upward; memoize per (tool, parent
@@ -217,4 +291,52 @@ fn cached_tool(name: &str, config: &poly_core::Config) -> Option<PathBuf> {
     }
     cache.insert(name.to_string(), path.clone());
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four generators whose output arity excludes, in their own words.
+    ///
+    /// Copied from real files rather than paraphrased: this predicate is a
+    /// string match, so a header written from memory would test the memory.
+    /// The first is from `dplyr/R/import-standalone-obj-type.R` in the corpus
+    /// the exclusion was measured on; the other three are the headers Rcpp,
+    /// cpp11 and Go write, the last of which is a specified convention rather
+    /// than a habit.
+    #[test]
+    fn a_file_that_says_it_is_generated_is_recognised() {
+        for header in [
+            "# Standalone file: do not edit by hand\n# Source: <https://example>\n\nx<-1\n",
+            "# Compatibility file: do not edit by hand\n\nx<-1\n",
+            "# Generated by using Rcpp::compileAttributes() -> do not edit by hand\n\nx<-1\n",
+            "# Generated by cpp11: do not edit by hand\n\nx<-1\n",
+            "# Code generated by protoc. DO NOT EDIT.\n\nx<-1\n",
+        ] {
+            assert!(declares_itself_generated(header), "{header:?}");
+        }
+    }
+
+    /// And what it must not catch.
+    ///
+    /// The measurement behind this is the second half: of the 1,445 files in
+    /// that corpus arity does format, not one is claimed here. The cases below
+    /// are the ways a string match could have gone wrong anyway -- the words in
+    /// running code rather than in a header, and the words far enough down that
+    /// the file is discussing generated code rather than being it.
+    #[test]
+    fn a_file_that_merely_mentions_the_words_is_not() {
+        for ordinary in [
+            "x <- 1\n",
+            // Data, not a description of the file.
+            "warn(\"do not edit by hand\")\n",
+            // A comment, but nine lines down: a file about generated files.
+            &format!("{}# do not edit by hand\n", "x <- 1\n".repeat(9)),
+            // The other candidate phrase, on its own, in prose.
+            "# Helpers generated by hand over the years\n\nx <- 1\n",
+        ] {
+            assert!(!declares_itself_generated(ordinary), "{ordinary:?}");
+        }
+    }
 }

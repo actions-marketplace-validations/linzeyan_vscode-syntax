@@ -1,0 +1,31 @@
+# `dockercompose` is its own language id, with its own grammar on top of yaml:
+# `compose.yml` and `*docker*compose*.yml` are taken away from `yaml`, so a
+# takeover that rebinds the id lands every compose file on the wrong grammar.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - VERSION=${VERSION:-dev}
+    command: ["poly", "lsp", "--stdio"]
+    environment:
+      RUST_LOG: info
+      POLY_CACHE: /var/cache/poly
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      retries: 3
+
+  db:
+    image: postgres:17-alpine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata: {}

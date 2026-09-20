@@ -3,6 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { LanguageClient, State, TransportKind } from "vscode-languageclient/node";
+import { firstCodeLine } from "./anchor";
+import { commonRoot, useLines } from "./gowork";
 import { checkForUpdates, scheduleUpdateCheck } from "./update";
 
 // Everything the extension does goes through the daemon, so a daemon that
@@ -20,6 +22,15 @@ const LANGUAGES = [
   "json",
   "jsonc",
   "markdown",
+  // The ids `prompt-basics` takes off markdown -- SKILL.md, *.prompt.md,
+  // *.instructions.md, .claude/rules/**, .claude/agents/**. They are `.md`
+  // files, so `poly fmt` already formats them from the CLI by path; leaving
+  // them out of the selector is what made the editor and the CLI disagree
+  // about the same file.
+  "prompt",
+  "instructions",
+  "chatagent",
+  "skill",
   "toml",
   "css",
   "scss",
@@ -33,6 +44,7 @@ const LANGUAGES = [
   "svelte",
   "astro",
   "graphql",
+  "php",
   "dockerfile",
   "shellscript",
   "rust",
@@ -43,6 +55,20 @@ const LANGUAGES = [
   "terraform",
   "swift",
   "protobuf",
+  // Not a built-in id either -- it arrives with REditorSupport.r. poly pins
+  // arity, which formats, lints and serves R, so the file works the moment the
+  // id exists and costs nothing while it does not.
+  "r",
+  // Built-in id; poly only adds the formatter (markup_fmt's Mustache parser).
+  "handlebars",
+  // Neither id is poly's, and neither is guaranteed to exist -- they arrive
+  // with ms-azuretools.vscode-docker and github.vscode-github-actions. Listing
+  // an id nothing declares costs nothing (the selector simply never matches),
+  // and leaving them out costs the A4 guarantee: the files are `.yml`, so
+  // `poly fmt` formats them from the CLI while the editor hands them to
+  // whichever extension contributed the specialised id.
+  "dockercompose",
+  "github-actions-workflow",
 ];
 
 // `.bats` and `.azcli` are in this extension's `contributes.languages` as well
@@ -83,7 +109,7 @@ let versionWarning: string | undefined;
 /// `poly --version` prints one line, `poly <version>`. Anything else -- a
 /// non-zero exit, no output, a hang -- means the binary is older than 0.3.0,
 /// which is itself the mismatch worth reporting rather than an error to raise.
-async function binaryVersion(serverPath: string): Promise<string | undefined> {
+function binaryVersion(serverPath: string): Promise<string | undefined> {
   return new Promise((resolve) => {
     execFile(serverPath, ["--version"], { timeout: 5000 }, (err, stdout) => {
       const version = stdout.trim().split(/\s+/).pop();
@@ -395,6 +421,164 @@ async function reportVersionSkew(
   refreshStatus();
 }
 
+/// Tie every Go module in this window into one build, so references cross
+/// between them.
+///
+/// Two projects side by side is the case this exists for, and it is the case
+/// gopls answers nothing for on its own: it builds a view per module and a
+/// reference search stays inside it, `replace` directive or not (see
+/// `gowork.ts` for the measurement). A go.work is what makes them one build,
+/// and it works from the common parent — gopls walks up to find it.
+///
+/// Confirmed before writing, and the dialog names the exact path, because that
+/// parent is usually *outside* every folder the window has open. Restarting
+/// afterwards rather than waiting for a watcher is for the same reason: a file
+/// outside the workspace is a file the editor is not watching.
+async function createGoWork(): Promise<void> {
+  const found = await vscode.workspace.findFiles(
+    "**/go.mod",
+    "**/{vendor,node_modules,testdata}/**",
+  );
+  const dirs = [
+    ...new Set(
+      found
+        .filter((uri) => uri.scheme === "file")
+        .map((uri) => path.dirname(uri.fsPath)),
+    ),
+  ].sort();
+  if (dirs.length < 2) {
+    vscode.window.showInformationMessage(
+      dirs.length === 1
+        ? "Poly: only one Go module is open, so a go.work would tie it to nothing."
+        : "Poly: no go.mod in this window.",
+    );
+    return;
+  }
+  const root = commonRoot(dirs);
+  if (!root) {
+    vscode.window.showWarningMessage(
+      "Poly: these modules share no parent directory, so one go.work cannot cover them.",
+    );
+    return;
+  }
+  const target = path.join(root, "go.work");
+  const existing = fs.existsSync(target);
+  const verb = existing ? "Update" : "Create";
+  const choice = await vscode.window.showWarningMessage(
+    `${verb} ${target}?`,
+    {
+      modal: true,
+      detail: `${dirs.length} modules become one build, so gopls can resolve `
+        + `references between them:\n\n${useLines(root, dirs).join("\n")}`,
+    },
+    verb,
+  );
+  if (choice !== verb) {
+    return;
+  }
+  // `go work` writes the file, including the `go` directive poly would only be
+  // guessing at. Requiring the toolchain costs nothing: gopls shells out to
+  // `go list`, so a machine without go has no cross-module references to fix.
+  const written = await new Promise<boolean>((resolve) => {
+    execFile(
+      "go",
+      ["work", existing ? "use" : "init", ...dirs],
+      { cwd: root },
+      (error, _stdout, stderr) => {
+        if (error) {
+          vscode.window.showErrorMessage(
+            `Poly: go work failed — ${stderr.trim() || error.message}`,
+          );
+        }
+        resolve(!error);
+      },
+    );
+  });
+  if (!written) {
+    return;
+  }
+  vscode.window.showInformationMessage(
+    `Poly: wrote ${target}; restarting the language server so gopls picks it up.`,
+  );
+  await client?.restart();
+}
+
+/**
+ * Languages `poly deadcode` can answer about, and what answers for each.
+ *
+ * Three tools, one question -- "does anything reach this code" -- and poly
+ * implements none of them. A language is here only if somebody already built
+ * the whole-program analysis for it: Go has golang.org/x/tools/cmd/deadcode,
+ * JS and TS have knip, Python has vulture. Rust is deliberately absent, and
+ * that is an honest absence rather than an oversight -- rustc's own `dead_code`
+ * lint already arrives through `cargo clippy` on every save, and nothing
+ * mainstream answers the cross-crate version of the question.
+ */
+const DEAD_CODE_LANGUAGES: Readonly<Record<string, string>> = {
+  go: "this file's module, or its whole go.work build list",
+  typescript: "this file's npm project (knip)",
+  typescriptreact: "this file's npm project (knip)",
+  javascript: "this file's npm project (knip)",
+  javascriptreact: "this file's npm project (knip)",
+  python: "this file's Python project (vulture)",
+};
+
+/**
+ * One `analyze dead code` lens per file, on the first line that is code.
+ *
+ * The command is in the palette already; a lens is what makes it something you
+ * notice while reading the code you suspect. It is the entry point Tooltitude
+ * puts on every declaration (`analyze unused in file/path/workspace`) and this
+ * is deliberately one per file instead: the analysis is whole-program, so a
+ * lens per function would be N entry points to the same answer.
+ *
+ * The scope is not the file. `poly deadcode` walks up to the project the file
+ * belongs to -- the go.work, the package.json beside the knip that will answer,
+ * the pyproject.toml -- which is exactly the question the file itself cannot
+ * answer.
+ */
+function analyzeDeadCodeLens(context: vscode.ExtensionContext): void {
+  const changed = new vscode.EventEmitter<void>();
+  const provider: vscode.CodeLensProvider = {
+    onDidChangeCodeLenses: changed.event,
+    provideCodeLenses(document) {
+      const on = vscode.workspace
+        .getConfiguration("poly")
+        .get<boolean>("deadCodeCodeLens.enabled", true);
+      const scope = DEAD_CODE_LANGUAGES[document.languageId];
+      const line = on && scope ? firstCodeLine(document) : undefined;
+      if (line === undefined) {
+        return [];
+      }
+      // Resolved on the spot: there is nothing to compute, and an unresolved
+      // lens is a spinner over every file for no reason.
+      return [
+        new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
+          title: "analyze dead code",
+          tooltip: `Run poly deadcode over ${scope}`,
+          command: "poly.analyzeDeadCode",
+          arguments: [document.uri],
+        }),
+      ];
+    },
+  };
+  context.subscriptions.push(
+    changed,
+    vscode.languages.registerCodeLensProvider(
+      Object.keys(DEAD_CODE_LANGUAGES).map((language) => ({
+        scheme: "file",
+        language,
+      })),
+      provider,
+    ),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("poly.deadCodeCodeLens")) {
+        changed.fire();
+      }
+    }),
+  );
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   const serverPath = resolveServerPath(context);
   client = new LanguageClient(
@@ -469,6 +653,7 @@ export async function activate(context: vscode.ExtensionContext) {
       );
     }),
     vscode.commands.registerCommand("poly.showOutput", () => client?.outputChannel.show()),
+    vscode.commands.registerCommand("poly.createGoWork", createGoWork),
     vscode.commands.registerCommand("poly.formatFile", async () => {
       const doc = vscode.window.activeTextEditor?.document;
       if (doc?.uri.scheme === "file") {
@@ -506,7 +691,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // command line matches CI exactly.
     vscode.commands.registerCommand(
       "poly.lintPath",
-      async (uri?: vscode.Uri) => {
+      (uri?: vscode.Uri) => {
         const target = uri?.fsPath ?? workspacePaths()[0];
         if (!target) {
           return;
@@ -514,6 +699,26 @@ export async function activate(context: vscode.ExtensionContext) {
         const terminal = vscode.window.createTerminal("poly check");
         terminal.show();
         terminal.sendText(`"${serverPath}" check "${target}"`);
+      },
+    ),
+    // Dead code goes through the terminal for the same reason lint does, and
+    // for one more: it is asked, not watched. Whole-program reachability costs
+    // a build and answers "nothing calls this anywhere", which is a question
+    // with a moment — before deleting something — rather than a thing to
+    // recompute on every save. It stays out of `poly check` for the same
+    // reason; see `cmd_deadcode`.
+    vscode.commands.registerCommand(
+      "poly.analyzeDeadCode",
+      (uri?: vscode.Uri) => {
+        const target = uri?.fsPath
+          ?? vscode.window.activeTextEditor?.document.uri.fsPath
+          ?? workspacePaths()[0];
+        if (!target) {
+          return;
+        }
+        const terminal = vscode.window.createTerminal("poly deadcode");
+        terminal.show();
+        terminal.sendText(`"${serverPath}" deadcode "${target}"`);
       },
     ),
     // Minify is the inverse of what every other command here does, so it is
@@ -578,6 +783,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand("poly.checkForUpdates", () => checkForUpdates(context, false)),
   );
+  analyzeDeadCodeLens(context);
 
   refreshStatus();
   try {

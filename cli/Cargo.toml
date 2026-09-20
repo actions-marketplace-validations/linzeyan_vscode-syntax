@@ -3,12 +3,38 @@ resolver = "2"
 members = ["crates/poly-cli", "crates/poly-core", "crates/poly-engines", "crates/poly-tools"]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.13.2"
 edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
+# GraphQL's parser, named directly although it was already in the tree:
+# pretty_graphql is built on it, so `poly fmt` has been parsing GraphQL with
+# this crate all along and `poly check` now reads the same parser's errors. The
+# version has to be the one pretty_graphql resolves to rather than merely a
+# compatible one -- two apollo-parsers would mean the formatter and the linter
+# disagreeing about what the file is, which is the one thing this arrangement
+# exists to prevent.
+apollo-parser = "0.8"
+# Is this file text or a picture? typos asks before spell-checking, and so must
+# poly now that poly is the one reading the bytes. Same crate typos uses, so the
+# answer is the same one for the same file.
+content_inspector = "0.2"
+# The types deno_lint hands a finding back in: MediaType, ModuleSpecifier, the
+# `Diagnostic` trait a diagnostic's message and documentation URL come from, and
+# StartSourcePos for turning its positions into byte offsets. Named directly
+# because deno_lint re-exports none of them. Already in the tree --
+# dprint-plugin-typescript is built on it -- so the version has to be the one
+# that resolves there: two deno_asts means two `SourcePos` types, and the one
+# deno_lint returns would be the other.
+deno_ast = "0.53"
+# JavaScript and TypeScript lint, embedded rather than downloaded. The crate
+# `deno lint` itself is built from, so the rules, codes, fixes, documentation
+# links and `// deno-lint-ignore` handling are the tool's own (09 §4.2). Exact
+# pin for the reason ruff's and sqruff's are: the API is pre-1.0, and a minor
+# bump can change which rules the recommended set contains.
+deno_lint = "=0.84.1"
 dprint-plugin-dockerfile = "0.6"
 dprint-plugin-json = "0.23"
 dprint-plugin-markdown = "0.22"
@@ -21,22 +47,149 @@ dprint-plugin-typescript = "0.96"
 # outcome -- it reads a project's real config and quietly formats to something
 # else.
 ec4rs = "1.2"
+# UTF-16 source files, which typos decodes before checking and poly would
+# otherwise hand to the tokenizer as noise. Upstream's exact path.
+encoding_rs = "0.8"
+# Lua's parser, needed directly because selene lints an `Ast` rather than a
+# string and re-exports nothing.
+full_moon = "2.2"
 globset = "0.4"
 ignore = "0.4"
+# deno.json is JSON with comments, and deno.jsonc says so in its name. Already
+# in the tree (dprint-plugin-json parses with it), so reading a project's deno
+# config costs a feature rather than a dependency -- and it is the same parser
+# `deno lint` reads that file with.
+jsonc-parser = { version = "0.33", features = ["serde"] }
 lsp-server = "0.7"
 lsp-types = "0.94"
+# PHP's formatter and linter. The top-level `mago` crate is the CLI; the work is
+# in these eight, which is why the row is eight lines rather than one -- an arena
+# (`LocalArena`), a file abstraction, the parser, the name resolver the linter
+# needs, and the reporting types its findings arrive in.
+#
+# One version for all eight, exact, because they are one release: mago publishes
+# them together and a `Program` from one version is not a `Program` the next
+# version's linter accepts. The pin is also what makes `PHP_RULES` checkable --
+# seven names that must still be rules the linter has.
+#
+# Both halves were measured against the released 1.47.6 binary over 20,200 files
+# from eight pinned PHP packages: the formatter is byte-identical, and the linter
+# agrees on every finding of the seven rules poly runs.
+mago-allocator = "=1.47.6"
+mago-database = "=1.47.6"
+mago-formatter = "=1.47.6"
+mago-linter = "=1.47.6"
+mago-names = "=1.47.6"
+mago-php-version = "=1.47.6"
+mago-reporting = "=1.47.6"
+# `HasSpan`, which is how a parse error says where it is. mago-syntax does not
+# re-export the trait, so naming the crate is the only way to call the method.
+mago-span = "=1.47.6"
+mago-syntax = "=1.47.6"
 malva = "0.16"
 markup_fmt = "0.27"
 pretty_graphql = "0.2"
 pretty_yaml = "0.6"
+# The descriptor types protox-parse hands a parsed .proto back in. Named
+# directly because naming `FileDescriptorProto`, `SourceCodeInfo` and the field
+# labels is unavoidable and protox-parse re-exports none of them. The version
+# has to be the one protox-parse resolves to rather than merely a compatible
+# one: two prost-types in the tree means two `FileDescriptorProto` types, and
+# the one protox-parse returns would be the other.
+prost-types = "0.14"
+# protobuf's parser, embedded rather than shelling out to `buf lint`. The
+# parser half of protox on its own: it reads one file with no import
+# resolution, which is exactly the scope of the rules poly has, and it returns
+# a descriptor carrying `SourceCodeInfo`. Those spans are buf's spans -- buf
+# reports FIELD_LOWER_SNAKE_CASE at 11:10-11:18 where this reports [11,9,17],
+# the same range 0-based -- so a poly finding lands on the character buf
+# underlined. Exact pin for the reason ruff's and sqruff's are exact: the API
+# is pre-1.0, and a minor bump could change which files parse at all.
+protox-parse = "=0.9.0"
 rayon = "1"
+# The syntax-tree library yaml_parser builds on. Named directly because walking
+# its AST means naming `rowan::ast::AstNode` and `rowan::TextRange`, and
+# yaml_parser re-exports neither. The version has to be the one yaml_parser
+# resolves to, not merely a compatible one: two rowans in the tree means two
+# `AstNode` traits, and the tree yaml_parser hands over implements the other.
+rowan = "0.16"
+# The Diagnostic type ruff_linter hands findings back in. A direct dependency
+# because naming it is unavoidable and ruff_linter re-exports nothing.
+ruff_db = "=0.0.12"
+# SourceMap: how a cell-by-cell notebook format is written back into the
+# .ipynb, and the type Notebook::update takes.
+ruff_diagnostics = "=0.0.12"
 # ruff_python_formatter takes IndentStyle in its API but does not re-export it,
 # so [format.python] use-tabs needs the type from here. Same exact pin.
-ruff_formatter = "=0.0.10"
+ruff_formatter = "=0.0.12"
+# ruff's linter, embedded rather than downloaded. This is the crate ruff's own
+# CLI is built from, so the rules, codes, fixes, documentation links and
+# `# noqa` handling are the tool's own rather than poly's reading of them --
+# which is the whole reason to link it instead of parsing its JSON.
+#
+# 0.16.6 rather than the 0.16.5 binary poly used to download: 0.16.6 is the
+# first release whose ruff_* dependencies are the 0.0.12 line the formatter is
+# pinned to, and one line for both is what keeps a single ruff inside poly.
+ruff_linter = "=0.16.6"
+# The .ipynb container: cell offsets on the way in, cell-relative positions on
+# the way out.
+ruff_notebook = "=0.0.12"
+# PySourceType: .py / .pyi / .ipynb, which the linter needs and the formatter
+# infers for itself.
+ruff_python_ast = "=0.0.12"
 # ruff's formatter is an unstable internal crate; exact pin required (M0 decision).
-ruff_python_formatter = "=0.0.10"
+#
+# 0.0.10 -> 0.0.12 to meet ruff_linter 0.16.6 on one ruff_* line. Verified not
+# to change a byte of anyone's Python: the two versions were linked side by
+# side and run over 22,663 files (the CPython 3.12 standard library, its test
+# suite and site-packages) at the defaults, and over 6,000 of them again at
+# every setting [format.python] can reach -- identical output, and no file that
+# one version parsed and the other refused.
+ruff_python_formatter = "=0.0.12"
+# Byte offsets into a notebook's concatenated source. Needed to build the
+# SourceMap a cell-by-cell format hands back to Notebook::update.
+ruff_text_size = "=0.0.12"
+# pyproject.toml / ruff.toml discovery and resolution -- a project's own rule
+# selection, which is the point of embedding ruff rather than hardcoding a
+# default set poly invented.
+ruff_workspace = "=0.0.12"
+# Markdown's linter, embedded rather than downloaded: the crate rumdl's own CLI
+# is built from, so the codes, the positions, `<!-- rumdl-disable -->` and the
+# rumdl.dev rule pages are the tool's own. Seven of its eighty-four rules run,
+# and `lint::MARKDOWN_RULES` is where the measurement that picked them is
+# written down.
+#
+# Exact pin for the reason ruff's and sqruff's are: a minor bump changes which
+# rules exist and what they report, and here that is the whole of what poly says
+# about a Markdown file.
+#
+# Default features off, and neither of the two is a size decision: `native` is
+# rumdl's own language server (tower-lsp, tokio, notify) and `parallel` is its
+# own multi-file walk. poly is already the daemon and already the walk, so each
+# would be a second copy of something poly is.
+rumdl = { version = "=0.2.66", default-features = false }
+# Lua, embedded as a pair: both crates parse with full_moon, so the second one
+# costs little once the first is linked. Exact pins for a different reason than
+# ruff's -- these two crates *are* the answer poly prints. A minor bump changes
+# what stylua lays out and which lints selene ships, so a caret pin would let
+# `cargo update` silently change what `poly fmt --check` and `poly check` call
+# clean. The features are the ones upstream's own release builds use, so poly
+# reads the same dialects the binaries did: StyLua's release workflow passes
+# `lua52,lua53,lua54,luau,luajit,cfxlua`, and selene's binary takes selene-lib
+# with default features off and only `roblox` back on.
+#
+# stylua's remaining defaults are off because poly already is the thing they
+# provide, not to save space: `editorconfig` would give stylua a second reader
+# of a file poly parses itself and feeds in through FormatOptions, and `lsp` is
+# a whole second language server inside the one poly is running.
+selene-lib = { version = "=0.31.0", default-features = false, features = [
+  "roblox",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Standard-library definitions are YAML; selene-lib already depends on this, so
+# reading a project's own `<std>.yml` costs nothing new.
+serde_yaml = "0.9"
 # Line diff for Format Selection: poly formats the whole document and then has
 # to say which parts of the result fall inside the selection. Free in build
 # terms -- ruff_python_formatter already pulls it in -- and a hand-rolled LCS
@@ -44,15 +197,57 @@ serde_json = "1"
 similar = "3"
 # sqruff's lib API is unstable; exact pin required (M0 decision).
 sqruff-lib = "=0.40.0"
+# See selene-lib above for the pin and the feature list.
+stylua = { version = "=2.5.2", default-features = false, features = [
+  "cfxlua",
+  "lua52",
+  "lua53",
+  "lua54",
+  "luajit",
+  "luau",
+] }
 toml = "0.8"
+# The spell checker's engine: tokenizer, `Typo`, `Status`. Named directly
+# because `typos_cli` takes and returns these types and re-exports none of them.
+typos = "0.10"
+# ...and the part of typos that is not the engine: config discovery
+# (`typos.toml` / `_typos.toml` / `.typos.toml` / Cargo.toml / pyproject.toml),
+# the built-in dictionary with its case-preserving corrections, and the
+# per-file-type policy that keeps poly from reporting "typos" in a lockfile or a
+# certificate. `typos` + `typos-dict` alone is not enough for any of the three:
+# a hand-rolled dictionary corrects `Recieve` to `receive` where the real one
+# says `Receive`, and nothing but `typos_cli::config` reads the
+# `[default.extend-words]` this repo itself relies on.
+#
+# `=1.49.1` to the binary poly used to download. 1.50.1 ships a new dictionary
+# (typos-dict 0.14.1), which is a decision about what counts as a typo in
+# everyone's existing repo -- worth taking on its own rather than folding into a
+# change that is supposed to keep the findings identical.
+typos-cli = "=1.49.1"
+# The dictionary, named here although poly never calls it, because it is the one
+# dependency that *is* poly's answer and typos-cli asks for it as `^0.14`. The
+# 1.49.1 release binary was built against 0.14.0; cargo resolves 0.14.1, which
+# adds 314 words and would have poly reporting typos the binary it replaces
+# never did. Pinning is what keeps "embedded" from quietly meaning "upgraded".
+typos-dict = "=0.14.0"
 xmlem = "0.5"
+# The parser behind pretty_yaml, named directly so poly's workflow rules read
+# the same tree `poly fmt` formats. pretty_yaml already links it, so this costs
+# no second YAML grammar in the binary -- and, more to the point, `fmt` and
+# `check` cannot end up holding two different opinions about what the file is.
+# It also keeps `on:` spelled `on`: this is a CST, so the YAML 1.1 rule that
+# reads a bare `on` as the boolean true never gets a chance to apply.
+yaml_parser = "0.3"
 
-# Size/perf trade-off: thin LTO + strip keeps the single-binary target honest
-# without the slow codegen-units=1 builds during development.
+# The shipping profile, and only the shipping profile. Fat LTO and
+# codegen-units = 1 buy size on a release runner and cost 111s of whole-program
+# relink on a one-line local change, so Makefile and ci.yml both override those
+# two -- build.yml and release.yml are where this file is read as written.
 [profile.release]
 # The binary ships inside all six platform VSIX, so size is worth real
-# latency: opt-level="s" halves it (28.9MB -> 14.7MB on darwin-arm64)
-# for ~8% on 1MB files, which stays far inside the 200ms p95 budget.
+# latency: opt-level="s" halved it when this was measured (28.9MB -> 14.7MB on
+# darwin-arm64, before Lua was embedded) for ~8% on 1MB files, which stays far
+# inside the 200ms p95 budget.
 lto = "fat"
 codegen-units = 1
 opt-level = "s"

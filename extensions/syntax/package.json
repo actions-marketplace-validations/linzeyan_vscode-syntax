@@ -2,7 +2,7 @@
   "name": "poly-syntax-highlight",
   "displayName": "Poly Syntax Highlight",
   "description": "Unified syntax highlighting pack: every VSCode built-in grammar plus additions, synced from pinned upstreams.",
-  "version": "0.9.0",
+  "version": "0.13.2",
   "publisher": "ricky",
   "license": "MIT",
   "engines": {
@@ -15,6 +15,9 @@
     "languages": [
       {
         "id": "markdown",
+        "extensions": [
+          ".mdx"
+        ],
         "configuration": "./language-configuration/markdown.json"
       },
       {
@@ -196,6 +199,22 @@
           "SSH Config"
         ],
         "configuration": "./language-configuration/ssh-config.json"
+      },
+      {
+        "id": "prompt",
+        "configuration": "./language-configuration/markdown.json"
+      },
+      {
+        "id": "instructions",
+        "configuration": "./language-configuration/markdown.json"
+      },
+      {
+        "id": "chatagent",
+        "configuration": "./language-configuration/markdown.json"
+      },
+      {
+        "id": "skill",
+        "configuration": "./language-configuration/markdown.json"
       },
       {
         "id": "vue",
@@ -660,13 +679,13 @@
       },
       {
         "language": "cpp",
-        "scopeName": "source.cpp",
-        "path": "./syntaxes/cpp.tmLanguage.json"
+        "scopeName": "source.cpp.embedded.macro",
+        "path": "./syntaxes/cpp.embedded.macro.tmLanguage.json"
       },
       {
         "language": "cpp",
-        "scopeName": "source.cpp.embedded.macro",
-        "path": "./syntaxes/cpp.embedded.macro.tmLanguage.json"
+        "scopeName": "source.cpp",
+        "path": "./syntaxes/cpp.tmLanguage.json"
       },
       {
         "scopeName": "source.c.platform",
@@ -817,6 +836,9 @@
         "path": "./syntaxes/shell-unix-bash.tmLanguage.json",
         "unbalancedBracketScopes": [
           "meta.scope.case-pattern.shell"
+        ],
+        "balancedBracketScopes": [
+          "*"
         ]
       },
       {
@@ -861,17 +883,6 @@
         "path": "./syntaxes/go-raw.go-template.tmLanguage.json",
         "injectTo": [
           "source.go"
-        ]
-      },
-      {
-        "scopeName": "text.injection.go-template",
-        "path": "./syntaxes/injection.go-template.tmLanguage.json",
-        "injectTo": [
-          "source.css",
-          "source.js",
-          "source.json",
-          "text.html.derivative",
-          "text.xml"
         ]
       },
       {
@@ -1551,20 +1562,14 @@
         "scopeName": "vue.directives",
         "path": "./syntaxes/vue-directives.tmLanguage.json",
         "injectTo": [
-          "text.html.vue",
-          "text.html.markdown",
-          "text.html.derivative",
-          "text.pug"
+          "text.html.vue"
         ]
       },
       {
         "scopeName": "vue.interpolations",
         "path": "./syntaxes/vue-interpolations.tmLanguage.json",
         "injectTo": [
-          "text.html.vue",
-          "text.html.markdown",
-          "text.html.derivative",
-          "text.pug"
+          "text.html.vue"
         ]
       },
       {

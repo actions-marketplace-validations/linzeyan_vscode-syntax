@@ -1,6 +1,7 @@
 //! Language detection, poly.toml config, and file walking — shared by the CLI
 //! and the LSP daemon so editor and CI behavior stay identical (R5/A4).
 
+pub mod catalog;
 pub mod diag;
 
 use std::collections::{BTreeMap, HashMap};
@@ -27,6 +28,12 @@ const EXTENSIONS: &[(&str, &str)] = &[
     ("jsonc", "json"),
     ("md", "markdown"),
     ("markdown", "markdown"),
+    // MDX is markdown with ESM imports and JSX blocks. The markdown engine
+    // leaves both untouched -- they are block-level HTML as far as it is
+    // concerned -- while still normalizing the prose around them, and a
+    // project carrying prettier gets the full job because poly hands prettier
+    // the real path and prettier picks its mdx parser from the extension.
+    ("mdx", "markdown"),
     ("toml", "toml"),
     ("css", "css"),
     ("scss", "scss"),
@@ -52,13 +59,38 @@ const EXTENSIONS: &[(&str, &str)] = &[
     ("jinja", "jinja"),
     ("jinja2", "jinja"),
     ("j2", "jinja"),
+    // VSCode's built-in handlebars extension owns the id and this exact
+    // extension list; poly only adds a formatter for it.
+    ("hbs", "handlebars"),
+    ("handlebars", "handlebars"),
+    ("hjs", "handlebars"),
     ("graphql", "graphql"),
     ("gql", "graphql"),
     ("graphqls", "graphql"),
+    // VSCode's built-in php extension owns the id and this exact list, so poly
+    // matches it for the reason it matches handlebars': the editor sends a `php`
+    // document for all five, and an extension poly left out is a file the LSP
+    // has an engine for and cannot name. The last three are templates and legacy
+    // spellings rather than dead weight -- `.phtml` is what Magento and Laminas
+    // views are written in, and mago parses the inline HTML in them as PHP does.
+    ("php", "php"),
+    ("php4", "php"),
+    ("php5", "php"),
+    ("phtml", "php"),
+    ("ctp", "php"),
     ("proto", "protobuf"),
     ("sh", "shellscript"),
     ("bash", "shellscript"),
-    ("zsh", "shellscript"),
+    // zsh is its own id for the reason .ipynb is: so the file never reaches the
+    // wrong engine. shellcheck reads sh, bash, dash and ksh and says so; it has
+    // no zsh mode and no plan for one. Handed a .zsh file it parses zsh as bash
+    // -- 2,454 findings over 361 real .zsh files, 55% of every shellcheck
+    // finding in the 09 §4.5 corpus, and the largest single code among them is
+    // SC2086 telling you to quote an expansion that zsh does not word-split in
+    // the first place. shfmt is the other half of the argument: its -ln=auto
+    // reads the extension and parses zsh *as zsh*, so formatting was never the
+    // broken half and does not have to move.
+    ("zsh", "zsh"),
     // Both are shell with a different job, and neither is in VSCode's built-in
     // shellscript extension list -- which is why an extension existed to
     // format them. shfmt reads them as what they are.
@@ -66,6 +98,11 @@ const EXTENSIONS: &[(&str, &str)] = &[
     ("azcli", "shellscript"),
     ("go", "go"),
     ("lua", "lua"),
+    // `.R` is what R itself, CRAN and every package skeleton write; `.r` turns
+    // up in older scripts. One row covers both because the lookup below
+    // lowercases, which is also why the uppercase spelling is not listed --
+    // a second row would never be reached and would read as if it were.
+    ("r", "r"),
     ("swift", "swift"),
     ("c", "c"),
     ("h", "cpp"),
@@ -239,6 +276,24 @@ pub fn editorconfig_editor_settings(path: &Path) -> EditorSettings {
     }
 }
 
+/// Every language id built-in detection can produce, sorted and deduplicated.
+///
+/// The set `[languages.map]` values and `[format.<lang>]` tables are checked
+/// against, and the set the generated poly.example.toml lists. Derived from
+/// `EXTENSIONS` rather than written out a second time, because a hand-copied
+/// list is exactly what went stale: `handlebars` and `protobuf` were detected
+/// for two releases before the documentation heard about them.
+///
+/// `dockerfile` is added by hand because it is the one id no extension yields
+/// -- `builtin_language` reaches it through a filename rule.
+pub fn builtin_languages() -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = EXTENSIONS.iter().map(|(_, lang)| *lang).collect();
+    ids.push("dockerfile");
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 /// Detect by built-in rules only (no config). Filename rules run before
 /// extension rules so `Dockerfile.dev` is dockerfile, not a "dev" extension.
 pub fn builtin_language(path: &Path) -> Option<&'static str> {
@@ -294,50 +349,688 @@ struct RawLint {
     exclude: Vec<String>,
     #[serde(rename = "fail-on")]
     fail_on: Option<String>,
-    /// Glob -> the `tool/rule` codes that path may not report. See
-    /// `Config::lint_ignored`.
+    /// Rules this repository never wants reported. See `Config::lint_ignored`.
+    ignore: Vec<String>,
+    /// Rule -> the level poly reports it at here. See `Config::lint_severity`.
+    severity: BTreeMap<String, String>,
+    /// Glob -> the rules that path may not report. See `Config::lint_ignored`.
     #[serde(rename = "per-file-ignores")]
     per_file_ignores: BTreeMap<String, Vec<String>>,
 }
 
-/// One entry of a `[lint.per-file-ignores]` list.
+/// One rule, or one set of them, named the way poly.toml and a `poly: ignore`
+/// comment both name rules.
 ///
 /// Spelled exactly as poly prints it — `ruff/F401` is what `[ruff/F401]` in a
 /// finding means — so silencing a rule is copying the code out of the output
-/// rather than looking up a syntax. `ruff/*` covers every rule from one tool.
+/// rather than looking up a syntax. `ruff/*` covers every rule from one tool,
+/// and a category covers the same kind of defect in every language at once.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Suppression {
-    tool: String,
-    /// `None` for `tool/*`.
-    rule: Option<String>,
+enum Suppression {
+    /// `tool/rule`, or `tool/*` with no rule.
+    Rule { tool: String, rule: Option<String> },
+    /// A category from `catalog.toml`, matching whatever rules are in it.
+    Category(String),
 }
 
 impl Suppression {
-    fn parse(entry: &str, pattern: &str) -> Result<Suppression> {
-        // Shape only: an unknown tool or rule name is self-revealing (the
-        // finding keeps appearing), but `"F401"` with no tool looks like a
-        // spelling poly ought to understand and would silently match nothing.
-        let (tool, rule) = entry
-            .split_once('/')
-            .filter(|(t, r)| !t.is_empty() && !r.is_empty())
-            .with_context(|| {
-                format!(
-                    "[lint.per-file-ignores] {pattern:?}: {entry:?} is not a rule code — write it \
-                     the way poly prints it, `tool/rule` (e.g. \"ruff/F401\") or `tool/*`"
-                )
-            })?;
-        anyhow::ensure!(
-            !rule.contains('/'),
-            "[lint.per-file-ignores] {pattern:?}: {entry:?} has more than one `/`"
-        );
-        Ok(Suppression {
+    /// The grammar itself, with no surface attached. `Err` is the sentence a
+    /// reader needs, and the two callers put it where their surface can show it
+    /// -- the config aborts the parse, an inline comment reports a finding.
+    /// One function because there is one syntax: what poly prints is what you
+    /// paste, into either place.
+    fn parse_code(entry: &str) -> Result<Suppression, String> {
+        let Some((tool, rule)) = entry.split_once('/') else {
+            // No slash: a category, or a mistake. Checked against the catalog
+            // rather than accepted on shape, because a name nothing matches is
+            // a suppression that silences nothing and says nothing -- while an
+            // unknown *rule* is self-revealing, since the finding it was aimed
+            // at keeps being printed.
+            return if crate::catalog::catalog().contains_key(entry) {
+                Ok(Suppression::Category(entry.to_string()))
+            } else {
+                Err(format!(
+                    "{entry:?} is not a rule code or a category — write a rule the way poly prints \
+                     it, `tool/rule` (e.g. \"ruff/F401\") or `tool/*`, or a category (e.g. \
+                     \"unused-code\"); `poly config export` lists every category"
+                ))
+            };
+        };
+        if tool.is_empty() || rule.is_empty() {
+            return Err(format!(
+                "{entry:?} is not a rule code — write it the way poly prints it, `tool/rule` \
+                 (e.g. \"ruff/F401\") or `tool/*`"
+            ));
+        }
+        if rule.contains('/') {
+            return Err(format!("{entry:?} has more than one `/`"));
+        }
+        Ok(Suppression::Rule {
             tool: tool.to_string(),
             rule: (rule != "*").then(|| rule.to_string()),
         })
     }
 
+    fn parse(entry: &str, section: &str) -> Result<Suppression> {
+        Suppression::parse_code(entry).map_err(|reason| anyhow::anyhow!("{section}: {reason}"))
+    }
+
     fn matches(&self, source: &str, code: &str) -> bool {
-        self.tool == source && self.rule.as_deref().is_none_or(|rule| rule == code)
+        match self {
+            Suppression::Rule { tool, rule } => {
+                tool == source && rule.as_deref().is_none_or(|rule| rule == code)
+            }
+            Suppression::Category(name) => {
+                crate::catalog::category_of(source, code) == Some(name.as_str())
+            }
+        }
+    }
+
+    /// How specifically this names a finding, lowest first.
+    ///
+    /// Only `[lint.severity]` needs it: silencing is an "any of these matched"
+    /// question, but two levels for one finding have to be settled, and the
+    /// entry that names it most precisely is the one that meant it. A category
+    /// is a default for a kind of defect; `tool/rule` is a decision about one
+    /// rule.
+    fn precision(&self) -> u8 {
+        match self {
+            Suppression::Rule { rule: Some(_), .. } => 0,
+            Suppression::Rule { rule: None, .. } => 1,
+            Suppression::Category(_) => 2,
+        }
+    }
+}
+
+// ── inline suppressions ────────────────────────────────────────────────────
+
+/// What an inline suppression comment says, after whatever introduces a comment
+/// in that language.
+const INLINE_MARKER: &str = "poly: ignore";
+
+/// The rule `syntax_issues` reports under, and the prose `lint::rule_doc`
+/// serves for it.
+///
+/// Exported so the documentation lives next to the code that emits it, the way
+/// poly's Dockerfile and workflow rules do -- poly's own rules have no upstream
+/// page to link, so the prose ships in the binary or the reader has nothing to
+/// look up.
+pub const INLINE_RULES: &[(&str, crate::diag::Severity, &str)] = &[(
+    "ignore-syntax",
+    // A comment that silences nothing is suspicious rather than certainly
+    // wrong: it may be a typo, or a rule that has since been renamed away.
+    crate::diag::Severity::Warning,
+    "A `poly: ignore` comment poly will not act on. Codes are spelled the way \
+     poly prints them -- `[ruff/F401]` in a finding is `ruff/F401` in the \
+     comment -- and `tool/*` covers one tool entirely. A bare `F401` names no \
+     tool, so it would match nothing and read like a working suppression. In a \
+     Dockerfile a trailing comment is reported too: `poly fmt` moves it onto a \
+     line of its own, where it would cover the next instruction instead, so it \
+     belongs above the line it excuses. Either way the comment is reported \
+     rather than the run aborted, because one comment in one file is not a \
+     reason to stop checking a repo. The same rule reports a \
+     `# hadolint ignore=` in a Dockerfile when hadolint is off, for the same \
+     reason: it silences nothing, and poly names the code to write instead.",
+)];
+
+/// hadolint's rule codes, mapped to the poly rule that says the same thing.
+///
+/// Only used to word one sentence: when hadolint is off, a
+/// `# hadolint ignore=DL3008` silences nothing, and "write
+/// `# poly: ignore poly/docker-apt-get-unpinned` instead" is a better answer
+/// than "this does nothing". A code with no entry gets the shorter sentence
+/// rather than a guess.
+///
+/// Only the `DL` codes are here. hadolint's other half is shellcheck run over
+/// every `RUN`, and poly reports those itself now under shellcheck's own name,
+/// so `SC2086` becomes `shellcheck/SC2086` by construction rather than by a
+/// table that would have to list every shellcheck rule there is.
+///
+/// Poly does **not** honour hadolint's syntax, and this table is not a step
+/// towards it. Reading `# hadolint ignore=` as a suppression would be a
+/// compatibility layer for a tool poly no longer runs -- two syntaxes for one
+/// job, forever, and a comment whose meaning depends on a `[tools]` line
+/// somewhere else. What this does is tell the author what poly's own syntax
+/// spells it as, once, so the comment can be replaced and deleted.
+///
+/// Read against the two tools' messages by hand, and held to the rules that
+/// actually exist by `hadolint_replacements_name_real_rules` in poly-engines,
+/// which is the crate that owns `DOCKER_RULES`.
+pub const HADOLINT_REPLACEMENTS: &[(&str, &str)] = &[
+    ("DL3000", "docker-workdir-relative"),
+    ("DL3002", "docker-root-user"),
+    ("DL3003", "docker-cd-in-run"),
+    ("DL3004", "docker-sudo-in-run"),
+    ("DL3006", "docker-untagged-base"),
+    ("DL3007", "docker-latest-base"),
+    ("DL3008", "docker-apt-get-unpinned"),
+    ("DL3009", "docker-apt-get-no-clean"),
+    ("DL3011", "docker-invalid-port"),
+    ("DL3013", "docker-pip-unpinned"),
+    ("DL3014", "docker-apt-get-interactive"),
+    ("DL3015", "docker-apt-get-no-recommends"),
+    ("DL3016", "docker-npm-unpinned"),
+    ("DL3018", "docker-apk-unpinned"),
+    ("DL3019", "docker-apk-no-cache"),
+    ("DL3020", "docker-add-instead-of-copy"),
+    ("DL3021", "docker-copy-multiple-sources-no-slash"),
+    ("DL3025", "docker-shell-form-command"),
+    ("DL3027", "docker-apt-not-apt-get"),
+    ("DL3029", "docker-from-platform-pinned"),
+    ("DL3032", "docker-yum-no-clean"),
+    ("DL3033", "docker-yum-unpinned"),
+    ("DL3042", "docker-pip-cache"),
+    ("DL3045", "docker-copy-relative-no-workdir"),
+    ("DL3061", "docker-missing-from"),
+    ("DL3062", "docker-go-install-unpinned"),
+    ("DL3064", "docker-secret-in-env"),
+    ("DL3065", "docker-from-platform-redundant"),
+    ("DL3067", "docker-copy-whole-filesystem"),
+    ("DL4000", "docker-maintainer-deprecated"),
+    ("DL4001", "docker-wget-and-curl"),
+    ("DL4003", "docker-multiple-cmd"),
+    ("DL4004", "docker-multiple-entrypoint"),
+    ("DL4006", "docker-pipe-without-pipefail"),
+];
+
+/// actionlint checks poly runs itself: the kind, the phrase that identifies the
+/// check inside it, and the poly rule that replaces it.
+///
+/// `actionlint_parse` drops a finding whose kind is the first field and whose
+/// message contains the second. This is the `-shellcheck=` argument one level
+/// down. actionlint is not turned off and cannot be -- its expression type
+/// checker is the reason poly runs it and poly has nothing like it -- so what
+/// goes off is the five checks poly already makes.
+///
+/// A kind is not enough on its own: `syntax-check` is actionlint's whole
+/// schema pass, and two of its messages are poly's rules while the rest are
+/// checks poly does not make at all. Hence a phrase, matched inside a kind so a
+/// wording that recurs elsewhere cannot silence the wrong check.
+///
+/// Measured over 1,190 workflow files from thirty-six repositories. 69 findings
+/// arrived twice at the same line and the same column, these five families are
+/// all of them, and after the filter the corpus has none. Four of the five cost
+/// nothing whatsoever: every finding they drop is one poly reports at the same
+/// position, and poly's rule fires more often than actionlint's check in three
+/// of the four -- 27 step keys to 14, 7 event filters to 4, 5 permission scopes
+/// to 4.
+///
+/// `runner-label` is the one that changes an answer, and the reason this is a
+/// table rather than a note. It was 655 of actionlint's 926 findings -- 70.7%
+/// -- and 621 of them named labels poly deliberately says nothing about:
+/// `amd-medium`, `blacksmith-4vcpu-ubuntu-2404`, `1ES.Pool=...`, one
+/// repository's own runner pool 530 times. actionlint cannot know a self-hosted
+/// label is real, `actions-unknown-runner` says exactly that in its own doc,
+/// and every one of those arrived at error -- so a repository with its own
+/// runners failed `poly check` on sight. What is given up is a typo in a
+/// self-hosted label in a project that lists its labels in
+/// `.github/actionlint.yaml`, which actionlint reads and poly does not.
+///
+/// Held to the rules that exist by `actionlint_replacements_name_real_rules` in
+/// poly-engines, which is the crate that owns `workflow::RULES`.
+pub const ACTIONLINT_REPLACED: &[(&str, &str, &str)] = &[
+    (
+        "events",
+        " filter is not available for ",
+        "actions-unknown-event-filter",
+    ),
+    (
+        "permissions",
+        "unknown permission scope ",
+        "actions-invalid-permission",
+    ),
+    (
+        "runner-label",
+        " is unknown. available labels are ",
+        "actions-unknown-runner",
+    ),
+    (
+        "syntax-check",
+        "step must run script with ",
+        "actions-step-without-uses-or-run",
+    ),
+    ("syntax-check", " for step to ", "actions-unknown-step-key"),
+];
+
+/// Comment introducers an inline suppression may follow, by language id.
+///
+/// Keyed on the id `Config::language` produces, so `EXTENSIONS` stays the only
+/// place that says which file is which language -- a second file-type table is
+/// how `nearest_ancestor_file` came to have two implementations that
+/// disagreed. `inline_suppression_covers_every_language` holds the two lists
+/// together: every id `builtin_languages` yields is either here or in that
+/// test's list of the ones deliberately left out.
+///
+/// Three families is the whole set poly needs, and a language outside them gets
+/// no inline suppression at all rather than a guess: `[lint.per-file-ignores]`
+/// still works there, and the finding continuing to appear says so.
+const COMMENT_PREFIXES: &[(&str, &[&str])] = &[
+    ("c", &["//"]),
+    ("cpp", &["//"]),
+    ("dockerfile", &["#"]),
+    ("go", &["//"]),
+    ("graphql", &["#"]),
+    // Both spellings are HCL's own.
+    ("hcl", &["#", "//"]),
+    ("terraform", &["#", "//"]),
+    // The id covers .jsonc as well as .json, and .jsonc is where a comment is
+    // legal. Writing one in strict JSON breaks the file loudly on the next
+    // parse, which is not a failure mode poly has to protect anyone from.
+    ("json", &["//"]),
+    ("less", &["//"]),
+    ("lua", &["--"]),
+    // Both spellings are PHP's own, like HCL's.
+    ("php", &["//", "#"]),
+    ("protobuf", &["//"]),
+    ("python", &["#"]),
+    ("r", &["#"]),
+    ("rust", &["//"]),
+    ("scss", &["//"]),
+    ("shellscript", &["#"]),
+    ("sql", &["--"]),
+    ("swift", &["//"]),
+    ("toml", &["#"]),
+    ("typescript", &["//"]),
+    ("yaml", &["#"]),
+    ("zsh", &["#"]),
+];
+
+fn comment_prefixes(lang: &str) -> &'static [&'static str] {
+    COMMENT_PREFIXES
+        .iter()
+        .find(|(id, _)| *id == lang)
+        .map_or(&[], |(_, prefixes)| *prefixes)
+}
+
+/// One suppression comment, and the lines it silences.
+struct InlineEntry {
+    /// Inclusive, 0-based. One line for a trailing comment, two when the
+    /// comment is on a line of its own -- see `InlineIgnores::scan`.
+    first: u32,
+    last: u32,
+    codes: Vec<Suppression>,
+}
+
+/// A `poly: ignore` comment poly reports on instead of acting on: one it cannot
+/// read, or one it cannot promise will still mean this tomorrow.
+struct RejectedIgnore {
+    line: u32,
+    col: u32,
+    end_col: u32,
+    /// Already worded for the reader — by the same parser the config uses, when
+    /// the codes are what is wrong.
+    reason: String,
+}
+
+/// A `# hadolint ignore=` comment, kept in case this run has to say it is inert.
+///
+/// Collected always and reported only when hadolint is off, because whether it
+/// is off is a fact about the run rather than about the file — the same
+/// Dockerfile is correctly annotated for one project and stale for the next.
+struct HadolintIgnore {
+    line: u32,
+    col: u32,
+    end_col: u32,
+    codes: Vec<String>,
+}
+
+/// Languages whose formatter moves a trailing comment onto a line of its own.
+///
+/// Dockerfile alone, and this list is the reason it is named rather than
+/// guessed at: `poly fmt` rewrites
+///
+///   FROM ubuntu  # poly: ignore poly/docker-untagged-base
+///
+/// into the comment and the instruction on separate lines, which under the
+/// line-above rule makes the suppression govern the *next* instruction. The
+/// YAML, Python, Lua and TOML formatters all leave a trailing comment where it
+/// is, so nothing else belongs here -- adding a language without checking its
+/// formatter would turn correct advice into wrong advice.
+fn relocates_trailing_comments(lang: &str) -> bool {
+    lang == "dockerfile"
+}
+
+/// The `# poly: ignore <tool/rule>, …` comments in one file.
+///
+/// The line-level neighbour of `[lint.per-file-ignores]`, and the same
+/// vocabulary: the codes are what the terminal prints, so silencing a finding
+/// is copying `[ruff/F401]` out of the output into either a comment or the
+/// config. `per-file-ignores` has no line dimension -- two `RUN apt-get` lines
+/// where only one is excusable cannot be written there at all -- and a whole
+/// file dropped to excuse one line is how a suppression stops being reviewable.
+///
+/// Applies to every finding poly reports, not only the rules poly wrote:
+/// filtering happens after collection, so a downloaded tool's code and an
+/// embedded engine's are silenced by the same comment. Each tool's own syntax
+/// (`# noqa`, `# hadolint ignore=`, `# shellcheck disable=`) keeps working
+/// untouched; this is the one that covers all of them at once.
+///
+/// Deliberately not a parse. A comment introducer inside a string literal is
+/// accepted as a comment, and living with that false accept costs one wrong
+/// suppression in a file somebody wrote on purpose, while avoiding it costs a
+/// parser for every language poly reports on.
+pub struct InlineIgnores {
+    entries: Vec<InlineEntry>,
+    rejected: Vec<RejectedIgnore>,
+    hadolint: Vec<HadolintIgnore>,
+}
+
+impl InlineIgnores {
+    pub fn empty() -> InlineIgnores {
+        InlineIgnores {
+            entries: Vec::new(),
+            rejected: Vec::new(),
+            hadolint: Vec::new(),
+        }
+    }
+
+    /// Read `text` as `lang` and collect what it suppresses.
+    ///
+    /// A comment covers the line it sits on. When it is alone on its line it
+    /// covers the line below as well, which is the only other placement worth
+    /// having: a line long enough to need a suppression often has no room for a
+    /// trailing comment, and one continued over several lines cannot carry one
+    /// at all. A trailing comment stops at its own line, so the suppression
+    /// cannot leak onto the next statement -- the difference between the two
+    /// forms is whether anything precedes the comment on that line.
+    ///
+    /// The exception is a language whose formatter relocates trailing comments,
+    /// where the trailing form is reported and does nothing. See
+    /// `relocates_trailing_comments`.
+    pub fn scan(lang: Option<&str>, text: &str) -> InlineIgnores {
+        let prefixes = lang.map_or(&[][..], comment_prefixes);
+        if prefixes.is_empty() {
+            return InlineIgnores::empty();
+        }
+        let relocated = lang.is_some_and(relocates_trailing_comments);
+        let mut found = InlineIgnores::empty();
+        for (number, line) in text.lines().enumerate() {
+            let number = number as u32;
+            let column = |byte: usize| line[..byte].chars().count() as u32;
+            // hadolint's own syntax, recorded rather than obeyed. See
+            // `hadolint_migration_issues`.
+            if lang == Some("dockerfile") {
+                if let Some((at, codes_at)) = find_hadolint_ignore(line) {
+                    found.hadolint.push(HadolintIgnore {
+                        line: number,
+                        col: column(at),
+                        end_col: column(line.len()),
+                        codes: line[codes_at..]
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|code| !code.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                    });
+                }
+            }
+            let Some((at, codes_at)) = find_inline_marker(line, prefixes) else {
+                continue;
+            };
+            let mut codes = Vec::new();
+            let mut named_anything = false;
+            let mut cursor = codes_at;
+            for token in line[codes_at..].split(',') {
+                let start = cursor + (token.len() - token.trim_start().len());
+                cursor += token.len() + 1; // the comma the split removed
+                let token = token.trim();
+                if token.is_empty() {
+                    continue;
+                }
+                named_anything = true;
+                match Suppression::parse_code(token) {
+                    Ok(code) => codes.push(code),
+                    Err(reason) => found.rejected.push(RejectedIgnore {
+                        line: number,
+                        col: column(start),
+                        end_col: column(start + token.len()),
+                        reason,
+                    }),
+                }
+            }
+            if !named_anything {
+                found.rejected.push(RejectedIgnore {
+                    line: number,
+                    col: column(at),
+                    end_col: column(line.len()),
+                    reason: format!(
+                        "`{INLINE_MARKER}` with no rule code silences nothing — name the rules the \
+                         way poly prints them, `tool/rule` (e.g. \"ruff/F401\") or `tool/*`"
+                    ),
+                });
+            }
+            let standalone = line[..at].trim().is_empty();
+            // Reported rather than honoured, and the reasoning is the one poly
+            // applies to a code it cannot read: it silences nothing now, so it
+            // cannot later silence something else. Honouring it until the next
+            // `poly fmt` would mean the same comment governs one instruction
+            // today and its neighbour tomorrow, and the day it moves is the day
+            // the warning saying so disappears. A Dockerfile suppression goes
+            // above the line -- which is where `# hadolint ignore=` already
+            // goes, so it is the placement the language's readers expect.
+            if relocated && !standalone {
+                found.rejected.push(RejectedIgnore {
+                    line: number,
+                    col: column(at),
+                    end_col: column(line.len()),
+                    reason: format!(
+                        "a trailing `{INLINE_MARKER}` silences nothing in a Dockerfile — `poly \
+                         fmt` moves a trailing comment onto a line of its own, where it would \
+                         cover the next instruction instead. Write it on the line above."
+                    ),
+                });
+                continue;
+            }
+            if !codes.is_empty() {
+                found.entries.push(InlineEntry {
+                    first: number,
+                    last: number + u32::from(standalone),
+                    codes,
+                });
+            }
+        }
+        found
+    }
+
+    /// Is this finding silenced by a comment in the file it was found in?
+    ///
+    /// Takes what the terminal prints as `[source/code]`, like
+    /// `Config::lint_ignored`, and is called from the same two places for the
+    /// same reason: a suppression only one of the CLI and the daemon honours is
+    /// the editor/CI split A4 exists to prevent.
+    pub fn suppresses(&self, line: u32, source: &str, code: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            (entry.first..=entry.last).contains(&line)
+                && entry.codes.iter().any(|c| c.matches(source, code))
+        })
+    }
+
+    /// Findings for the comments poly declined to act on.
+    ///
+    /// Reported rather than fatal, which is the one place this parts company
+    /// with the config: a malformed entry in poly.toml stops the run because
+    /// nothing else would reveal it, and a malformed comment cannot abort a
+    /// whole repo's check over one line in one file. It silences nothing
+    /// either way, so the finding it was aimed at is still printed next to this
+    /// one.
+    pub fn syntax_issues(&self, hadolint_off: bool) -> Vec<crate::diag::Issue> {
+        let reported = |line: u32, col: u32, end_col: u32, message: String| crate::diag::Issue {
+            line,
+            col,
+            end_line: line,
+            end_col,
+            severity: INLINE_RULES[0].1,
+            code: INLINE_RULES[0].0.to_string(),
+            message,
+            // poly's own rule about a comment poly will not act on. See
+            // `INLINE_RULES`.
+            source: "poly",
+            fix: None,
+            url: None,
+        };
+        let mut found: Vec<crate::diag::Issue> = self
+            .rejected
+            .iter()
+            .map(|bad| reported(bad.line, bad.col, bad.end_col, bad.reason.clone()))
+            .collect();
+        if hadolint_off {
+            found.extend(self.hadolint.iter().map(|stale| {
+                reported(
+                    stale.line,
+                    stale.col,
+                    stale.end_col,
+                    hadolint_migration_message(&stale.codes),
+                )
+            }));
+        }
+        found.sort_by_key(|issue| (issue.line, issue.col));
+        found
+    }
+}
+
+/// What to tell the author of a `# hadolint ignore=` that no longer does
+/// anything.
+///
+/// The comment was written to silence a real finding, and with hadolint off it
+/// silences nothing — which is the same failure `poly/ignore-syntax` already
+/// exists to report, so it is reported as the same rule. What poly does *not*
+/// do is honour it: the codes below name poly's replacement so the comment can
+/// be rewritten and deleted, rather than being kept working forever behind a
+/// second syntax.
+fn hadolint_migration_message(codes: &[String]) -> String {
+    let replacements: Vec<String> = codes
+        .iter()
+        .filter_map(|code| {
+            // hadolint runs shellcheck over every `RUN`, so half of what a
+            // `# hadolint ignore=` silences in the wild is an SC code. poly
+            // reports those itself now, from its own shellcheck seam and under
+            // shellcheck's own name -- so the suppression has a home, and
+            // telling the author to delete it would throw away a finding they
+            // had already looked at.
+            if let Some(number) = code.strip_prefix("SC") {
+                if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
+                    return Some(format!("shellcheck/{code}"));
+                }
+            }
+            HADOLINT_REPLACEMENTS
+                .iter()
+                .find(|(hadolint, _)| hadolint == code)
+                .map(|(_, poly)| format!("poly/{poly}"))
+        })
+        .collect();
+    let named = codes.join(", ");
+    let turn_on = "or set `hadolint = \"on\"` under `[tools]` to keep running it";
+    if replacements.is_empty() {
+        return format!(
+            "`hadolint ignore={named}` silences nothing — poly does not run hadolint by \
+             default, and has no rule of its own for it. Delete the comment, {turn_on}."
+        );
+    }
+    let write = replacements.join(", ");
+    let rest = if replacements.len() == codes.len() {
+        String::new()
+    } else {
+        format!(
+            " (poly has no rule of its own for the other {})",
+            codes.len() - replacements.len()
+        )
+    };
+    format!(
+        "`hadolint ignore={named}` silences nothing — poly does not run hadolint by default. \
+         Write `# {INLINE_MARKER} {write}` instead{rest}, {turn_on}."
+    )
+}
+
+/// The `# hadolint ignore=` on this line: where the comment starts, and where
+/// the codes begin after it.
+///
+/// hadolint's own placement rule is that the comment sits on its own line above
+/// the instruction, so a trailing one is not looked for — and `poly fmt` would
+/// move it anyway, which is the reasoning `relocates_trailing_comments` already
+/// records.
+fn find_hadolint_ignore(line: &str) -> Option<(usize, usize)> {
+    let at = line.find('#')?;
+    if !line[..at].trim().is_empty() {
+        return None;
+    }
+    let rest = line[at + 1..].trim_start_matches('#').trim_start();
+    let codes = rest.strip_prefix("hadolint")?.trim_start();
+    let codes = codes.strip_prefix("ignore")?.trim_start();
+    let codes = codes.strip_prefix('=')?;
+    Some((at, line.len() - codes.len()))
+}
+
+/// The first `<comment> poly: ignore` on this line: where the comment starts,
+/// and where the rule codes begin after it.
+fn find_inline_marker(line: &str, prefixes: &[&str]) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    for prefix in prefixes {
+        for (at, _) in line.match_indices(prefix) {
+            let after = &line[at + prefix.len()..];
+            // `##`, `///`, `-----`: the introducer repeated is still one comment.
+            let after = match prefix.chars().next() {
+                Some(c) => after.trim_start_matches(c),
+                None => after,
+            };
+            let Some(rest) = after.trim_start().strip_prefix(INLINE_MARKER) else {
+                continue;
+            };
+            // `poly: ignored the docs` is prose that starts the same way.
+            if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+                continue;
+            }
+            if best.is_none_or(|(previous, _)| at < previous) {
+                best = Some((at, line.len() - rest.len()));
+            }
+            break;
+        }
+    }
+    best
+}
+
+/// Reads each file's inline suppressions once, for callers holding findings
+/// rather than buffers.
+///
+/// The sibling of `ConfigCache`, and memoized for the same reason: a batch run
+/// filters thousands of findings and several of them land in one file, so the
+/// alternative is re-reading that file once per finding.
+#[derive(Default)]
+pub struct InlineCache {
+    by_file: HashMap<PathBuf, Arc<InlineIgnores>>,
+}
+
+impl InlineCache {
+    pub fn new() -> InlineCache {
+        InlineCache::default()
+    }
+
+    /// What `path` suppresses inline. `config` answers what language it is, so
+    /// a `[languages.map]` entry decides the comment syntax too.
+    ///
+    /// A file that cannot be read yields nothing: whatever produced a finding
+    /// for it has already read it, and failing here would turn a deleted file
+    /// into an error about suppressions.
+    pub fn for_file(&mut self, path: &Path, config: &Config) -> Arc<InlineIgnores> {
+        if let Some(hit) = self.by_file.get(path) {
+            return Arc::clone(hit);
+        }
+        let lang = config.language(path);
+        let scanned = Arc::new(
+            match lang.filter(|lang| !comment_prefixes(lang).is_empty()) {
+                // Read only for a language that could carry one: a walk covers
+                // every file in the repo, images included.
+                Some(lang) => std::fs::read_to_string(path)
+                    .map(|text| InlineIgnores::scan(Some(&lang), &text))
+                    .unwrap_or_else(|_| InlineIgnores::empty()),
+                None => InlineIgnores::empty(),
+            },
+        );
+        self.by_file
+            .insert(path.to_path_buf(), Arc::clone(&scanned));
+        scanned
     }
 }
 
@@ -429,6 +1122,10 @@ pub struct Config {
     /// `[lint.per-file-ignores]`, in file order. A GlobSet would say only
     /// *that* something matched, and each pattern carries its own rule list.
     lint_ignores: Vec<(GlobMatcher, Vec<Suppression>)>,
+    /// `[lint] ignore`: the same rule names, with no path attached.
+    lint_ignore: Vec<Suppression>,
+    /// `[lint.severity]`, sorted most precise first so the first match wins.
+    lint_severity: Vec<(Suppression, crate::diag::Severity)>,
     format_options: BTreeMap<String, FormatOptions>,
     pub tools: BTreeMap<String, String>,
     /// `[walk] include-hidden`. A project decision rather than a per-run one:
@@ -496,6 +1193,13 @@ impl Config {
             format_exclude_set: compile_excludes(&raw.format.exclude)?,
             lint_exclude_set: compile_excludes(&raw.lint.exclude)?,
             lint_ignores: compile_per_file_ignores(&raw.lint.per_file_ignores)?,
+            lint_ignore: raw
+                .lint
+                .ignore
+                .iter()
+                .map(|entry| Suppression::parse(entry, "[lint] ignore"))
+                .collect::<Result<Vec<_>>>()?,
+            lint_severity: compile_severities(&raw.lint.severity)?,
             format_exclude: raw.format.exclude,
             lint_exclude: raw.lint.exclude,
             format_options: raw.format.languages,
@@ -518,6 +1222,8 @@ impl Config {
             format_exclude_set: GlobSet::empty(),
             lint_exclude_set: GlobSet::empty(),
             lint_ignores: Vec::new(),
+            lint_ignore: Vec::new(),
+            lint_severity: Vec::new(),
             format_options: BTreeMap::new(),
             tools: BTreeMap::new(),
             include_hidden: false,
@@ -540,19 +1246,24 @@ impl Config {
         set.is_match(self.relative(path))
     }
 
-    /// Is this finding silenced for this file by `[lint.per-file-ignores]`?
+    /// Is this finding silenced by `[lint] ignore` or `[lint.per-file-ignores]`?
     ///
-    /// The narrower neighbour of `[lint] exclude`: a test fixture with a
-    /// deliberate typo or a vendored script with one unquoted expansion is
-    /// still worth linting for everything *else*, and dropping the whole file
-    /// to silence one rule is how a suppression stops being reviewable.
+    /// Two lists because the questions differ: `ignore` is "this repository has
+    /// decided about this rule", and the per-file table is the narrower
+    /// neighbour of `[lint] exclude` -- a test fixture with a deliberate typo or
+    /// a vendored script with one unquoted expansion is still worth linting for
+    /// everything *else*, and dropping the whole file to silence one rule is how
+    /// a suppression stops being reviewable.
     ///
     /// Called with the same `source` and `code` the terminal prints as
     /// `[source/code]`, so what you read in the output is what you paste into
-    /// the config. Anchored at the config's own directory like `exclude`, and
-    /// consulted by the CLI and the daemon alike — a rule silenced only in the
-    /// editor is the editor/CI split A4 exists to prevent.
+    /// the config. Globs are anchored at the config's own directory like
+    /// `exclude`, and both lists are consulted by the CLI and the daemon alike —
+    /// a rule silenced only in the editor is the editor/CI split A4 prevents.
     pub fn lint_ignored(&self, path: &Path, source: &str, code: &str) -> bool {
+        if self.lint_ignore.iter().any(|e| e.matches(source, code)) {
+            return true;
+        }
         if self.lint_ignores.is_empty() {
             return false;
         }
@@ -560,6 +1271,23 @@ impl Config {
         self.lint_ignores.iter().any(|(matcher, entries)| {
             matcher.is_match(relative) && entries.iter().any(|e| e.matches(source, code))
         })
+    }
+
+    /// The level this project reports this rule at, when it has said.
+    ///
+    /// `[lint.severity]` is where a repository disagrees with poly, and the
+    /// disagreement is legitimate: what "somebody should look at this" is worth
+    /// depends on the codebase, and the alternative to saying so here is
+    /// `exclude`, which is the same sentence written as "stop checking".
+    ///
+    /// Read by the CLI and the daemon at the point the findings are collected,
+    /// so the squiggle's colour, the terminal's word and `--fail-on`'s verdict
+    /// are one decision made once.
+    pub fn lint_severity(&self, source: &str, code: &str) -> Option<crate::diag::Severity> {
+        self.lint_severity
+            .iter()
+            .find(|(rule, _)| rule.matches(source, code))
+            .map(|(_, severity)| *severity)
     }
 
     /// Path as the patterns in this config were written: relative to the
@@ -580,6 +1308,23 @@ impl Config {
     /// that merges the two.
     pub fn format_options(&self, lang: &str) -> FormatOptions {
         self.format_options.get(lang).copied().unwrap_or_default()
+    }
+
+    /// The languages `[format.<lang>]` tables were written for.
+    ///
+    /// Exposed so the caller that owns the language table can say whether each
+    /// one is a language at all. poly-core cannot ask that question itself: an
+    /// id it does not detect may still be one an engine formats, and the two
+    /// lists live in different crates.
+    pub fn format_languages(&self) -> impl Iterator<Item = &str> {
+        self.format_options.keys().map(String::as_str)
+    }
+
+    /// `[languages.map]` as written: glob, then the language id it maps to.
+    pub fn language_map(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.map
+            .iter()
+            .map(|(matcher, lang)| (matcher.glob().glob(), lang.as_str()))
     }
 
     /// `[languages.map]` first (project truth), then built-in detection.
@@ -617,12 +1362,35 @@ fn compile_per_file_ignores(
     for (pattern, entries) in raw {
         let glob = Glob::new(pattern)
             .with_context(|| format!("invalid [lint.per-file-ignores] pattern {pattern:?}"))?;
+        let section = format!("[lint.per-file-ignores] {pattern:?}");
         let entries = entries
             .iter()
-            .map(|entry| Suppression::parse(entry, pattern))
+            .map(|entry| Suppression::parse(entry, &section))
             .collect::<Result<Vec<_>>>()?;
         compiled.push((glob.compile_matcher(), entries));
     }
+    Ok(compiled)
+}
+
+/// `[lint.severity]`, with the level each entry asks for.
+///
+/// Sorted by how precisely each entry names a finding, so `lint_severity` can
+/// take the first match: a `[lint.severity]` naming both a category and one
+/// rule inside it means "this kind is info, except that one".
+fn compile_severities(
+    raw: &BTreeMap<String, String>,
+) -> Result<Vec<(Suppression, crate::diag::Severity)>> {
+    let mut compiled = Vec::new();
+    for (entry, level) in raw {
+        let rule = Suppression::parse(entry, "[lint.severity]")?;
+        let severity = crate::diag::Severity::parse(level).ok_or_else(|| {
+            anyhow::anyhow!(
+                "[lint.severity] {entry:?} = {level:?}: expected error, warning, info or hint"
+            )
+        })?;
+        compiled.push((rule, severity));
+    }
+    compiled.sort_by_key(|(rule, _)| rule.precision());
     Ok(compiled)
 }
 
@@ -684,6 +1452,63 @@ fn merge(base: &mut toml::Value, incoming: toml::Value) {
 }
 
 // ── file walking ───────────────────────────────────────────────────────────
+
+/// Nearest of `names` at or above `start`'s directory.
+///
+/// How poly finds another tool's config file — buf.yaml, selene.toml,
+/// deno.json. Both tools resolve their own against a working directory, which
+/// for the daemon is wherever the editor happened to launch poly from;
+/// anchoring on the file instead is what keeps the editor and CI reading the
+/// same config (A4).
+///
+/// Several names because one tool's config has several spellings: deno reads
+/// `deno.json` or `deno.jsonc`, and they are alternatives *within* a directory
+/// rather than in priority over the whole walk. Searching for one and then the
+/// other would let a `deno.json` at the repository root beat the `deno.jsonc`
+/// sitting next to the file.
+pub fn nearest_ancestor_file(start: &Path, names: &[&str]) -> Option<PathBuf> {
+    let start = std::path::absolute(start).unwrap_or_else(|_| start.to_path_buf());
+    let mut dir = if start.is_dir() {
+        start.as_path()
+    } else {
+        start.parent()?
+    };
+    loop {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Is `path` a GitHub Actions workflow?
+///
+/// Exactly `.github/workflows/<name>.yml`, and nothing nested below that: GitHub
+/// reads that one directory and does not descend, so a file in
+/// `.github/workflows/templates/` is a fragment somebody keeps there, not a
+/// workflow. Extension and both directory names, in that order.
+///
+/// Here rather than beside any one caller because there are three, and until
+/// this existed two of them disagreed: `poly check` compared the path components
+/// while the daemon matched the substring `.github/workflows/`, so a file one
+/// directory deeper was linted in the editor and not in CI. That is the split
+/// A4 exists to prevent, and it is the same reason `nearest_ancestor_file` lives
+/// here.
+pub fn is_workflow_file(path: &Path) -> bool {
+    let extension = path.extension().and_then(|e| e.to_str());
+    if !matches!(extension, Some("yml" | "yaml")) {
+        return false;
+    }
+    let mut ancestors = path.components().rev();
+    ancestors.next();
+    ancestors
+        .next()
+        .is_some_and(|c| c.as_os_str() == "workflows")
+        && ancestors.next().is_some_and(|c| c.as_os_str() == ".github")
+}
 
 /// Whether the walk honors the ignore files git honors: `.gitignore`,
 /// `.ignore`, `.git/info/exclude` and the global excludes file (`core.
@@ -810,9 +1635,50 @@ mod tests {
             ("base.dockerfile", Some("dockerfile")),
             ("noext", None),
             ("a.unknown", None),
+            // The four shell extensions shellcheck reads share an id, and zsh
+            // -- which it does not read -- has its own. The split is the whole
+            // reason `.zsh` stopped being handed to a bash parser; see the
+            // comment on the table and 09 §4.5.
+            ("a.sh", Some("shellscript")),
+            ("a.bash", Some("shellscript")),
+            ("a.bats", Some("shellscript")),
+            ("a.zsh", Some("zsh")),
+            ("a.php", Some("php")),
+            ("a.phtml", Some("php")),
         ];
         for (path, expected) in cases {
             assert_eq!(builtin_language(Path::new(path)), expected, "{path}");
+        }
+    }
+
+    /// One answer for "is this a workflow", because there used to be two.
+    ///
+    /// `poly check` compared the path components and the daemon matched the
+    /// substring `.github/workflows/`, so a file one directory deeper was linted
+    /// in the editor and not in CI -- the editor/CI split A4 exists to prevent.
+    /// The components version is the one that survived: GitHub reads that
+    /// directory and does not descend, so a file under `workflows/templates/` is
+    /// a fragment somebody keeps there rather than something that ever runs.
+    #[test]
+    fn a_workflow_is_the_directory_github_actually_reads() {
+        for yes in [
+            ".github/workflows/ci.yml",
+            ".github/workflows/release.yaml",
+            "/abs/path/.github/workflows/ci.yml",
+        ] {
+            assert!(is_workflow_file(Path::new(yes)), "{yes}");
+        }
+        for no in [
+            // The case the two implementations disagreed on.
+            ".github/workflows/templates/base.yml",
+            ".github/actions/setup/action.yml",
+            ".github/dependabot.yml",
+            "workflows/ci.yml",
+            "k8s/deployment.yaml",
+            ".github/workflows/notes.md",
+            ".github/workflows",
+        ] {
+            assert!(!is_workflow_file(Path::new(no)), "{no}");
         }
     }
 
@@ -1023,6 +1889,488 @@ mod tests {
         // finding it was meant to silence keeps being printed.
         write("[lint.per-file-ignores]\n\"tests/**\" = [\"ruff/NOSUCHRULE\"]\n");
         assert!(Config::discover(root).is_ok());
+
+        // A category, on the other hand, is a closed set poly ships: a name
+        // that is not in it can never match, so it stops the run instead of
+        // sitting there looking like a working line.
+        write("[lint]\nignore = [\"unusd-code\"]\n");
+        let err = error(root);
+        assert!(err.contains("unusd-code"), "{err}");
+        assert!(err.contains("category"), "{err}");
+    }
+
+    /// `[lint] ignore` is the repo-wide half of the same syntax, and a category
+    /// silences the kind rather than the rule.
+    ///
+    /// The point of naming a category is that it keeps meaning what it meant
+    /// when a language is added: a repo that has decided it does not care about
+    /// unused exports should not have to come back and add `vulture/*` the day
+    /// somebody writes the first Python.
+    #[test]
+    fn lint_ignore_silences_a_rule_or_a_whole_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("poly.toml"),
+            "[lint]\nignore = [\"typos/typo\", \"unused-code\"]\n",
+        )
+        .unwrap();
+        let config = Config::discover(root).unwrap();
+
+        // No path attached: the same answer wherever the file is.
+        assert!(config.lint_ignored(&root.join("a.py"), "typos", "typo"));
+        assert!(config.lint_ignored(&root.join("deep/nested/a.py"), "typos", "typo"));
+        // The category covers every tool that reports that kind of defect,
+        // including ones this repo has no files for yet.
+        assert!(config.lint_ignored(&root.join("a.go"), "deadcode", "unreachable"));
+        assert!(config.lint_ignored(&root.join("a.ts"), "knip", "unused-export"));
+        // And nothing else.
+        assert!(!config.lint_ignored(&root.join("a.py"), "ruff", "F401"));
+        assert!(!config.lint_ignored(&root.join("Dockerfile"), "poly", "docker-root-user"));
+    }
+
+    /// `[lint.severity]` is where a project disagrees with poly's level, and
+    /// the most precise entry wins.
+    ///
+    /// A category is a default for a kind of defect and a `tool/rule` is a
+    /// decision about one rule, so "this kind is info, except that one" has to
+    /// be sayable — otherwise the only way to make an exception is to stop
+    /// using the category at all.
+    #[test]
+    fn lint_severity_takes_the_most_precise_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("poly.toml"),
+            "[lint.severity]\n\
+             unpinned-dependency = \"info\"\n\
+             \"poly/docker-latest-base\" = \"error\"\n\
+             \"typos/*\" = \"hint\"\n",
+        )
+        .unwrap();
+        let config = Config::discover(root).unwrap();
+
+        assert_eq!(
+            config.lint_severity("poly", "docker-apk-unpinned"),
+            Some(diag::Severity::Info)
+        );
+        assert_eq!(
+            config.lint_severity("poly", "docker-latest-base"),
+            Some(diag::Severity::Error)
+        );
+        assert_eq!(
+            config.lint_severity("typos", "typo"),
+            Some(diag::Severity::Hint)
+        );
+        // Silence about a rule nobody named: the level poly decided stands.
+        assert_eq!(config.lint_severity("ruff", "F401"), None);
+    }
+
+    /// A level poly does not report at cannot be asked for.
+    #[test]
+    fn an_unknown_severity_fails_the_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("poly.toml"),
+            "[lint.severity]\nunused-code = \"critical\"\n",
+        )
+        .unwrap();
+        let err = match Config::discover(root) {
+            Ok(_) => panic!("expected the parse to fail"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("critical"), "{err}");
+        assert!(err.contains("error, warning, info or hint"), "{err}");
+        // `never` belongs to --fail-on: a rule reported at "never" is a rule
+        // that would be `ignore`, said in a way that reads like a severity.
+        std::fs::write(
+            root.join("poly.toml"),
+            "[lint.severity]\nunused-code = \"never\"\n",
+        )
+        .unwrap();
+        assert!(Config::discover(root).is_err());
+    }
+
+    /// The syntax is the config's, and the only difference is where it is
+    /// written: a comment sits next to the code it excuses, so the reason and
+    /// the suppression are reviewed together.
+    #[test]
+    fn an_inline_comment_silences_the_line_it_is_on() {
+        let scan = |text: &str| InlineIgnores::scan(Some("python"), text);
+
+        // Trailing: its own line only. The next line is a different statement
+        // and a suppression that reaches it is one nobody wrote.
+        let found = scan("import os  # poly: ignore ruff/F401\nimport sys\n");
+        assert!(found.suppresses(0, "ruff", "F401"));
+        assert!(!found.suppresses(1, "ruff", "F401"));
+        // Only the rule named, and only from the tool named.
+        assert!(!found.suppresses(0, "ruff", "E501"));
+        assert!(!found.suppresses(0, "typos", "F401"));
+
+        // On a line of its own: the line below, which is the line it annotates,
+        // plus its own -- a long line has no room for a trailing comment and a
+        // continued one has nowhere to put it at all.
+        let found = scan("# poly: ignore ruff/F401\nimport os\nimport sys\n");
+        assert!(found.suppresses(1, "ruff", "F401"));
+        assert!(!found.suppresses(2, "ruff", "F401"));
+
+        // Two lines away is not reviewable, so it does not reach.
+        let found = scan("# poly: ignore ruff/F401\n\nimport os\n");
+        assert!(!found.suppresses(2, "ruff", "F401"));
+
+        // Several codes in one comment, and `tool/*` for a whole tool.
+        let found = scan("x = 1  # poly: ignore ruff/F401, typos/typo\n# poly: ignore ruff/*\ny\n");
+        assert!(found.suppresses(0, "ruff", "F401"));
+        assert!(found.suppresses(0, "typos", "typo"));
+        assert!(found.suppresses(2, "ruff", "ANYTHING"));
+        assert!(!found.suppresses(2, "typos", "typo"));
+
+        // Nothing to say about a file with no such comment.
+        assert!(!scan("import os\n").suppresses(0, "ruff", "F401"));
+    }
+
+    /// Every finding poly reports, not only the rules poly wrote. Filtering
+    /// happens after collection, so the comment cannot tell a downloaded tool's
+    /// code from an embedded engine's -- which is the point: poly is one
+    /// surface over many tools, and a suppression covering only poly's own
+    /// rules would be the opposite.
+    #[test]
+    fn an_inline_comment_covers_any_tools_code() {
+        let found = InlineIgnores::scan(
+            Some("dockerfile"),
+            "# poly: ignore hadolint/DL3008, poly/docker-apt-get-unpinned\nRUN apt-get install x\n",
+        );
+        assert!(found.suppresses(1, "hadolint", "DL3008"));
+        assert!(found.suppresses(1, "poly", "docker-apt-get-unpinned"));
+    }
+
+    /// Comment syntax is per language, and a language poly has no introducer
+    /// for gets nothing at all rather than a guess -- `[lint.per-file-ignores]`
+    /// still covers it, and the finding continuing to appear says so.
+    #[test]
+    fn inline_comments_follow_the_languages_own_syntax() {
+        let cases = [
+            ("python", "x = 1  # poly: ignore ruff/F401", true),
+            ("shellscript", "x=1 ## poly: ignore shellcheck/SC2086", true),
+            ("yaml", "a: 1 # poly: ignore actionlint/syntax-check", true),
+            (
+                "rust",
+                "let x = 1; // poly: ignore clippy/needless_return",
+                true,
+            ),
+            (
+                "typescript",
+                "const x = 1; /// poly: ignore eslint/no-var",
+                true,
+            ),
+            ("sql", "select a -- poly: ignore sqruff/LT01", true),
+            // PHP writes a line comment two ways and both are its own, so both
+            // have to work -- the README says so. The first row lands in the
+            // same false accept the terraform one documents below, and takes
+            // the same suppression.
+            // poly: ignore poly/ignore-syntax
+            ("php", "$x = 1; // poly: ignore mago/no-eval", true),
+            ("php", "$x = 1; # poly: ignore mago/no-eval", true),
+            (
+                "lua",
+                "local x -- poly: ignore selene/unused_variable",
+                true,
+            ),
+            // The false accept this design takes on purpose, landing on the
+            // file that documents it: `//` inside a Rust string is not a
+            // comment, and poly does not parse Rust to find that out. What the
+            // scan then reads as a second code is the row's own `, true)`.
+            // poly: ignore poly/ignore-syntax
+            ("terraform", "x = 1 // poly: ignore tflint/rule", true),
+            // The introducer is the language's, so python's `#` is not rust's.
+            (
+                "rust",
+                "let x = 1; # poly: ignore clippy/needless_return",
+                false,
+            ),
+            // poly: ignore poly/ignore-syntax
+            ("python", "x = 1  // poly: ignore ruff/F401", false),
+            // Markdown, HTML and friends have no line comment poly reads.
+            ("markdown", "text <!-- poly: ignore typos/typo -->", false),
+            ("css", "a {} /* poly: ignore typos/typo */", false),
+        ];
+        for (lang, line, expected) in cases {
+            let found = InlineIgnores::scan(Some(lang), line);
+            let (source, code) = {
+                let tail = line.split("poly: ignore ").nth(1).unwrap();
+                let code = tail.split_whitespace().next().unwrap();
+                code.split_once('/').unwrap()
+            };
+            assert_eq!(
+                found.suppresses(0, source, code),
+                expected,
+                "{lang}: {line:?}"
+            );
+        }
+
+        // A file poly cannot name a language for is the same case as a language
+        // with no comment syntax.
+        assert!(!InlineIgnores::scan(None, "# poly: ignore typos/typo\nx\n")
+            .suppresses(1, "typos", "typo"));
+    }
+
+    /// The comment-prefix table is keyed by the ids `EXTENSIONS` produces, and
+    /// this is what keeps it from becoming a second file-type table that drifts
+    /// -- the way `nearest_ancestor_file` once had two implementations. A new
+    /// language has to be named in one list or the other.
+    #[test]
+    fn inline_suppression_covers_every_language() {
+        // Left out for a reason, not by omission: the first four are markup
+        // whose comments are block-delimited (`<!-- -->`, `/* */`, `{# #}`),
+        // which is not one of the three families this reads, and .ipynb is JSON
+        // around the source -- ruff reports notebook positions that do not
+        // index the file's own lines, so a comment placed by line number would
+        // land somewhere else entirely.
+        const NO_INLINE: &[&str] = &[
+            "astro",
+            "css",
+            "handlebars",
+            "html",
+            "jinja",
+            "jupyter",
+            "markdown",
+            "svelte",
+            "vue",
+            "xml",
+        ];
+        for lang in builtin_languages() {
+            let has = !comment_prefixes(lang).is_empty();
+            assert_eq!(
+                has,
+                !NO_INLINE.contains(&lang),
+                "{lang}: a new language needs a comment prefix here or a place in NO_INLINE"
+            );
+        }
+        // And nothing in the table for a language that no longer exists.
+        for (lang, _) in COMMENT_PREFIXES {
+            assert!(builtin_languages().contains(lang), "{lang}");
+        }
+    }
+
+    /// A code poly cannot read is reported instead of aborting the run: it is
+    /// one comment in one file, the finding it aimed at is still printed, and a
+    /// repo-wide check that stops for it would be a worse trade than the config
+    /// makes -- there, nothing else would reveal the mistake.
+    #[test]
+    fn a_malformed_inline_code_is_reported_not_fatal() {
+        let found = InlineIgnores::scan(Some("python"), "import os  # poly: ignore F401\n");
+        let issues = found.syntax_issues(false);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].source, "poly");
+        assert_eq!(issues[0].code, "ignore-syntax");
+        assert!(issues[0].message.contains("F401"), "{:?}", issues[0]);
+        // The same sentence the config gives for the same mistake.
+        assert!(issues[0].message.contains("tool/rule"), "{:?}", issues[0]);
+        // Pointed at the code itself, not at the line.
+        assert_eq!(issues[0].line, 0);
+        assert_eq!((issues[0].col, issues[0].end_col), (26, 30));
+        assert!(!found.suppresses(0, "ruff", "F401"));
+
+        // The good codes in a comment still work; only the bad one is reported.
+        let found = InlineIgnores::scan(Some("python"), "x  # poly: ignore ruff/F401, E501\n");
+        assert!(found.suppresses(0, "ruff", "F401"));
+        assert_eq!(found.syntax_issues(false).len(), 1);
+
+        // No code at all silences nothing and reads like it does.
+        let found = InlineIgnores::scan(Some("python"), "# poly: ignore\nimport os\n");
+        assert_eq!(found.syntax_issues(false).len(), 1);
+        assert!(found.syntax_issues(false)[0]
+            .message
+            .contains("no rule code"));
+
+        // An unknown tool or rule is left alone: poly cannot know every code
+        // its tools will grow, and the finding it was aimed at keeps appearing.
+        let found = InlineIgnores::scan(Some("python"), "x  # poly: ignore ruff/NOSUCHRULE\n");
+        assert!(found.syntax_issues(false).is_empty());
+    }
+
+    /// In a Dockerfile the trailing form is reported and does nothing, because
+    /// poly's own Dockerfile formatter moves a trailing comment onto a line of
+    /// its own -- where the line-above rule would make it cover the *next*
+    /// instruction. `a_trailing_dockerfile_suppression_would_move` in
+    /// `tests/check.rs` pins that formatter behaviour, so this rule cannot
+    /// quietly become wrong advice.
+    ///
+    /// Silencing nothing is the point rather than a shortfall: a suppression
+    /// that works today and governs its neighbour after the next `poly fmt` is
+    /// the editor/CI-shaped failure where the two answers are the same tool at
+    /// two moments, and nothing in the second run says what changed.
+    #[test]
+    fn a_dockerfile_suppression_belongs_above_the_line() {
+        let trailing = InlineIgnores::scan(
+            Some("dockerfile"),
+            "FROM ubuntu  # poly: ignore poly/docker-untagged-base\nRUN make\n",
+        );
+        assert!(!trailing.suppresses(0, "poly", "docker-untagged-base"));
+        let issues = trailing.syntax_issues(false);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "ignore-syntax");
+        assert!(issues[0].message.contains("poly fmt"), "{:?}", issues[0]);
+        assert!(issues[0].message.contains("line above"), "{:?}", issues[0]);
+
+        // The placement poly asks for, which is also where `# hadolint ignore=`
+        // goes: honoured, and nothing to report.
+        let above = InlineIgnores::scan(
+            Some("dockerfile"),
+            "# poly: ignore poly/docker-untagged-base\nFROM ubuntu\n",
+        );
+        assert!(above.suppresses(1, "poly", "docker-untagged-base"));
+        assert!(above.syntax_issues(false).is_empty());
+
+        // Every other formatter poly ships leaves a trailing comment where it
+        // is, so the rule stops at Dockerfile.
+        for lang in ["python", "yaml", "toml", "lua"] {
+            assert!(!relocates_trailing_comments(lang), "{lang}");
+        }
+        let python = InlineIgnores::scan(Some("python"), "import os  # poly: ignore ruff/F401\n");
+        assert!(python.suppresses(0, "ruff", "F401"));
+        assert!(python.syntax_issues(false).is_empty());
+    }
+
+    /// With hadolint off, a `# hadolint ignore=` silences nothing -- and poly
+    /// says what to write instead rather than quietly dropping a suppression
+    /// its author meant.
+    ///
+    /// The gate is the whole point. Someone who set `hadolint = "on"` has a
+    /// comment that works, and telling them to rewrite it would be poly nagging
+    /// about a tool it is running. The two halves of this test are the same
+    /// file read under the two settings.
+    #[test]
+    fn a_hadolint_suppression_is_named_only_when_hadolint_is_off() {
+        let found = InlineIgnores::scan(
+            Some("dockerfile"),
+            "# hadolint ignore=DL3008\nRUN apt-get install -y curl\n",
+        );
+        // Never honoured, either way: poly does not read hadolint's syntax.
+        // Reporting it is not a step towards doing so.
+        assert!(!found.suppresses(1, "poly", "docker-apt-get-unpinned"));
+        assert!(!found.suppresses(1, "hadolint", "DL3008"));
+
+        assert!(found.syntax_issues(false).is_empty(), "hadolint is running");
+
+        let issues = found.syntax_issues(true);
+        assert_eq!(issues.len(), 1);
+        // The same rule as every other comment poly will not act on.
+        assert_eq!(issues[0].code, "ignore-syntax");
+        assert_eq!(issues[0].source, "poly");
+        assert_eq!(issues[0].line, 0);
+        // Names the replacement, so the fix is a paste rather than a lookup.
+        assert!(
+            issues[0]
+                .message
+                .contains("poly: ignore poly/docker-apt-get-unpinned"),
+            "{:?}",
+            issues[0]
+        );
+        // And the way back, for whoever wanted hadolint after all.
+        assert!(issues[0].message.contains("\"on\""), "{:?}", issues[0]);
+
+        // Several codes in one comment become one replacement line.
+        let many = InlineIgnores::scan(
+            Some("dockerfile"),
+            "# hadolint ignore=DL3006,DL3008\nFROM ubuntu\n",
+        )
+        .syntax_issues(true);
+        assert_eq!(many.len(), 1);
+        assert!(
+            many[0]
+                .message
+                .contains("poly/docker-untagged-base, poly/docker-apt-get-unpinned"),
+            "{:?}",
+            many[0]
+        );
+
+        // An SC code is hadolint's shellcheck half, and poly runs shellcheck
+        // over Dockerfile `RUN` bodies itself -- so the suppression has a real
+        // home, and "delete it" would throw away a finding somebody had already
+        // looked at. Half the `# hadolint ignore=` comments on the corpus are
+        // this shape.
+        let shell = InlineIgnores::scan(
+            Some("dockerfile"),
+            "# hadolint ignore=SC2086\nRUN echo $x\n",
+        )
+        .syntax_issues(true);
+        assert_eq!(shell.len(), 1);
+        assert!(
+            shell[0].message.contains("poly: ignore shellcheck/SC2086"),
+            "{:?}",
+            shell[0]
+        );
+
+        // A code poly declined to implement gets the honest answer rather than
+        // a guess: DL3059 is in the residual gap on purpose.
+        let unknown =
+            InlineIgnores::scan(Some("dockerfile"), "# hadolint ignore=DL3059\nRUN make\n")
+                .syntax_issues(true);
+        assert_eq!(unknown.len(), 1);
+        assert!(
+            unknown[0].message.contains("no rule of its own"),
+            "{:?}",
+            unknown[0]
+        );
+
+        // Not a Dockerfile, not this rule -- `# hadolint ignore=` in a shell
+        // script is a comment about nothing and poly has no business reading
+        // it.
+        assert!(
+            InlineIgnores::scan(Some("shellscript"), "# hadolint ignore=DL3008\n")
+                .syntax_issues(true)
+                .is_empty()
+        );
+        // Trailing, where hadolint itself would not read it either.
+        assert!(
+            InlineIgnores::scan(Some("dockerfile"), "FROM ubuntu # hadolint ignore=DL3006\n")
+                .syntax_issues(true)
+                .is_empty()
+        );
+    }
+
+    /// The marker is a comment poly reads, not a word it greps for.
+    #[test]
+    fn only_a_real_ignore_comment_counts() {
+        let scan = |text: &str| InlineIgnores::scan(Some("python"), text);
+
+        // Prose that starts the same way is prose.
+        assert!(scan("x  # poly: ignored ruff/F401\n")
+            .syntax_issues(false)
+            .is_empty());
+        assert!(!scan("x  # poly: ignored ruff/F401\n").suppresses(0, "ruff", "F401"));
+        // No introducer at all: this is code, not a comment.
+        assert!(!scan("poly: ignore ruff/F401\n").suppresses(0, "ruff", "F401"));
+    }
+
+    #[test]
+    fn inline_cache_reads_each_file_once_and_survives_a_missing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.py"), "import os  # poly: ignore ruff/F401\n").unwrap();
+        // A `[languages.map]` entry decides the comment syntax too: the
+        // language poly thinks a file is has to be the same answer everywhere.
+        std::fs::write(
+            root.join("poly.toml"),
+            "[languages.map]\n\"*.tpl\" = \"python\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("b.tpl"), "x  # poly: ignore typos/typo\n").unwrap();
+        let config = Config::discover(root).unwrap();
+
+        let mut cache = InlineCache::new();
+        assert!(cache
+            .for_file(&root.join("a.py"), &config)
+            .suppresses(0, "ruff", "F401"));
+        assert!(cache
+            .for_file(&root.join("b.tpl"), &config)
+            .suppresses(0, "typos", "typo"));
+        // A file the walk found and something deleted since is not an error.
+        assert!(!cache
+            .for_file(&root.join("gone.py"), &config)
+            .suppresses(0, "ruff", "F401"));
     }
 
     #[test]

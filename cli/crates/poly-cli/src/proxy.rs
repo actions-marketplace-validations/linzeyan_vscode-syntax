@@ -50,19 +50,23 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// typing produces. What poly formats afterwards is whatever the file then says.
 ///
 /// Code actions carry the one exception to "the proxy interprets nothing":
-/// `source.*` kinds are stripped, from the registration and again from every
-/// reply. Those are the kinds `editor.codeActionsOnSave` runs, and VSCode runs
-/// them *before* `editor.formatOnSave` — so gopls's `source.organizeImports`
-/// and poly's gofumpt would both be rewriting the import block on one
-/// keystroke, and they disagree about it: goimports keeps a hand-split group
-/// inside the std imports, gofumpt merges it. Save ordering would decide, which
-/// is not a thing to leave to save ordering.
+/// the two kind families in `is_withheld_kind` are stripped, from the
+/// registration and again from every reply. `editor.codeActionsOnSave` runs
+/// them, and VSCode runs it *before* `editor.formatOnSave` — so gopls's
+/// `source.organizeImports` and poly's gofumpt would both be rewriting the
+/// import block on one keystroke, and they disagree about it: goimports keeps a
+/// hand-split group inside the std imports, gofumpt merges it. Save ordering
+/// would decide, which is not a thing to leave to save ordering.
 ///
 /// What is left is the lightbulb, where the user asks for one action at a time
 /// and nothing else is rewriting the file at that moment. It also keeps
 /// `codeAction/resolve` routable: with the on-save kinds gone there is one
 /// action list on screen, so it can use the same trick
 /// `completionItem/resolve` does.
+///
+/// A code action mostly carries a `command` rather than an `edit` — every one
+/// of gopls's does, measured — so `workspace/executeCommand` has to route too,
+/// or the lightbulb offers refactorings that do nothing. See `server_commands`.
 pub const PROXIED: &[(&str, &str)] = &[
     ("textDocument/hover", "hoverProvider"),
     ("textDocument/definition", "definitionProvider"),
@@ -86,6 +90,28 @@ pub const PROXIED: &[(&str, &str)] = &[
     ("textDocument/foldingRange", "foldingRangeProvider"),
     ("textDocument/declaration", "declarationProvider"),
     ("textDocument/selectionRange", "selectionRangeProvider"),
+    // gopls's `assignVariableTypes` writes the inferred type onto every `:=`,
+    // which is the one thing a reader of unfamiliar Go cannot get from the
+    // text in front of them. Declared by gopls and rust-analyzer; neither asks
+    // for resolution, but `inlayHint/resolve` is routed anyway, because the
+    // flag that would trigger it lives in the server's own options and poly
+    // passes those through verbatim.
+    ("textDocument/inlayHint", "inlayHintProvider"),
+    // The two hierarchies are what the editor's References panel offers beside
+    // the reference list, and they are the half of "who uses this" that spans
+    // files. Both are a `prepare` whose result the editor hands back as the
+    // `item` of a follow-up request; those route by the file the item names,
+    // which is exact rather than "whichever server answered last".
+    ("textDocument/prepareCallHierarchy", "callHierarchyProvider"),
+    ("textDocument/prepareTypeHierarchy", "typeHierarchyProvider"),
+    // The actions a server offers about a whole file rather than a position:
+    // for gopls, `go generate` on a .go and `go mod tidy` / `govulncheck` on a
+    // go.mod. Held back until commands routed, because a lens is a command with
+    // a label on it and clicking one that goes nowhere is worse than not
+    // offering it. It coexists with poly-editor's own reference-count lens
+    // rather than replacing it: that one needs no server at all, and the editor
+    // shows every provider's lenses together.
+    ("textDocument/codeLens", "codeLensProvider"),
 ];
 
 // Capabilities the servers declare that poly leaves alone, so the next person
@@ -94,35 +120,161 @@ pub const PROXIED: &[(&str, &str)] = &[
 // - `documentOnTypeFormatting` (4 of 6 declare it): poly is the formatter.
 //   This is the `source.organizeImports` collision without even the save
 //   boundary to contain it — it fires mid-keystroke.
-// - `workspaceSymbol` (6 of 6): the request names no document, so routing it
-//   means asking every running server and merging. A different shape, not a
-//   row in the table above.
-// - `codeLens` (6 of 6): a lens carries a command the server runs through
-//   `workspace/executeCommand`, which poly already occupies with its own.
-// - `semanticTokens` (4 of 6): routable, but a whole token set per change is
-//   a different traffic profile, and it lands on top of the TextMate layer
-//   poly-syntax-highlight already paints. Worth its own decision.
+
+/// The three requests one `textDocument/semanticTokens` registration covers.
+///
+/// Semantic tokens are the only capability here whose registration method is
+/// not a request method: the editor registers `textDocument/semanticTokens` and
+/// then sends `/full`, `/full/delta` or `/range` depending on what the server's
+/// options and its own capabilities allow. Each of the three names a document
+/// and routes the ordinary way — there is simply no row in `PROXIED` that could
+/// pair them with a capability field, because they all share one.
+pub const SEMANTIC_TOKENS: &[&str] = &[
+    "textDocument/semanticTokens/full",
+    "textDocument/semanticTokens/full/delta",
+    "textDocument/semanticTokens/range",
+];
+
+/// The file-operation methods, paired with the key a server declares them
+/// under in `capabilities.workspace.fileOperations`.
+///
+/// The editor is the only party that knows a file is about to move — no watcher
+/// sees a rename before it happens — so this is the one class of thing a
+/// server cannot find out for itself. `will*` are requests answered with a
+/// WorkspaceEdit the editor applies *as part of* the move; `did*` are
+/// notifications after the fact.
+///
+/// Measured across the seven servers on 2026-09-04: rust-analyzer declares
+/// `willRename`, over `**/*.rs` and over any folder — that is the one that
+/// rewrites `mod` declarations and the paths that point at them when a file is
+/// dragged somewhere else. gopls declares `didCreate` over `**/*.go`,
+/// lua-language-server `didRename` over the workspace root, and clangd,
+/// terraform-ls and sourcekit-lsp declare none at all.
+pub const FILE_OPERATIONS: &[(&str, &str)] = &[
+    ("workspace/willCreateFiles", "willCreate"),
+    ("workspace/didCreateFiles", "didCreate"),
+    ("workspace/willRenameFiles", "willRename"),
+    ("workspace/didRenameFiles", "didRename"),
+    ("workspace/willDeleteFiles", "willDelete"),
+    ("workspace/didDeleteFiles", "didDelete"),
+];
+
+/// Whether this server asked to hear about one kind of file operation.
+///
+/// The filters are the whole declaration: a server that wants `**/*.rs` and
+/// nothing else says so here, and the editor is what applies them. poly reads
+/// this in two places — once to register the method, and again on every
+/// operation to pick who to hand it to — rather than keeping a list of its own,
+/// for the same reason `server_commands` is read from the capabilities each
+/// time: there is one copy of the truth and it is the server's.
+pub fn answers_file_operation(capabilities: &serde_json::Value, key: &str) -> bool {
+    file_operation_filters(capabilities, key).is_some()
+}
+
+fn file_operation_filters<'a>(
+    capabilities: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    let filters = capabilities
+        .get("workspace")?
+        .get("fileOperations")?
+        .get(key)?
+        .get("filters")?;
+    // An empty filter list matches no file, so registering it would buy a
+    // request the server has already said it does not want.
+    if filters.as_array()?.is_empty() {
+        return None;
+    }
+    Some(filters)
+}
 
 /// Requests poly routes but never registers.
 ///
-/// The editor sends these because of a flag inside somebody else's
-/// registration — `renameProvider.prepareProvider` for the first,
-/// `completionProvider.resolveProvider` for the second,
-/// `codeActionProvider.resolveProvider` for the third — so registering them
-/// separately would claim a capability the server never declared.
+/// The editor sends these because of something inside somebody else's
+/// registration: a flag (`renameProvider.prepareProvider`,
+/// `completionProvider.resolveProvider`, and the two other `resolveProvider`s)
+/// or, for the hierarchy follow-ups, the items a `prepare` request returned.
+/// Registering any of them separately would claim a capability no server
+/// declared.
 pub const EXTRA_ROUTED: &[&str] = &[
     "textDocument/prepareRename",
     "completionItem/resolve",
     "codeAction/resolve",
+    "inlayHint/resolve",
+    "codeLens/resolve",
+    "callHierarchy/incomingCalls",
+    "callHierarchy/outgoingCalls",
+    "typeHierarchy/supertypes",
+    "typeHierarchy/subtypes",
 ];
 
-/// A code action kind the editor runs on save rather than on request.
+/// Notifications every running server needs, rather than the one that owns a
+/// document.
 ///
-/// Prefix match down the LSP kind hierarchy, which is dot-separated: `source`
-/// and `source.organizeImports` are both on-save kinds, while a vendor kind
+/// `didChangeWatchedFiles` arrives because a *server* asked for it: gopls
+/// registers a watcher for `**/*.{go,mod,sum,work}`, and poly forwards that
+/// registration to the editor like any other server-to-client request. Until
+/// now the notification that came back was dropped, which left every such
+/// server blind to anything that did not arrive as a keystroke — a `git
+/// checkout`, a `go mod tidy`, and a go.work appearing beside two modules that
+/// until that moment could not see each other.
+///
+/// Broadcast rather than routed, because the notification names a list of
+/// files rather than a document, and each server already filters by the globs
+/// it registered for.
+/// `didChangeWorkspaceFolders` is here for a different reason: it arrives
+/// because *poly* declared `workspace.workspaceFolders`, and every server needs
+/// it because folders are not a per-language thing. A second Go module added to
+/// the window is news to gopls, and the .lua file inside it is news to
+/// lua-language-server.
+///
+/// `$/cancelRequest` names an id rather than a document, and poly forwards
+/// every request with the editor's own id untouched — so the id in the cancel
+/// is the id the server knows the request by, with nothing to rewrite. Sending
+/// it to all of them rather than tracking which server got which id is safe by
+/// construction: editor ids are unique for the session and poly's own
+/// downstream requests are `poly:`-prefixed strings, so a cancel can only ever
+/// match the one request it names, and a `$/` notification about an id a server
+/// never saw is one it is free to ignore. Dropping these was not free —
+/// abandoned work is what makes a large Go project stay busy after the cursor
+/// has moved on.
+pub const BROADCAST: &[&str] = &[
+    "workspace/didChangeWatchedFiles",
+    "workspace/didChangeWorkspaceFolders",
+    "$/cancelRequest",
+];
+
+/// A code action kind poly keeps to itself, because running it would rewrite
+/// the file the formatter is about to rewrite.
+///
+/// Two families, not every `source.*`. The first version withheld the whole
+/// namespace, which was over-broad by a lot: gopls puts `Browse documentation`,
+/// `Add test for run`, `Browse assembly`, `Browse free symbols` and
+/// `Split package` under `source.*` too, and none of them touches formatting.
+/// Withholding those meant the Go lightbulb had almost nothing in it and nobody
+/// noticed, because an absent action looks the same as one the server did not
+/// offer.
+///
+/// What has to stay withheld is what `editor.codeActionsOnSave` runs *before*
+/// `editor.formatOnSave`: gopls's `source.organizeImports` and poly's gofumpt
+/// disagree about import grouping, and save ordering would pick the winner.
+/// `source.fixAll` is here for the same reason — it adds imports too — and
+/// `source.formatAll` because it is the formatter: terraform-ls declares
+/// `source.formatAll.terraform`, which is `terraform fmt` racing poly's own.
+///
+/// Prefix match down the dot-separated kind hierarchy, so `source` (which means
+/// all of them) and `source.fixAll.foo` are both withheld, while a vendor kind
 /// that merely starts with the same letters is not.
-fn is_source_kind(kind: &str) -> bool {
-    kind == "source" || kind.starts_with("source.")
+fn is_withheld_kind(kind: &str) -> bool {
+    // Bare `source` means every source action, so it covers the three below.
+    kind == "source"
+        || [
+            "source.organizeImports",
+            "source.fixAll",
+            "source.formatAll",
+        ]
+        .iter()
+        .any(|family| kind == *family || kind.starts_with(&format!("{family}.")))
 }
 
 /// Is the editor asking only for the kinds poly does not hand over?
@@ -131,7 +283,7 @@ fn is_source_kind(kind: &str) -> bool {
 /// else is that save arriving. Answering it here keeps a server poly is about
 /// to ignore off the save path entirely, rather than paying for a round trip
 /// whose whole answer gets thrown away.
-pub fn only_source_actions(params: &serde_json::Value) -> bool {
+pub fn only_withheld_actions(params: &serde_json::Value) -> bool {
     let Some(only) = params
         .get("context")
         .and_then(|context| context.get("only"))
@@ -142,7 +294,7 @@ pub fn only_source_actions(params: &serde_json::Value) -> bool {
     !only.is_empty()
         && only
             .iter()
-            .all(|kind| kind.as_str().is_some_and(is_source_kind))
+            .all(|kind| kind.as_str().is_some_and(is_withheld_kind))
 }
 
 /// A code action reply with the on-save kinds taken out.
@@ -150,7 +302,7 @@ pub fn only_source_actions(params: &serde_json::Value) -> bool {
 /// The registration already tells the editor poly does not offer them, but
 /// `codeActionKinds` is optional — a server that declared none gets asked for
 /// everything, and this is what keeps the promise on its behalf.
-pub fn without_source_actions(mut result: serde_json::Value) -> serde_json::Value {
+pub fn without_withheld_actions(mut result: serde_json::Value) -> serde_json::Value {
     let Some(actions) = result.as_array_mut() else {
         return result;
     };
@@ -159,7 +311,7 @@ pub fn without_source_actions(mut result: serde_json::Value) -> serde_json::Valu
         !action
             .get("kind")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(is_source_kind)
+            .is_some_and(is_withheld_kind)
     });
     result
 }
@@ -327,7 +479,7 @@ impl Downstream {
                         request.id = tag(&tag_with, &request.id);
                         Message::Request(request)
                     }
-                    Message::Response(response) => Message::Response(forwarded(response)),
+                    Message::Response(response) => Message::Response(answered(response)),
                     other => other,
                 };
                 forward(message);
@@ -435,7 +587,7 @@ pub fn registrations(
                     .get_mut("codeActionKinds")
                     .and_then(serde_json::Value::as_array_mut)
                 {
-                    kinds.retain(|kind| !kind.as_str().is_some_and(is_source_kind));
+                    kinds.retain(|kind| !kind.as_str().is_some_and(is_withheld_kind));
                     if kinds.is_empty() {
                         return None;
                     }
@@ -447,17 +599,213 @@ pub fn registrations(
                 "registerOptions": options,
             }))
         })
+        .chain(semantic_tokens_registration(capabilities, name, &selector))
+        .chain(execute_command_registration(capabilities, name))
+        .chain(file_operation_registrations(capabilities, name))
         .collect()
 }
 
-/// A downstream response on its way to the editor, with a null result put back.
+/// One registration per file operation this server asked for.
+///
+/// Registered dynamically like everything else here, and for the usual reason:
+/// the capability is per language server and poly's `initialize` answer is sent
+/// before any of them has started. The alternative the protocol offers —
+/// declaring filters up front — would mean poly guessing which files matter to
+/// a server it has not run yet.
+///
+/// The filters travel verbatim. They are a claim about which paths the server
+/// wants to hear about, made by the only party that knows; poly widening them
+/// would mean requests on every rename in the workspace, and narrowing them
+/// would silently drop the moves that matter.
+fn file_operation_registrations(
+    capabilities: &serde_json::Value,
+    name: &str,
+) -> Vec<serde_json::Value> {
+    FILE_OPERATIONS
+        .iter()
+        .filter_map(|(method, key)| {
+            let filters = file_operation_filters(capabilities, key)?;
+            Some(serde_json::json!({
+                "id": format!("{POLY_ID}{name}:{method}"),
+                "method": method,
+                "registerOptions": { "filters": filters },
+            }))
+        })
+        .collect()
+}
+
+/// The registration that turns on semantic highlighting for this server.
+///
+/// Separate from the `PROXIED` loop because the method poly registers is not a
+/// method anybody sends: `textDocument/semanticTokens` covers three requests at
+/// once, and which of them the editor uses is decided by the options below.
+///
+/// The whole options object is the server's, legend included, and that is the
+/// only part that has to be right. A token's type is an *index* into
+/// `legend.tokenTypes`; poly rewriting, reordering or trimming that list would
+/// not fail — it would silently colour every identifier as something else.
+/// clangd's legend has `variable` three times and `unknown` in the middle of
+/// it, which is exactly the kind of thing a well-meaning normalisation would
+/// tidy up and break.
+///
+/// A provider with an empty `tokenTypes` is dropped. Not poly second-guessing
+/// the server: an empty legend can encode no token at all, so the registration
+/// would buy a request on every keystroke for an answer that cannot say
+/// anything. terraform-ls declares exactly this to a client that did not ask
+/// for semantic tokens — and poly forwards the editor's capabilities verbatim,
+/// so what a real editor gets is decided by what it asked for, not by poly.
+fn semantic_tokens_registration(
+    capabilities: &serde_json::Value,
+    name: &str,
+    selector: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let declared = capabilities.get("semanticTokensProvider")?;
+    let serde_json::Value::Object(options) = declared else {
+        return None;
+    };
+    if declared
+        .get("legend")?
+        .get("tokenTypes")?
+        .as_array()?
+        .is_empty()
+    {
+        return None;
+    }
+    let mut options = serde_json::Value::Object(options.clone());
+    options["documentSelector"] = selector.clone();
+    Some(serde_json::json!({
+        "id": format!("{POLY_ID}{name}:textDocument/semanticTokens"),
+        "method": "textDocument/semanticTokens",
+        "registerOptions": options,
+    }))
+}
+
+/// The commands a server says it can run.
+///
+/// Empty for a server that declared none, which is most of the thin ones; gopls
+/// declares 47.
+pub fn server_commands(capabilities: &serde_json::Value) -> Vec<String> {
+    capabilities
+        .get("executeCommandProvider")
+        .and_then(|provider| provider.get("commands"))
+        .and_then(serde_json::Value::as_array)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| command.as_str())
+                // poly declared its own three at initialize, and the editor
+                // registers a real VSCode command per id -- a duplicate throws
+                // there and takes the whole client down with it. No server has
+                // ever collided (theirs are `gopls.*`, `rust-analyzer.*`), but
+                // the failure would be total and silent-looking, so it is
+                // cheaper to make it unrepresentable.
+                .filter(|command| !crate::lsp::EXECUTE_COMMANDS.contains(command))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Does this server answer `workspace/symbol`?
+///
+/// Read at request time rather than remembered, because which servers are
+/// running changes through the session: opening a .lua an hour in adds one, and
+/// the query has to reach it.
+pub fn answers_workspace_symbol(capabilities: &serde_json::Value) -> bool {
+    !matches!(
+        capabilities.get("workspaceSymbolProvider"),
+        None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false))
+    )
+}
+
+/// The one `workspace/symbol` registration, minted once per session.
+///
+/// Once, not once per server, and the id says so by carrying no server name.
+/// The editor turns each registration into a provider and queries every one of
+/// them, so a second registration would mean a second `workspace/symbol`
+/// request arriving for the same keystroke — and each of those fans out to
+/// every server, so the user would see each symbol twice with two servers up
+/// and three times with three.
+///
+/// `resolveProvider` is deliberately not claimed even when a server offers it.
+/// A `workspaceSymbol/resolve` names no document and carries only the symbol's
+/// own `data`, which belongs to whichever server made it; with the query fanned
+/// out to all of them there is no honest way to route the follow-up. Not
+/// claiming it means the servers must answer with complete locations, which is
+/// what the protocol requires of a provider that does not resolve.
+pub fn workspace_symbol_registration() -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("{POLY_ID}workspace/symbol"),
+        "method": "workspace/symbol",
+        "registerOptions": {},
+    })
+}
+
+/// Every server's answers to one query, as one list.
+///
+/// Concatenated in no particular order: each server ranks its own results and
+/// nothing poly knows would let it rank across projects in different languages.
+/// The editor sorts what it gets.
+pub fn merge_symbols(answers: Vec<serde_json::Value>) -> serde_json::Value {
+    let symbols: Vec<serde_json::Value> = answers
+        .into_iter()
+        .filter_map(|answer| match answer {
+            serde_json::Value::Array(symbols) => Some(symbols),
+            // `null` is a legal answer meaning "nothing", and an error was
+            // already dropped by the caller. Neither is a reason to lose the
+            // servers that did answer.
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    serde_json::Value::Array(symbols)
+}
+
+/// The registration that makes a downstream server's commands runnable.
+///
+/// Without it the lightbulb is decoration. A code action mostly carries a
+/// `command` rather than an `edit` -- for gopls it is *always* a command, all
+/// eight measured -- and the editor only turns a command into a request if some
+/// registration named it, because that is what makes it a VSCode command in the
+/// first place. So poly registering nothing here meant clicking `Extract
+/// declarations to new file` did nothing at all.
+///
+/// Not part of the `PROXIED` loop: `ExecuteCommandRegistrationOptions` carries
+/// a command list and no documentSelector, which is the one place the "scope it
+/// to this server's languages" rule does not apply -- a command is global, and
+/// routing it by name is exact anyway.
+fn execute_command_registration(
+    capabilities: &serde_json::Value,
+    name: &str,
+) -> Option<serde_json::Value> {
+    let commands = server_commands(capabilities);
+    if commands.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "id": format!("{POLY_ID}{name}:workspace/executeCommand"),
+        "method": "workspace/executeCommand",
+        "registerOptions": { "commands": commands },
+    }))
+}
+
+/// A response poly is relaying, with a null result put back.
 ///
 /// `lsp_server` parses a JSON `null` result into `None`, and skips the field
 /// entirely when it serializes — so a reply that went in as `"result": null`
 /// comes out carrying neither `result` nor `error`, which is not a legal
-/// response. `null` is a real answer here ("no definition at this position")
-/// and every server sends it eventually.
-fn forwarded(mut response: Response) -> Response {
+/// response.
+///
+/// Both directions need it, and for the same reason from opposite ends.
+/// Downstream to the editor, `null` is a real answer ("no definition at this
+/// position") that every server sends eventually. Editor to downstream, `null`
+/// is the *usual* answer: it is what a client says to `client/registerCapability`,
+/// which is how a server turns on a capability it did not declare at
+/// initialize. sourcekit-lsp registers its semantic tokens that way, and on a
+/// reply with neither field it says "sourcekit-lsp failed to decode a message"
+/// once and then stops answering anything — which reads as a server that is
+/// merely slow.
+pub fn answered(mut response: Response) -> Response {
     if response.result.is_none() && response.error.is_none() {
         response.result = Some(serde_json::Value::Null);
     }
@@ -560,8 +908,16 @@ mod tests {
     /// answered `"result": null` and the editor got `{"jsonrpc":"2.0","id":3}`,
     /// a response with neither field. Nothing Windows-specific about it —
     /// every server sends a null result the moment it has no answer.
+    ///
+    /// The other direction was found later and is worse, because the reply that
+    /// gets mangled is the *ordinary* one: `null` is what a client answers to
+    /// `client/registerCapability`, which is how a server turns on a capability
+    /// it did not declare at initialize. sourcekit-lsp registers its semantic
+    /// tokens that way; on the malformed reply it logged "failed to decode a
+    /// message" once and then answered nothing for the rest of the session,
+    /// which is indistinguishable from a server that is simply slow.
     #[test]
-    fn a_null_result_survives_the_trip_to_the_editor() {
+    fn a_null_result_survives_the_trip_in_either_direction() {
         let raw = r#"{"jsonrpc":"2.0","id":3,"result":null}"#;
         let parsed: Response = serde_json::from_str(raw).expect("a response");
         assert!(
@@ -569,13 +925,13 @@ mod tests {
             "lsp_server started keeping null results; this workaround can go"
         );
 
-        let sent = serde_json::to_string(&forwarded(parsed)).expect("serialises");
+        let sent = serde_json::to_string(&answered(parsed)).expect("serialises");
         assert!(sent.contains(r#""result":null"#), "{sent}");
 
         // An error response must not grow a result alongside its error.
         let raw = r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"no"}}"#;
         let failed: Response = serde_json::from_str(raw).expect("a response");
-        let sent = serde_json::to_string(&forwarded(failed)).expect("serialises");
+        let sent = serde_json::to_string(&answered(failed)).expect("serialises");
         assert!(!sent.contains("result"), "{sent}");
     }
 
@@ -619,6 +975,90 @@ mod tests {
         );
     }
 
+    /// clangd is the one server measured that declares no `codeLensProvider`,
+    /// and it is the reason this is worth a test of its own.
+    ///
+    /// A lens registration the server cannot fulfil is not a quiet no-op: the
+    /// editor asks for lenses on every change to every visible document, and
+    /// each one is a round trip to a server that will answer an empty list
+    /// forever. `documentSelector` makes it per-language, so the cost lands on
+    /// exactly the files that can never get an answer.
+    #[test]
+    fn a_server_without_lenses_is_not_registered_for_them() {
+        let gopls = serde_json::json!({"codeLensProvider": {}});
+        let clangd = serde_json::json!({"hoverProvider": true});
+
+        let methods = |declared: &serde_json::Value, name: &str, language: &str| {
+            registrations(declared, name, &[language.to_string()])
+                .iter()
+                .map(|r| r["method"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            methods(&gopls, "gopls", "go"),
+            ["textDocument/codeLens"],
+            "an empty options object is a declaration, not an absence"
+        );
+        assert!(!methods(&clangd, "clangd", "c").contains(&"textDocument/codeLens".to_string()));
+    }
+
+    /// A file operation is registered only where the server asked for one, and
+    /// its filters travel untouched.
+    ///
+    /// The filters are the expensive half to get wrong, and wrong in a way that
+    /// looks like nothing: they decide which renames the editor stops to ask
+    /// about. Widened, every file moved anywhere in the workspace becomes a
+    /// round trip that blocks the move; narrowed, the rename the user actually
+    /// cares about goes through silently and the declarations pointing at the
+    /// old path stay broken. Both are shaped from the real capabilities
+    /// measured on 2026-09-04.
+    #[test]
+    fn only_the_asked_for_file_operations_are_registered() {
+        let rust_analyzer = serde_json::json!({
+            "workspace": {"fileOperations": {"willRename": {"filters": [
+                {"scheme": "file", "pattern": {"glob": "**/*.rs", "matches": "file"}},
+                {"scheme": "file", "pattern": {"glob": "**", "matches": "folder"}},
+            ]}}}
+        });
+        let registered = registrations(&rust_analyzer, "rust-analyzer", &["rust".to_string()]);
+        let rename = registered
+            .iter()
+            .find(|r| r["method"] == "workspace/willRenameFiles")
+            .expect("willRename was declared");
+        assert_eq!(
+            rename["registerOptions"]["filters"],
+            rust_analyzer["workspace"]["fileOperations"]["willRename"]["filters"],
+            "the filters are the server's claim about its own files, not poly's"
+        );
+        // The other five are not implied by declaring one of them.
+        assert_eq!(
+            registered
+                .iter()
+                .filter(|r| r["method"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("workspace/")))
+                .count(),
+            1
+        );
+
+        // clangd, terraform-ls and sourcekit-lsp: no `workspace` key at all.
+        // An operation declared with nothing to match is the same as absent —
+        // terraform-ls answers exactly this shape for capabilities the client
+        // did not ask about.
+        for absent in [
+            serde_json::json!({"hoverProvider": true}),
+            serde_json::json!({"workspace": {"fileOperations": {"willRename": {"filters": []}}}}),
+            serde_json::json!({"workspace": {"fileOperations": {}}}),
+        ] {
+            assert!(
+                !registrations(&absent, "clangd", &["c".to_string()])
+                    .iter()
+                    .any(|r| r["method"] == "workspace/willRenameFiles"),
+                "registered a file operation for {absent}"
+            );
+        }
+    }
+
     /// The whole point of proxying code actions at all: the on-save kinds are
     /// the ones that would race gofumpt, and they must not survive the trip.
     #[test]
@@ -627,6 +1067,10 @@ mod tests {
             {"title": "Organize Imports", "kind": "source.organizeImports"},
             {"title": "Fix All", "kind": "source.fixAll"},
             {"title": "Everything source", "kind": "source"},
+            // terraform-ls's, and it is `terraform fmt` under another name.
+            {"title": "Format Document", "kind": "source.formatAll.terraform"},
+            // gopls's, and none of them touch formatting.
+            {"title": "Browse documentation", "kind": "source.doc"},
             {"title": "Extract function", "kind": "refactor.extract"},
             {"title": "Add missing import", "kind": "quickfix"},
             // A vendor kind that merely starts with the same letters, and a
@@ -634,7 +1078,7 @@ mod tests {
             {"title": "Sourcery thing", "kind": "sourcery.refactor"},
             {"title": "A Command", "command": "gopls.tidy"},
         ]);
-        let filtered = without_source_actions(reply);
+        let filtered = without_withheld_actions(reply);
         let kept: Vec<&str> = filtered
             .as_array()
             .expect("still a list")
@@ -644,6 +1088,7 @@ mod tests {
         assert_eq!(
             kept,
             [
+                "Browse documentation",
                 "Extract function",
                 "Add missing import",
                 "Sourcery thing",
@@ -652,7 +1097,7 @@ mod tests {
         );
 
         // A server answering `null` says nothing, and nothing is not a list.
-        assert!(without_source_actions(serde_json::Value::Null).is_null());
+        assert!(without_withheld_actions(serde_json::Value::Null).is_null());
     }
 
     /// The save path, recognised by what it asks for. Getting this wrong in
@@ -661,23 +1106,30 @@ mod tests {
     #[test]
     fn a_request_for_only_on_save_kinds_is_recognised() {
         let only = |kinds: serde_json::Value| serde_json::json!({"context": {"only": kinds}});
-        assert!(only_source_actions(&only(serde_json::json!([
+        assert!(only_withheld_actions(&only(serde_json::json!([
             "source.organizeImports"
         ]))));
-        assert!(only_source_actions(&only(serde_json::json!([
+        assert!(only_withheld_actions(&only(serde_json::json!([
             "source.organizeImports",
             "source.fixAll"
         ]))));
 
-        // The lightbulb asks for these, or for nothing in particular.
-        assert!(!only_source_actions(&only(serde_json::json!(["quickfix"]))));
-        assert!(!only_source_actions(&serde_json::json!({"context": {}})));
-        assert!(!only_source_actions(&serde_json::json!({})));
+        // The lightbulb asks for these, or for nothing in particular. The
+        // narrowing that let gopls's `source.doc` through has to reach here too,
+        // or the request carrying it is answered `[]` without ever being sent.
+        assert!(!only_withheld_actions(&only(serde_json::json!([
+            "quickfix"
+        ]))));
+        assert!(!only_withheld_actions(&only(serde_json::json!([
+            "source.doc"
+        ]))));
+        assert!(!only_withheld_actions(&serde_json::json!({"context": {}})));
+        assert!(!only_withheld_actions(&serde_json::json!({})));
         // An empty `only` is not "only the on-save kinds".
-        assert!(!only_source_actions(&only(serde_json::json!([]))));
+        assert!(!only_withheld_actions(&only(serde_json::json!([]))));
         // Mixed has something poly does hand over, so it goes downstream and
         // the reply filter takes the rest.
-        assert!(!only_source_actions(&only(serde_json::json!([
+        assert!(!only_withheld_actions(&only(serde_json::json!([
             "quickfix",
             "source.fixAll"
         ]))));
@@ -746,5 +1198,45 @@ mod tests {
             .map(|entry| entry["language"].as_str().unwrap())
             .collect();
         assert_eq!(covered, ["c", "cpp"]);
+    }
+
+    /// Registering the server's commands is what makes its code actions do
+    /// anything: gopls answers every one of them with a `command` and no `edit`,
+    /// so an unregistered command id is a lightbulb entry that silently no-ops.
+    #[test]
+    fn a_servers_commands_are_registered_but_never_polys_own() {
+        let declared = serde_json::json!({
+            "executeCommandProvider": {
+                "commands": [
+                    "gopls.extract_to_new_file",
+                    "gopls.change_signature",
+                    // A server that somehow named one of poly's: registering it
+                    // twice in the editor throws and kills the whole client.
+                    crate::lsp::EXECUTE_COMMANDS[0],
+                ],
+            },
+        });
+        let declares_commands = registrations(&declared, "gopls", &["go".to_string()]);
+        assert_eq!(declares_commands.len(), 1);
+        let registration = &declares_commands[0];
+        assert_eq!(registration["method"], "workspace/executeCommand");
+        assert_eq!(registration["id"], "poly:gopls:workspace/executeCommand");
+        assert_eq!(
+            registration["registerOptions"]["commands"],
+            serde_json::json!(["gopls.extract_to_new_file", "gopls.change_signature"])
+        );
+        // A command list is global, so unlike every other registration it must
+        // not be scoped to a language.
+        assert!(registration["registerOptions"]
+            .get("documentSelector")
+            .is_none());
+
+        // Nothing to register for a server that runs no commands, and that
+        // empty list is also how `route` decides a command is poly's own.
+        let no_commands = registrations(&serde_json::json!({"hoverProvider": true}), "x", &[]);
+        assert!(no_commands
+            .iter()
+            .all(|r| r["method"] != "workspace/executeCommand"));
+        assert!(server_commands(&serde_json::json!({})).is_empty());
     }
 }

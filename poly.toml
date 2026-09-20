@@ -35,3 +35,10 @@ exclude = [
   "extensions/*/THIRD-PARTY-NOTICES.md",
   "extensions/*/pnpm-lock.yaml",
 ]
+
+# No [lint.per-file-ignores] at all. Everything this repo silences is a line
+# rather than a file, so every one of them is a `# poly: ignore` comment in the
+# file itself -- the two Dockerfile rules on the lines they fire on, and the
+# deliberate misspellings in tests/check.rs on the fixtures that carry them. A
+# glob would have covered the lines nobody has written yet as well, and put the
+# reason two files away from the line it excuses.

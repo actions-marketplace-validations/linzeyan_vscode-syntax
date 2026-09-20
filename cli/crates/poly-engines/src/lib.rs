@@ -4,11 +4,14 @@
 //! Returns `Ok(None)` when the input is already formatted.
 
 pub mod lint;
+mod proto;
+pub mod shell;
+mod workflow;
 
 use std::path::Path;
 use std::sync::OnceLock;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use poly_core::FormatOptions;
 
 /// Language ids (poly-core detection) with an embedded formatter.
@@ -24,6 +27,7 @@ pub fn supported_language(lang: &str) -> bool {
             | "less"
             | "yaml"
             | "python"
+            | "jupyter"
             | "sql"
             | "xml"
             | "html"
@@ -31,8 +35,11 @@ pub fn supported_language(lang: &str) -> bool {
             | "svelte"
             | "astro"
             | "jinja"
+            | "handlebars"
             | "graphql"
             | "dockerfile"
+            | "lua"
+            | "php"
     )
 }
 
@@ -107,11 +114,16 @@ pub fn format(lang: &str, path: &Path, text: &str, opts: FormatOptions) -> Resul
         "css" | "scss" | "less" => format_css(text, lang, opts),
         "yaml" => format_yaml(text, opts),
         "python" => format_python(path, text, opts),
+        "jupyter" => format_jupyter(path, text, opts),
         "sql" => format_sql(text),
         "xml" => format_xml(text, opts),
-        "html" | "vue" | "svelte" | "astro" | "jinja" => format_markup(text, lang, opts),
+        "html" | "vue" | "svelte" | "astro" | "jinja" | "handlebars" => {
+            format_markup(text, lang, opts)
+        }
         "graphql" => format_graphql(text, opts),
+        "php" => format_php(path, text, opts),
         "dockerfile" => format_dockerfile(path, text, opts),
+        "lua" => format_lua(text, opts),
         other => Err(anyhow!("no embedded formatter for language {other:?}")),
     }
 }
@@ -161,8 +173,88 @@ fn format_typescript(path: &Path, text: &str, opts: FormatOptions) -> Result<Opt
         extension: None,
         text: text.to_string(),
         config,
-        external_formatter: None,
+        external_formatter: Some(&embedded_in_typescript),
     })
+}
+
+/// A tagged template whose tag names a language poly formats.
+///
+/// dprint-plugin-typescript formats TypeScript and asks its caller about
+/// anything else, the same shape markup_fmt uses for `<script>` and
+/// dprint-plugin-markdown for a fenced block. poly answers for the languages
+/// it has, which is what makes ``css`...` `` in a styled-component come out
+/// formatted rather than however it was typed.
+///
+/// Returning `None` leaves the template exactly as written, which is the right
+/// answer for a language poly does not format and for a snippet that does not
+/// parse -- a tagged template is often a fragment, and a fragment that fails to
+/// parse is not a file anybody asked poly to fix.
+///
+/// Interpolations arrive as placeholders, not holes: the plugin substitutes a
+/// uniquely numbered `dpr1nt_NN_d` (`@dpr1nt_NN_d` for css, so it reads as a
+/// LESS variable) for each `${}` before calling this, and puts the expressions
+/// back afterwards. So the text really is the language the tag claims -- but
+/// the formatter must not reorder or drop what looks to it like an unknown
+/// identifier, which is the other half of why css goes through LESS.
+fn embedded_in_typescript(
+    lang: &str,
+    text: String,
+    config: &dprint_plugin_typescript::configuration::Configuration,
+) -> Result<Option<String>> {
+    let opts = FormatOptions {
+        indent_width: Some(config.indent_width),
+        ..FormatOptions::default()
+    };
+    let formatted = match lang {
+        "css" => embedded_css(&text, config),
+        // markup_fmt's own `Language::Html`, with the inner callback poly uses
+        // everywhere else, so a `<style>` inside an html`` template reaches
+        // malva exactly as it would in a .html file.
+        "html" => format_markup(&text, "html", opts),
+        // sqruff takes no layout options from poly: `[format.sql]` rejects
+        // all three, because sqruff owns its own layout rules (.sqruff).
+        "sql" => format_sql(&text),
+        _ => return Ok(None),
+    };
+    // Unformattable is not an error here: the tag says what the author meant
+    // the fragment to be, and being wrong about that must not fail the whole
+    // TypeScript file.
+    Ok(formatted.ok().flatten())
+}
+
+/// The CSS inside a tagged template, which is a declaration list and not a file.
+///
+/// `css\`color: red\`` is not a stylesheet -- malva would reject it -- so it is
+/// wrapped in a rule, formatted, and unwrapped again. This is
+/// dprint-plugin-typescript's own approach, copied deliberately from its
+/// `tests/spec_test.rs`: LESS rather than CSS because LESS accepts `@variable`
+/// both as a value and as a standalone mixin, which is what a placeholder left
+/// by a removed interpolation looks like.
+///
+/// The trailing `;` in the wrapper is what lets a declaration list that already
+/// ends in one through without becoming a syntax error.
+fn embedded_css(
+    text: &str,
+    config: &dprint_plugin_typescript::configuration::Configuration,
+) -> Result<Option<String>> {
+    let mut options = malva::config::FormatOptions::default();
+    options.layout.indent_width = config.indent_width as usize;
+    let wrapped = malva::format_text(&format!("a{{\n{text}\n;}}"), malva::Syntax::Less, &options)
+        .map_err(|e| anyhow!("css {e}"))?;
+    let mut out = Vec::new();
+    for (i, line) in wrapped.lines().enumerate() {
+        // The `a {` this added, and the `}` that closed it.
+        if i == 0 || line.starts_with('}') {
+            continue;
+        }
+        // And the indent that being inside a rule gave every line.
+        let mut chars = line.chars();
+        for _ in 0..config.indent_width {
+            chars.next();
+        }
+        out.push(chars.as_str());
+    }
+    Ok(Some(out.join("\n")))
 }
 
 fn format_json(path: &Path, text: &str, opts: FormatOptions) -> Result<Option<String>> {
@@ -394,7 +486,15 @@ fn line_col(text: &str, offset: usize) -> (usize, usize) {
     )
 }
 
-fn format_python(path: &Path, text: &str, opts: FormatOptions) -> Result<Option<String>> {
+/// `[format.python]`, as ruff's formatter takes it.
+///
+/// Shared by `.py` and `.ipynb`: a notebook's cells are Python and have to be
+/// laid out to the same settings, or the same code is formatted two ways
+/// depending on which file it happens to live in.
+fn python_options(
+    path: &Path,
+    opts: FormatOptions,
+) -> Result<ruff_python_formatter::PyFormatOptions> {
     let mut options = ruff_python_formatter::PyFormatOptions::from_extension(path);
     if let Some(width) = opts.line_width {
         options = options.with_line_width(
@@ -417,10 +517,130 @@ fn format_python(path: &Path, text: &str, opts: FormatOptions) -> Result<Option<
             ruff_formatter::IndentStyle::Space
         });
     }
+    Ok(options)
+}
+
+fn format_python(path: &Path, text: &str, opts: FormatOptions) -> Result<Option<String>> {
+    let options = python_options(path, opts)?;
     let printed = ruff_python_formatter::format_module_source(text, options)
         .map_err(|e| python_error(text, &e))?;
     let result = printed.into_code();
     Ok((result != text).then_some(result))
+}
+
+/// Format a Jupyter notebook: each code cell as Python, the container left
+/// alone but rewritten.
+///
+/// Cell by cell rather than over the concatenated source, because that is what
+/// ruff does and the difference is visible: formatting the whole thing at once
+/// would let a blank-line rule reach across a cell boundary, and cells are
+/// edited and executed one at a time. The `SourceMap` is how the new text is
+/// mapped back onto cells -- `Notebook::update` walks it to move each cell
+/// offset by however much the text before it grew or shrank.
+///
+/// Nothing is written unless some cell actually changed, so an already
+/// formatted notebook is not rewritten with different JSON whitespace.
+fn format_jupyter(path: &Path, text: &str, opts: FormatOptions) -> Result<Option<String>> {
+    use ruff_text_size::{TextLen, TextRange, TextSize};
+
+    let mut notebook = ruff_notebook::Notebook::from_source_code(text)
+        .map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
+    // An R or Julia notebook is a notebook poly has no formatter for. Silence
+    // is the honest answer; running the Python formatter over it would be a
+    // syntax error at best.
+    if !notebook.is_python_notebook() {
+        return Ok(None);
+    }
+    let options = python_options(path, opts)?;
+    let source = notebook.source_code().to_string();
+
+    let mut output: Option<String> = None;
+    let mut source_map = ruff_diagnostics::SourceMap::default();
+    let mut last: Option<TextSize> = None;
+    for pair in notebook.cell_offsets().windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let unformatted = &source[TextRange::new(start, end)];
+        let printed = ruff_python_formatter::format_module_source(unformatted, options.clone())
+            .map_err(|e| python_error(unformatted, &e))?;
+        let formatted = printed.as_code();
+        if formatted == unformatted {
+            continue;
+        }
+        let output = output.get_or_insert_with(|| String::with_capacity(source.len()));
+        // Everything since the last cell this loop rewrote, verbatim.
+        output.push_str(&source[TextRange::new(last.unwrap_or_default(), start)]);
+        source_map.push_marker(start, output.text_len());
+        output.push_str(formatted);
+        source_map.push_marker(end, output.text_len());
+        last = Some(end);
+    }
+    let Some(mut output) = output else {
+        return Ok(None);
+    };
+    output.push_str(&source[usize::from(last.unwrap_or_default())..]);
+    notebook.update(&source_map, output);
+
+    let mut result = Vec::new();
+    notebook
+        .write(&mut result)
+        .map_err(|e| anyhow!("writing {}: {e}", path.display()))?;
+    let result = String::from_utf8(result).map_err(|_| anyhow!("notebook output not UTF-8"))?;
+    let result =
+        with_sorted_keys(&result).with_context(|| format!("writing {}", path.display()))?;
+    Ok((result != text).then_some(result))
+}
+
+/// Re-emit a notebook with every JSON object's keys in alphabetical order.
+///
+/// This is what `ruff_notebook`'s own writer means to do, and cannot here. It
+/// sorts by round-tripping through `serde_json::Value`, which is a `BTreeMap`
+/// only while `serde_json` is built *without* `preserve_order`. rumdl asks for
+/// that feature and cargo unifies features across the whole tree, so inside
+/// poly a `Value` is an `IndexMap` — and the order it faithfully preserves is
+/// the insertion order of the `#[serde(flatten)] HashMap` that holds every
+/// metadata key ruff does not name, which Rust randomises per process.
+///
+/// The symptom is not a wrong byte but an unstable one: five `poly fmt` runs
+/// over one notebook wrote two different files, so `poly fmt --check` could
+/// fail in CI on a notebook nobody had touched, and every save produced a diff
+/// in `kernelspec`. Found by `tools/lsp-fmt-diff.py`, which asked the daemon
+/// and the CLI about the same notebook and got different answers because they
+/// are different processes.
+fn with_sorted_keys(text: &str) -> Result<String> {
+    use serde::Serialize;
+
+    let mut value: serde_json::Value = serde_json::from_str(text)?;
+    sort_keys(&mut value);
+
+    let mut out = Vec::new();
+    // The shape ruff_notebook writes, kept byte for byte: one space of indent
+    // (black's choice, which nbformat follows) and the trailing newline only
+    // if the notebook it just wrote had one.
+    let mut serializer = serde_json::Serializer::with_formatter(
+        &mut out,
+        serde_json::ser::PrettyFormatter::with_indent(b" "),
+    );
+    value.serialize(&mut serializer)?;
+    let mut out = String::from_utf8(out).map_err(|_| anyhow!("notebook output not UTF-8"))?;
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn sort_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = std::mem::take(map).into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (_, nested) in &mut entries {
+                sort_keys(nested);
+            }
+            *map = entries.into_iter().collect();
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sort_keys),
+        _ => {}
+    }
 }
 
 /// ruff's own Display ends in "at byte range 6..7", which no editor and no
@@ -439,6 +659,40 @@ fn python_error(text: &str, err: &ruff_python_formatter::FormatModuleError) -> a
         // source position at all; there is nothing to translate.
         other => anyhow!("python format error: {other}"),
     }
+}
+
+/// stylua honors all three knobs, so `honored` needs no arm for lua: the
+/// column width guides wrapping, and `indent_type` plus `indent_width` are the
+/// other two spelled its way. Tabs are stylua's own default, which is why
+/// `use-tabs` is left unset rather than defaulted to false here -- a poly that
+/// silently spaced every Lua file would disagree with every stylua.toml in
+/// existence.
+///
+/// `OutputVerification::None` matches the CLI, where reparsing the output is
+/// opt-in behind `--verify`. `Range` is None because poly formats whole
+/// documents; the LSP's Format Selection diffs the result instead (see
+/// `similar` in Cargo.toml).
+fn format_lua(text: &str, opts: FormatOptions) -> Result<Option<String>> {
+    let mut config = stylua_lib::Config::default();
+    if let Some(width) = opts.line_width {
+        config.column_width = width.into();
+    }
+    if let Some(width) = opts.indent_width {
+        config.indent_width = width.into();
+    }
+    if let Some(tabs) = opts.use_tabs {
+        config.indent_type = if tabs {
+            stylua_lib::IndentType::Tabs
+        } else {
+            stylua_lib::IndentType::Spaces
+        };
+    }
+    // stylua's Display already carries `(line:col to line:col)` for a parse
+    // error, so unlike ruff there is nothing to translate -- only the language
+    // to name, the way malva and pretty_yaml are prefixed.
+    let result = stylua_lib::format_code(text, config, None, stylua_lib::OutputVerification::None)
+        .map_err(|e| anyhow!("lua {e}"))?;
+    Ok((result != text).then_some(result))
 }
 
 /// Shared warm sqruff instance (construction loads the rule set; lint_string
@@ -491,6 +745,13 @@ fn format_markup(text: &str, lang: &str, opts: FormatOptions) -> Result<Option<S
         "svelte" => markup_fmt::Language::Svelte,
         "astro" => markup_fmt::Language::Astro,
         "jinja" => markup_fmt::Language::Jinja,
+        // Handlebars is a superset of Mustache, and markup_fmt's Mustache
+        // parser covers the superset: block helpers indent their bodies,
+        // `{{else}}` dedents, block params (`as |item idx|`) and partials with
+        // arguments survive. Falling through to Html instead would treat every
+        // `{{#if}}` as prose and run the block onto one line -- which is what
+        // this arm exists to stop, and what its test asserts.
+        "handlebars" => markup_fmt::Language::Mustache,
         _ => markup_fmt::Language::Html,
     };
     let mut options = markup_fmt::config::FormatOptions::default();
@@ -527,7 +788,44 @@ fn format_graphql(text: &str, opts: FormatOptions) -> Result<Option<String>> {
     if let Some(tabs) = opts.use_tabs {
         options.layout.use_tabs = tabs;
     }
-    let result = pretty_graphql::format_text(text, &options).map_err(|e| anyhow!("graphql {e}"))?;
+    // The error is deliberately not the one pretty_graphql wrote: formatting it
+    // panics on a syntax error at byte 0, and `graphql_format_error` says the
+    // same thing from the same parser without that hole in it.
+    let result = pretty_graphql::format_text(text, &options)
+        .map_err(|_| anyhow!("graphql {}", crate::lint::graphql_format_error(text)))?;
+    Ok((result != text).then_some(result))
+}
+
+/// PHP, through mago's formatter.
+///
+/// Its three settings are poly's three, and its defaults are already PSR-12's
+/// (120 columns, four spaces), so there is nothing for poly to override -- the
+/// house style a PHP repository already has is the one it gets.
+///
+/// The output was compared byte for byte against the released `mago 1.47.6`
+/// binary over 20,200 files from eight pinned packages: identical everywhere,
+/// including the three files neither of them can parse.
+fn format_php(path: &Path, text: &str, opts: FormatOptions) -> Result<Option<String>> {
+    let mut settings = mago_formatter::settings::FormatSettings::default();
+    if let Some(width) = opts.line_width {
+        settings.print_width = width.into();
+    }
+    if let Some(width) = opts.indent_width {
+        settings.tab_width = width.into();
+    }
+    if let Some(tabs) = opts.use_tabs {
+        settings.use_tabs = tabs;
+    }
+    let arena = mago_allocator::LocalArena::new();
+    let file = crate::lint::php_file(path, text);
+    let formatter = mago_formatter::Formatter::new(&arena, crate::lint::php_version(), settings);
+    // mago's own error names neither the position nor the token; the parser it
+    // just used does, and `php_format_error` is what `poly check` reports.
+    let formatted = formatter
+        .format_file(&file)
+        .map_err(|_| anyhow!("php {}", crate::lint::php_format_error(text)))?;
+    let result = String::from_utf8(formatted.to_vec())
+        .map_err(|_| anyhow!("php formatter produced invalid UTF-8"))?;
     Ok((result != text).then_some(result))
 }
 
@@ -556,6 +854,163 @@ fn format_dockerfile(path: &Path, text: &str, opts: FormatOptions) -> Result<Opt
 mod tests {
     use super::*;
 
+    /// A `css` tagged template is CSS, and poly formats it.
+    ///
+    /// The declaration list is the whole point: what sits between the
+    /// backticks is a fragment, not a stylesheet, so it reaches malva wrapped
+    /// in a rule and comes back unwrapped (`embedded_css`). An off-by-one in
+    /// that unwrapping shows up here as a stray indent or a lost first
+    /// property.
+    #[test]
+    fn a_css_tagged_template_is_formatted_as_css() {
+        let formatted = format_file(
+            Path::new("a.ts"),
+            "const s = css`color:red;background:blue`;\n",
+        )
+        .expect("typescript must format")
+        .expect("the template needs formatting, so there must be output");
+        assert_eq!(
+            formatted,
+            "const s = css`\n  color: red;\n  background: blue;\n`;\n",
+        );
+    }
+
+    /// An interpolated template is still formatted, and every expression comes
+    /// back byte for byte.
+    ///
+    /// The plugin swaps each `${}` for a numbered placeholder before calling
+    /// poly, so what malva sees is a stylesheet and not a fragment with holes.
+    /// The risk is on the way back: an engine that reorders declarations or
+    /// drops an unknown identifier would silently move an author's expression
+    /// to another property. `styled.div` is here because the plugin resolves it
+    /// to css by the tag's shape rather than by its name.
+    #[test]
+    fn an_interpolated_tagged_template_keeps_its_expressions() {
+        let formatted = format_file(
+            Path::new("a.ts"),
+            "const s = styled.div`color:${fg};padding:${p}px`;\n",
+        )
+        .expect("typescript must format")
+        .expect("the template needs formatting, so there must be output");
+        assert_eq!(
+            formatted,
+            "const s = styled.div`\n  color: ${fg};\n  padding: ${p}px;\n`;\n",
+        );
+    }
+
+    /// The same for `html`, which reaches markup_fmt.
+    #[test]
+    fn an_html_tagged_template_is_formatted_as_markup() {
+        let formatted = format_file(
+            Path::new("a.ts"),
+            "const t = html`<div   ><p>hi</p></div>`;\n",
+        )
+        .expect("typescript must format")
+        .expect("the template needs formatting, so there must be output");
+        assert!(formatted.contains("<div>"), "{formatted:?}");
+        assert!(formatted.contains("<p>hi</p>"), "{formatted:?}");
+    }
+
+    /// A tag poly has no language for, and a fragment that does not parse, both
+    /// leave the template exactly as written.
+    ///
+    /// This is the half that keeps the feature from being a liability: a
+    /// template is often not valid anything, and the author's bytes must
+    /// survive being guessed at.
+    #[test]
+    fn an_unformattable_tagged_template_is_left_alone() {
+        // A tag with no engine behind it.
+        assert!(format_file(
+            Path::new("a.ts"),
+            "const q = graphqlish`{ not  touched }`;\n"
+        )
+        .expect("typescript must format")
+        .is_none_or(|out| out.contains("{ not  touched }")));
+        // And a `css` tag whose contents are not CSS at all.
+        let broken = format_file(Path::new("a.ts"), "const s = css`@@@ not ; css {{{`;\n")
+            .expect("a bad fragment must not fail the file");
+        assert!(
+            broken.is_none_or(|out| out.contains("@@@ not ; css {{{")),
+            "the author's bytes must survive",
+        );
+    }
+
+    /// A notebook must format to the same bytes every time it is formatted.
+    ///
+    /// Not a style preference: unsorted output here is *unstable* output. See
+    /// `with_sorted_keys` for why ruff_notebook's own sort stops working
+    /// inside poly. Before the fix, five `poly fmt` runs over one notebook
+    /// wrote two different files, so `poly fmt --check` could fail in CI on a
+    /// notebook nobody had touched.
+    ///
+    /// Asserting the keys are sorted rather than running it twice and hoping
+    /// the orders differ: a `HashMap`'s order is random, so a two-run test
+    /// passes about half the time on the broken code.
+    #[test]
+    fn a_notebook_formats_to_stable_bytes() {
+        // Metadata keys deliberately out of alphabetical order, and one cell
+        // that needs formatting so there is something to write back at all.
+        let source = r#"{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": ["x = ( 1 )"]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "version": "3.12.0",
+   "name": "python",
+   "pygments_lexer": "ipython3",
+   "nbconvert_exporter": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+"#;
+        let formatted = format_file(Path::new("n.ipynb"), source)
+            .expect("notebook must format")
+            .expect("the cell needs formatting, so there must be output");
+
+        fn assert_sorted(value: &serde_json::Value, where_: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let keys: Vec<_> = map.keys().cloned().collect();
+                    let mut want = keys.clone();
+                    want.sort();
+                    assert_eq!(keys, want, "keys out of order at {where_}");
+                    for (key, nested) in map {
+                        assert_sorted(nested, &format!("{where_}.{key}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        assert_sorted(item, &format!("{where_}[{i}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_sorted(&serde_json::from_str(&formatted).unwrap(), "");
+
+        // And the other half of stable: formatting the result again is a no-op
+        // rather than another rewrite.
+        assert_eq!(
+            format_file(Path::new("n.ipynb"), &formatted).unwrap(),
+            None,
+            "an already-formatted notebook must not be rewritten"
+        );
+    }
+
     #[test]
     fn formats_each_language() {
         let cases: &[(&str, &str)] = &[
@@ -570,12 +1025,112 @@ mod tests {
             ("a.xml", "<root><a>1</a><b attr='2'/></root>"),
             ("a.html", "<div><p>hi</p><style>a{color:red}</style></div>"),
             ("a.graphql", "query { user(id:1){name email} }"),
+            ("a.lua", "local  function f( a,b )\nreturn a+b\nend"),
             ("Dockerfile", "FROM  alpine:3\nrun echo hi\n"),
+            (
+                "a.hbs",
+                "<div  class=\"a\">{{#if x}}<p>{{y}}</p>{{/if}}</div>",
+            ),
         ];
         for (name, input) in cases {
             let out = format_file(Path::new(name), input).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(out.is_some(), "{name}: expected a formatting change");
         }
+    }
+
+    /// Handlebars routes to markup_fmt's Mustache parser rather than falling
+    /// through to Html. The difference is not cosmetic: Html reads `{{#if}}` as
+    /// prose, so it neither indents the block nor keeps it on its own line, and
+    /// the result is a template whose structure has been flattened. Asserting
+    /// the Html output is *different* is what makes this a test of the arm and
+    /// not of markup_fmt.
+    #[test]
+    fn handlebars_blocks_are_parsed_not_treated_as_prose() {
+        let text =
+            "<div>\n{{#if user}}\n<p>{{user.name}}</p>\n{{else}}\n<p>anon</p>\n{{/if}}\n</div>\n";
+        let opts = FormatOptions::default();
+        let handlebars = format_markup(text, "handlebars", opts)
+            .expect("handlebars formats")
+            .expect("handlebars changes something");
+        // The block body is indented under its opener, and `{{else}}` comes
+        // back out -- neither happens when the braces are just text.
+        assert!(
+            handlebars.contains("  {{#if user}}\n    <p>{{user.name}}</p>\n  {{else}}"),
+            "{handlebars}"
+        );
+        let html = format_markup(text, "html", opts)
+            .expect("html formats")
+            .expect("html changes something");
+        assert_ne!(handlebars, html, "Mustache and Html cannot agree here");
+    }
+
+    /// lua is the one engine that takes all three knobs without an `honored`
+    /// arm to declare it, and the failure that creates is silent: a setting
+    /// poly claims to apply and stylua ignores reads as working and does
+    /// nothing. So each knob is asserted against output only it could produce.
+    #[test]
+    fn lua_honors_all_three_format_options() {
+        let lua = |text: &str, opts| format("lua", Path::new("a.lua"), text, opts);
+
+        // Tabs are stylua's own default, so a space indent can only have come
+        // from use-tabs, and its width only from indent-width.
+        let body = "if x then\nreturn 1\nend\n";
+        let spaced = lua(
+            body,
+            FormatOptions {
+                line_width: None,
+                indent_width: Some(2),
+                use_tabs: Some(false),
+            },
+        )
+        .expect("lua formats")
+        .expect("the indent has to change");
+        assert!(spaced.contains("\n  return 1"), "{spaced}");
+        assert!(lua(body, FormatOptions::default())
+            .unwrap()
+            .unwrap()
+            .contains("\n\treturn 1"));
+
+        // Wide enough for stylua's default 120 and not for 20, so the line
+        // splitting is the setting and nothing else.
+        let table = "local t = { alpha = 1, beta = 2, gamma = 3, delta = 4 }\n";
+        assert_eq!(
+            lua(table, FormatOptions::default()).unwrap(),
+            None,
+            "already formatted at the default width"
+        );
+        let narrow = lua(
+            table,
+            FormatOptions {
+                line_width: Some(20),
+                indent_width: None,
+                use_tabs: None,
+            },
+        )
+        .expect("lua formats")
+        .expect("20 columns cannot hold that line");
+        assert!(narrow.lines().count() > 1, "{narrow}");
+    }
+
+    /// MDX goes through the markdown engine, so the question is not whether it
+    /// formats but whether it destroys anything: an ESM import line and a JSX
+    /// block both have to come back byte-identical while the prose around them
+    /// is still normalized. prettier does more than this when a project has it
+    /// (poly hands over the real path, so prettier picks its mdx parser); this
+    /// is the floor for everyone else.
+    #[test]
+    fn mdx_keeps_its_imports_and_jsx() {
+        let text = "import { Chart } from './chart'\n\n# Title\n\nSome   text.\n\n<Chart data={[1,2,3]}   kind=\"bar\" />\n\n-   a\n";
+        let out = format_file(Path::new("a.mdx"), text)
+            .expect("mdx formats")
+            .expect("the prose needs normalizing");
+        assert!(out.contains("import { Chart } from './chart'"), "{out}");
+        assert!(
+            out.contains("<Chart data={[1,2,3]}   kind=\"bar\" />"),
+            "{out}"
+        );
+        assert!(out.contains("Some text."), "{out}");
+        assert!(out.contains("- a"), "{out}");
     }
 
     /// The three things minifying must not do: reorder keys, touch what is
@@ -659,11 +1214,126 @@ mod tests {
         }
 
         // xmlem discards the reader offset, so XML can only say what is wrong.
+        // (The GraphQL row above has a second half: see
+        // `a_graphql_error_at_the_first_byte_is_a_message_not_a_crash`.)
         // It must at least be a sentence rather than a Debug variant dump.
         let err = format_file(Path::new("a.xml"), "<root><a></root>\n")
             .expect_err("expected a parse failure")
             .to_string();
         assert!(!err.contains("IllFormed("), "raw Debug leaked: {err:?}");
+    }
+
+    /// A GraphQL file whose first character is already wrong is an error
+    /// message, not a panic.
+    ///
+    /// pretty_graphql formats its own message by mapping the byte offset to a
+    /// line and then indexing `line_bounds[line - 1]`; at offset 0 that line is
+    /// 0 and the subtraction wraps. Three exclamation marks were enough, an
+    /// empty file was enough, and one such file in a repository took the whole
+    /// `poly fmt` run down with it -- exit 101, nothing formatted, and in the
+    /// editor the daemon itself. Every case here reached the panic before the
+    /// error stopped being pretty_graphql's to write.
+    #[test]
+    fn a_graphql_error_at_the_first_byte_is_a_message_not_a_crash() {
+        for broken in ["!!!\n", "}\n", "&\n", ""] {
+            let err = format_file(Path::new("a.graphql"), broken)
+                .expect_err(&format!("{broken:?}: expected a parse failure"))
+                .to_string();
+            assert!(
+                poly_core::diag::parse_position(&err).is_some(),
+                "{broken:?}: {err:?} has no position"
+            );
+        }
+    }
+
+    /// PHP takes all three knobs, and like lua has no `honored` arm saying so,
+    /// so each is asserted against output only it could produce.
+    #[test]
+    fn php_honors_all_three_format_options() {
+        let php = |text: &str, opts| format("php", Path::new("a.php"), text, opts);
+
+        // Four spaces are mago's default, so both a two-space indent and a tab
+        // can only have come from the knob that asked for them.
+        let body = "<?php\nif ($x) {\nreturn 1;\n}\n";
+        let two = php(
+            body,
+            FormatOptions {
+                line_width: None,
+                indent_width: Some(2),
+                use_tabs: None,
+            },
+        )
+        .expect("php formats")
+        .expect("the indent has to change");
+        assert!(two.contains("\n  return 1;"), "{two}");
+        let tabbed = php(
+            body,
+            FormatOptions {
+                line_width: None,
+                indent_width: None,
+                use_tabs: Some(true),
+            },
+        )
+        .expect("php formats")
+        .expect("the indent has to change");
+        assert!(tabbed.contains("\n\treturn 1;"), "{tabbed}");
+
+        // Inside mago's default 120 columns and outside 40, so the wrapping is
+        // the setting and nothing else.
+        let call = "<?php\n\n$result = compute($alpha, $beta, $gamma, $delta, $epsilon);\n";
+        assert_eq!(
+            php(call, FormatOptions::default()).unwrap(),
+            None,
+            "already formatted at the default width"
+        );
+        let narrow = php(
+            call,
+            FormatOptions {
+                line_width: Some(40),
+                indent_width: None,
+                use_tabs: None,
+            },
+        )
+        .expect("php formats")
+        .expect("40 columns cannot hold that line");
+        assert!(narrow.contains("\n    $alpha,"), "{narrow}");
+    }
+
+    /// A PHP file that does not parse is an error that says where.
+    ///
+    /// mago's own `ParseError` names neither the position nor the file, and a
+    /// `poly fmt` line with no position is one no editor can place -- which is
+    /// why this goes through the parser a second time. The offsets here are the
+    /// ones that were worth checking for GraphQL: the first byte, and an empty
+    /// file.
+    #[test]
+    fn a_php_parse_failure_is_a_message_with_a_position() {
+        for broken in [
+            "<?php\nclass X {\n",
+            "<?php\n$x = ;\n",
+            "<?php\nfunction (\n",
+        ] {
+            let err = format_file(Path::new("a.php"), broken)
+                .expect_err(&format!("{broken:?}: expected a parse failure"))
+                .to_string();
+            assert!(
+                poly_core::diag::parse_position(&err).is_some(),
+                "{broken:?}: {err:?} has no position"
+            );
+        }
+
+        // Neither an empty file nor one that is all inline HTML is broken PHP:
+        // both are a document with no statements in it, which is what a `.phtml`
+        // template is until the first `<?php`. The empty file gains the newline
+        // every file here ends with, and the template is returned untouched --
+        // both checked against the released binary, because a formatter that
+        // reindented somebody's HTML would be the reason not to ship this.
+        assert_eq!(
+            format_file(Path::new("a.php"), "").unwrap().as_deref(),
+            Some("\n")
+        );
+        let html = "<div>\n  <p>hello</p>\n</div>\n";
+        assert_eq!(format_file(Path::new("a.phtml"), html).unwrap(), None);
     }
 
     #[test]

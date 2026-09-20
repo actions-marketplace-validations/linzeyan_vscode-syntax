@@ -1,12 +1,31 @@
-# typos discovers files itself, so this is the only place it can be told that
-# a "misspelling" is load-bearing. Mapping a word to itself allows it.
+# Where this repo tells poly that a "misspelling" is load-bearing. Mapping a
+# word to itself allows it, case-insensitively.
 [default.extend-words]
 # Deliberate misspellings inside parser test fixtures — correcting them would
 # mean the tests no longer exercise what they claim to.
 teh = "teh"
 titel = "titel"
 varialbles = "varialbles"
+# The same, for the workflow rules' fixtures. Each of these is the misspelling
+# whose detection the test is about -- `ubunutu-latest` is what
+# actions-unknown-runner exists to catch, and correcting it would leave the test
+# asserting that a correct label is reported.
+biuld = "biuld"
+pusg = "pusg"
+reqest = "reqest"
+ubunutu = "ubunutu"
+# The same, for the spell checker's own fixtures: `lint::spell` is tested
+# against the exact words and positions typos 1.49.1 reported, so these have to
+# stay misspelt to mean anything. `recieve` covers `Recieve` too, which is the
+# case-preservation the test is there to pin.
+abandonned = "abandonned"
+recieve = "recieve"
+reciever = "reciever"
+seperate = "seperate"
 # Field name in biome's JSON diagnostics; we deserialize what biome emits.
 advices = "advices"
+# Method name in yaml_parser's AST (`Flow::double_qouted_scalar`). Upstream's
+# spelling, and the only way to call it.
+qouted = "qouted"
 # HashiCorp, in grammar source rationales.
 Hashi = "Hashi"

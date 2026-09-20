@@ -12,9 +12,29 @@ POLY := cli/target/release/poly
 # is appended after the verb instead of folded into a `cargo ...` variable.
 MANIFEST := --manifest-path cli/Cargo.toml
 
+# The release profile ships fat LTO and codegen-units = 1, which is right for
+# the binary users install and wrong for every build made here: measured on this
+# tree, a one-line change cost 111s before these two overrides and 2s after.
+# Almost none of that was compiling -- touching poly-cli and touching poly-core
+# both cost about 115s, because what is being paid for is a whole-program relink
+# of a 30MB binary rather than the crate that changed.
+#
+# ci.yml sets exactly these two, at the top, for exactly this reason: nothing
+# either of us builds is what ships. build.yml and release.yml compile the
+# profile as written, and that is what users install. So this is CI's override,
+# local, and a green `make gates` is still CI's answer to the same question.
+#
+# `make build CARGO_PROFILE_RELEASE_LTO=fat` gets the shipping profile back for
+# a size or throughput measurement. It rebuilds every dependency, which is why
+# it is a flag rather than the default.
+CARGO_PROFILE_RELEASE_LTO ?= false
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS ?= 16
+export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
+
 .DEFAULT_GOAL := help
-.PHONY: help build test lint notices pins dogfood smoke probe e2e gates version \
-	grammars bump control clean
+.PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
+	version grammars tokdeps grammar-diff grammar-corpus editor-diff mermaid-diff engine-diff \
+	lsp-fmt-diff bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -44,6 +64,18 @@ notices: ## THIRD-PARTY-NOTICES still matches cargo metadata
 pins: ## External tool versions and hashes are locked
 	python3 tools/tool-sync.py --check
 
+# The third drift gate, and the one whose failure mode is documentation rather
+# than a build: poly.example.toml is generated, so a tool poly pins or embeds
+# cannot quietly stop matching what the file says it does.
+#
+# --self-test first, for the same reason the notices gate has one. This compares
+# the binary against a file the binary wrote, so a generator that silently
+# stopped substituting would be regenerated into the committed copy and pass
+# from then on. A gate that stops working is worse than no gate.
+config: build ## poly.example.toml still matches what `poly config export` writes
+	$(POLY) config export --self-test
+	$(POLY) config export | diff -u poly.example.toml -
+
 # poly run over its own repo. --strict so a missing toolchain fails here rather
 # than quietly formatting less than a developer's machine does.
 dogfood: build ## poly formats and lints its own repo
@@ -58,6 +90,29 @@ smoke: build ## LSP handshake and formatting over stdio
 # is a check nobody is running.
 probe: build ## Language server proxy, against whichever servers are installed
 	python3 tools/lsp-proxy-probe.py $(POLY)
+
+# Its own target rather than more of `probe`: this one is about gofumpt and
+# golangci-lint, which is `poly check`'s side of Go and not the proxy's, and it
+# needs a Go toolchain rather than a language server.
+go: build ## poly's Go support end to end: gofumpt, golangci-lint, editor vs CI
+	python3 tools/go-acceptance.py $(POLY)
+
+# The other whole-directory linter, and the only one whose scopes nest by
+# default. Needs no toolchain at all: poly downloads tflint, and its bundled
+# ruleset wants neither `tflint --init` nor `terraform init`.
+tf: build ## poly's Terraform lint end to end: editor vs CI, and nested modules
+	python3 tools/tf-acceptance.py $(POLY)
+
+# The third whole-scope linter, and the only one that compiles to answer. Skips
+# loudly without cargo or the clippy component; the fixture has no dependencies
+# so the compile it does need is seconds, not minutes.
+rust: build ## poly's Rust lint end to end: editor vs CI, workspace scope, no duplicates
+	python3 tools/rust-acceptance.py $(POLY)
+
+# The Go half of `poly deadcode` is inside `make go`, where it has a go.work
+# control. This is knip and vulture; each skips loudly without its tool.
+deadcode: build ## poly deadcode outside Go: knip paths resolve, vulture stays out of the venv
+	python3 tools/deadcode-acceptance.py $(POLY)
 
 # typecheck first, same as CI: the extension host takes half a minute to boot,
 # and a type error does not need it.
@@ -83,13 +138,107 @@ editor: ## Typecheck, test, build and package poly-editor
 # The tokenizer deps go to /tmp rather than into the repo: they are two
 # packages this repo does not otherwise depend on, and pnpm has them cached
 # after the first run.
-grammars: ## Generated syntax files match sources.json; grammars tokenize
+#
+# The manifest is written rather than `pnpm init`ed. pnpm 11 writes a
+# `devEngines.packageManager` block pinned to `^<the version that ran init>`
+# with `onFail: download`, so the very next pnpm command in that directory
+# fetches whatever 11.x is newest and runs the check on a pnpm nothing here
+# pinned -- and when that download is half-written, the failure is
+# `pnpm: line 1: This: command not found`, which names neither pnpm nor this
+# target. Two keys are all `pnpm add` needs.
+grammars: tokdeps ## Generated syntax files match sources.json; grammars tokenize
 	python3 tools/grammar-sync.py --check
-	@mkdir -p /tmp/poly-tokdeps
-	@test -d /tmp/poly-tokdeps/node_modules/vscode-textmate || ( \
-		pnpm --dir /tmp/poly-tokdeps init >/dev/null && \
-		pnpm --dir /tmp/poly-tokdeps add vscode-textmate vscode-oniguruma >/dev/null )
 	node tools/tokenize-check.mjs /tmp/poly-tokdeps/node_modules
+
+# The guard asks for the files the check imports, not for the directory that
+# holds them, and repairs by starting over. macOS prunes /tmp by age and leaves
+# the tree behind: a `test -d` on the package saw two empty `release/`
+# directories, called the deps installed, and `make gates` failed mid-release on
+# ERR_MODULE_NOT_FOUND rather than on anything in this repo. `pnpm add` will not
+# mend that tree either -- the store link is still there, so it reports the
+# package present and writes nothing back. Measured: after deleting one file,
+# `pnpm add` left it deleted.
+TOKDEPS_ENTRY = /tmp/poly-tokdeps/node_modules/vscode-textmate/release/main.js
+TOKDEPS_WASM = /tmp/poly-tokdeps/node_modules/vscode-oniguruma/release/onig.wasm
+
+tokdeps:
+	@test -s $(TOKDEPS_ENTRY) && test -s $(TOKDEPS_WASM) || ( \
+		rm -rf /tmp/poly-tokdeps && mkdir -p /tmp/poly-tokdeps && \
+		printf '{"name":"poly-tokdeps","private":true}\n' > /tmp/poly-tokdeps/package.json && \
+		pnpm --dir /tmp/poly-tokdeps add vscode-textmate vscode-oniguruma >/dev/null )
+
+# The two differential audits. Neither is in `gates`, and the reason is the same
+# for both: they compare poly against software this repo does not ship. One
+# needs a VSCode installation to read the built-in grammars out of, the other
+# downloads the replaced extensions from the marketplace. A gate that goes red
+# because somebody upgraded their editor is a gate people learn to ignore.
+#
+# What they answer is the question no fixture can: `tokenize-check` and
+# poly-editor's unit tests both only ever ask poly what it thinks. These ask the
+# thing poly replaced the same question and compare the two answers.
+#
+# VSCODE_EXTENSIONS overrides which installation is the reference; running it
+# against two versions is how an upstream improvement is told apart from a
+# regression, because a real regression survives both.
+grammar-diff: tokdeps ## poly's grammars against the built-ins they take over
+	node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
+
+# The same comparison over VSCode's own colorize fixtures -- the files it
+# tokenizes in its own tests, most of them named for the issue number of a
+# highlighting bug somebody reported. Its own target because this one needs the
+# network, where `grammar-diff` needs only an installed editor.
+#
+# It earned the extra target on its first run: two fixtures it flagged were the
+# comparison's fault rather than poly's, and fixing that found a case the
+# repo's own fixtures could not reach.
+grammar-corpus: tokdeps ## grammar-diff over VSCode's own colorize fixtures (downloads them)
+	POLY_DIFF_CORPUS="$$(node tools/colorize-corpus.mjs)" \
+		node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
+
+editor-diff: ## poly-editor against the extensions it replaces (downloads them)
+	node tools/editor-diff/run.js
+
+# The one differential whose reference ships inside the editor rather than
+# beside it: from 1.135 VSCode draws mermaid fences itself, and poly's renderer
+# exists for the versions before that. It launches one extension host twice --
+# once with the built-in in charge, once with it disabled -- and compares what
+# reached the page, so "the same document renders the same on either side of
+# 1.135" is measured rather than asserted. Needs a 1.135+ build in
+# extensions/lsp/.vscode-test, which `make e2e` downloads.
+mermaid-diff: ## poly-editor's mermaid rendering against VSCode's built-in
+	node tools/mermaid-diff/run.js
+
+# The third differential, and the only one where poly does not replace the
+# upstream so much as swallow it: `poly fmt` and `poly check` link their
+# engines in as libraries. Every test in this repo therefore asks the engine a
+# question through poly, and none of them can tell "poly drives it the way its
+# project does" apart from "poly drives it some other way and no fixture
+# noticed".
+#
+# Twelve engines, and only three of them have a CLI to install. For the rest --
+# the dprint plugins, the g-plane formatters, mago -- the comparison is against
+# the expected output each project keeps beside its own inputs, which is the
+# file its CI holds it to. `make engine-diff <name>` is not a thing make does;
+# run the script directly to pick one:
+#
+#     python3 tools/engine-diff.py cli/target/release/poly markup_fmt
+#
+# Out of `gates` for the same reason as the other two, plus one of its own: it
+# clones each project at the tag its version names, so it is the only target
+# here that a GitHub outage can turn red.
+engine-diff: build ## poly's embedded engines against the projects they embed (clones them)
+	python3 tools/engine-diff.py $(POLY)
+
+# The fourth, and the only one with nothing to download and no table of allowed
+# differences: both sides are this binary. poly-lsp's whole promise is that the
+# editor and CI give one answer, and every other test here asks only one of the
+# two paths -- `smoke` drives the daemon, `dogfood` drives the CLI, and neither
+# would notice them drifting apart.
+#
+# Not in `gates` only because that list mirrors ci.yml's jobs; unlike the other
+# three this one would run anywhere, and belongs in both once added.
+lsp-fmt-diff: build ## `poly lsp` formatting against `poly fmt`, over this repo
+	python3 tools/lsp-fmt-diff.py $(POLY)
 
 # Given the binary as well, so this asks the same question CI asks: not just
 # whether the files agree with each other, but whether the thing users run
@@ -97,16 +246,30 @@ grammars: ## Generated syntax files match sources.json; grammars tokenize
 version: build ## Check every version string agrees, binary included
 	python3 tools/bump.py --check $(POLY)
 
-# The order is ci.yml's, so a failure here fails at the same point CI would.
-# The list is ci.yml's too: this claims a green run means the push is already
+# The list is ci.yml's: this claims a green run means the push is already
 # checked the way CI checks it, and a gate missing from here makes that a lie.
-gates: lint test notices pins smoke probe dogfood version grammars e2e editor ## Everything above, in CI's order
+#
+# The order is ci.yml's four jobs read end to end -- cli, then acceptance, then
+# grammars, then extensions. CI runs them in parallel and a developer cannot, so
+# this is the serial reading of the same list rather than the same order; what
+# still holds is that a failure here lands on the gate CI would name.
+gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0
+#
+# poly.example.toml carries the version twice ("read out of poly X.Y.Z itself",
+# "the whole set, as of poly X.Y.Z") and bump.py cannot rewrite it: the file is
+# generated, and the generator is the binary, which does not exist at the new
+# version until after the manifests move. So bump rebuilds and regenerates
+# rather than leaving a tree that only `make config` would call wrong -- the
+# 0.10.0 bump left exactly that tree and CI found it.
 bump: ## Move every version string to VERSION=x.y.z
 	@test -n "$(VERSION)" || { echo "usage: make bump VERSION=x.y.z" >&2; exit 1; }
 	python3 tools/bump.py $(VERSION)
+	cargo build --release --manifest-path cli/Cargo.toml
+	$(POLY) config export > poly.example.toml
+	python3 tools/bump.py --check $(POLY)
 
 # make control REF=v0.7.0
 #
