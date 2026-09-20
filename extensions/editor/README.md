@@ -220,6 +220,11 @@ poly 的 `engines.vscode` 是 `^1.85.0`，而這個功能實際生效的區間�
   原始碼、其他語言的 fence class）**全等**，37 種圖表裡 poly 畫得出 36 種、寬高到像素一致。
   差異只剩三筆：zenuml（見下）、`layout: elk`（見下），以及 `info` 圖——那張圖畫的內容
   就是 mermaid 版本號，兩邊分別是 11.17.0 與 11.17.2。
+- **1.85 與 1.120 上也量過**：內建只有 1.135 以上才存在，所以上面那組比對證明的是 poly 在
+  它會讓開的版本上畫得對。差分因此另外跑 poly 在 **1.85**（`engines.vscode` 的下限）與
+  **1.120**，對照 poly 在 1.138 的結果——兩個都零差異。（1.85 原本有一筆：帶 `click` 指令的
+  圖整張畫不出來，因為 mermaid 走 `URL.canParse`，那是 Chromium 120 才有的 API。已補
+  polyfill。）
 - **`zenuml` 是唯一畫不出來的類型**：它不是 mermaid 本體的圖表，是內建額外註冊的
   external diagram（`@mermaid-js/mermaid-zenuml`）。沒有跟進的理由是它相依 `@zenuml/core`
   ——9.7 MB，而且會把 React、antlr4、highlight.js、marked 一整串拉進 preview bundle，

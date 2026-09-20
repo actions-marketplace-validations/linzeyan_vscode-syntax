@@ -25,26 +25,55 @@ const SCRATCH = join(tmpdir(), "poly-mermaid-diff");
 const OUT = join(ROOT, ".logs", "audit", "mermaid-diff.json");
 
 const BUILT_IN = "vscode.mermaid-markdown-features";
+const CACHE = join(ROOT, "extensions", "lsp", ".vscode-test");
+
+/**
+ * The editors poly's own renderer is asked to draw on, beside the newest one.
+ *
+ * The reference comparison can only run where the built-in exists, which is
+ * 1.135 and later -- and that is exactly the range where poly stands down. So
+ * the parity it proves is about a renderer nobody runs. These two are the range
+ * poly actually serves: the floor its `engines.vscode` claims, and the version
+ * on this machine. What they answer is "does poly draw there what it draws on
+ * the editor the comparison used".
+ */
+const SERVED = ["1.85.0", "1.120.0"];
 
 /**
  * The newest VSCode already downloaded, because the built-in only exists in
  * 1.135 and later and there is no point downloading a second copy of one.
+ *
+ * Ordered by version number and not by name. The cache also holds the old
+ * builds `SERVED` asks for, and a string sort puts `1.85.0` after `1.138.0`:
+ * the reference run then launched an editor with no built-in renderer in it,
+ * measured poly against poly, and reported that the two agreed.
  */
 function cachedVSCode() {
-  const cache = join(ROOT, "extensions", "lsp", ".vscode-test");
-  if (!existsSync(cache)) return null;
-  const build = readdirSync(cache).filter((d) => d.startsWith("vscode-")).sort().pop();
+  if (!existsSync(CACHE)) return null;
+  const builds = readdirSync(CACHE)
+    .map((name) => ({ name, version: /(\d+)\.(\d+)\.(\d+)$/.exec(name) }))
+    .filter((build) => build.name.startsWith("vscode-") && build.version)
+    .sort((a, b) =>
+      Number(a.version[1]) - Number(b.version[1])
+      || Number(a.version[2]) - Number(b.version[2])
+      || Number(a.version[3]) - Number(b.version[3])
+    );
+  const build = builds.pop();
   if (!build) return null;
-  const macos = join(cache, build, "Visual Studio Code.app", "Contents", "MacOS");
+  const macos = join(CACHE, build.name, "Visual Studio Code.app", "Contents", "MacOS");
   return existsSync(macos) ? join(macos, readdirSync(macos)[0]) : null;
 }
 
-async function measure(extraArgs, out) {
+async function measure(extraArgs, out, version) {
   await runTests({
     extensionDevelopmentPath: EDITOR,
     extensionTestsPath: resolve(__dirname, "suite.js"),
     extensionTestsEnv: { POLY_MERMAID_OUT: out, POLY_EDITOR_DIST: EDITOR },
-    ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
+    // A named version is downloaded; without one the newest cached build is
+    // reused. `cachePath` keeps both out of a `.vscode-test/` beside the
+    // sources, which is where the harness puts it by default.
+    ...(version ? { version, cachePath: CACHE } : {}),
+    ...(!version && cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
     launchArgs: [
       `--folder-uri=${pathToFileURL(join(SCRATCH, "workspace")).toString()}`,
       `--user-data-dir=${join(SCRATCH, "user-data")}`,
@@ -101,8 +130,14 @@ function unrendered(theirs, ours) {
     .map(([name]) => name);
 }
 
-/** What the two sides disagree about for one case, field by field. */
-function differences(theirs, ours) {
+/**
+ * What the two sides disagree about for one case, field by field.
+ *
+ * Labelled rather than named, because this answers two questions with the same
+ * arithmetic: poly against the built-in on one editor, and poly against itself
+ * on two editors.
+ */
+function differences(theirs, ours, labels = ["built-in", "poly"]) {
   const rows = [];
   for (const [name, mine] of Object.entries(ours.cases)) {
     const other = theirs.cases[name];
@@ -123,7 +158,7 @@ function differences(theirs, ours) {
     ) {
       const a = JSON.stringify(other[field]);
       const b = JSON.stringify(mine[field]);
-      if (a !== b) diff[field] = { "built-in": other[field], poly: mine[field] };
+      if (a !== b) diff[field] = { [labels[0]]: other[field], [labels[1]]: mine[field] };
     }
     // Geometry is compared with a tolerance: the same diagram drawn with two
     // themes differs by a few pixels of stroke and font metrics, and calling
@@ -133,7 +168,7 @@ function differences(theirs, ours) {
       const b = mine[field] ?? 0;
       const bigger = Math.max(a, b);
       if (bigger > 0 && Math.abs(a - b) / bigger > 0.15) {
-        diff[field] = { "built-in": a, poly: b };
+        diff[field] = { [labels[0]]: a, [labels[1]]: b };
       }
     }
     if (Object.keys(diff).length > 0) {
@@ -158,8 +193,19 @@ async function main() {
 
   assertMeasured(theirs);
   assertMeasured(ours);
+  // The reference has to be the reference. Every field can be measured, every
+  // case can agree, and the whole comparison still mean nothing -- which is
+  // what happened when the editor picked for it turned out to predate the
+  // built-in, leaving poly to agree with itself.
+  if (theirs.side !== "built-in") {
+    throw new Error(
+      `VSCode ${theirs.vscode} has no built-in mermaid renderer to compare against; it arrived in 1.135`,
+    );
+  }
+  if (theirs.vscode !== ours.vscode) {
+    throw new Error(`the two sides ran on ${theirs.vscode} and ${ours.vscode}, so nothing is held equal`);
+  }
   const rows = differences(theirs, ours);
-  writeFileSync(OUT, `${JSON.stringify({ theirs, ours, differences: rows }, null, 2)}\n`);
 
   console.log(`\nVSCode ${theirs.vscode}, ${Object.keys(ours.cases).length} cases`);
   for (const side of [theirs, ours]) {
@@ -179,20 +225,55 @@ async function main() {
   if (hoverable === 0) {
     console.log("  !! no case drew a tooltip: the interaction probe measured nothing");
   }
+  report(rows);
+
+  // The second question, and the one the reference comparison cannot reach:
+  // poly's renderer only runs below 1.135, and everything above was measured on
+  // an editor where it stands down.
+  const served = {};
+  for (const version of SERVED) {
+    console.log(`\npoly on ${version} against poly on ${theirs.vscode}:`);
+    // An editor poly claims to support but cannot run on is the finding, not a
+    // crash: the run keeps going and the failure is written down with the rest.
+    try {
+      const one = await measure(
+        ["--disable-extension", BUILT_IN],
+        join(SCRATCH, `poly-${version}.json`),
+        version,
+      );
+      assertMeasured(one);
+      if (one.pageErrors.length > 0) {
+        console.log(`  !! page errors: ${one.pageErrors.slice(0, 3).join(" | ")}`);
+      }
+      one.differences = differences(ours, one, [theirs.vscode, one.vscode]);
+      served[version] = one;
+      report(one.differences);
+    } catch (error) {
+      served[version] = { failed: String(error.message ?? error) };
+      console.log(`  !! poly could not be measured on ${version}: ${served[version].failed}`);
+    }
+  }
+
+  writeFileSync(OUT, `${JSON.stringify({ theirs, ours, served, differences: rows }, null, 2)}\n`);
+  console.log(`\nfull report: ${OUT.replace(`${ROOT}/`, "")}`);
+}
+
+/** One comparison's result, in the shape a reader can scan. */
+function report(rows) {
   if (rows.length === 0) {
     console.log("no differences");
-  } else {
-    console.log(`\n${rows.length} cases differ:`);
-    for (const { name, group, diff } of rows) {
-      console.log(`\n  ${group}/${name}`);
-      for (const [field, sides] of Object.entries(diff)) {
-        console.log(`    ${field}:`);
-        console.log(`      built-in: ${JSON.stringify(sides["built-in"])}`);
-        console.log(`      poly:     ${JSON.stringify(sides.poly)}`);
+    return;
+  }
+  console.log(`\n${rows.length} cases differ:`);
+  for (const { name, group, diff } of rows) {
+    console.log(`\n  ${group}/${name}`);
+    for (const [field, sides] of Object.entries(diff)) {
+      console.log(`    ${field}:`);
+      for (const [label, value] of Object.entries(sides)) {
+        console.log(`      ${label}: ${JSON.stringify(value)}`);
       }
     }
   }
-  console.log(`\nfull report: ${OUT.replace(`${ROOT}/`, "")}`);
 }
 
 main().catch((error) => {

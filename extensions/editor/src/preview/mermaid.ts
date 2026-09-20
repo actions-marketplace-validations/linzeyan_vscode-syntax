@@ -17,6 +17,23 @@ import mermaid from "mermaid";
 import { MERMAID_CLASS } from "../mermaid";
 import { editorTheme } from "./theme";
 
+// mermaid resolves a `click X "url"` through `URL.canParse`, which Chromium
+// only grew in 120. VSCode 1.85 -- the floor `engines.vscode` claims -- ships
+// an older one, and measured there every diagram carrying a click directive
+// failed to draw at all, not just the link. Three lines is cheaper than
+// raising the floor for one directive, and it is inert everywhere newer.
+const urlStatics = URL as unknown as {
+  canParse?: (url: string, base?: string) => boolean;
+};
+urlStatics.canParse ??= (url, base) => {
+  try {
+    void new URL(url, base);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 // The one extra layout the built-in registers that poly can also carry: MIT,
 // 242 KB, and its only dependency is the d3 already in this bundle. The other
 // one is ELK, whose `elkjs` is EPL-2.0 -- `layout: elk` therefore still falls
