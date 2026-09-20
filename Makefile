@@ -150,9 +150,20 @@ grammars: tokdeps ## Generated syntax files match sources.json; grammars tokeniz
 	python3 tools/grammar-sync.py --check
 	node tools/tokenize-check.mjs /tmp/poly-tokdeps/node_modules
 
+# The guard asks for the files the check imports, not for the directory that
+# holds them, and repairs by starting over. macOS prunes /tmp by age and leaves
+# the tree behind: a `test -d` on the package saw two empty `release/`
+# directories, called the deps installed, and `make gates` failed mid-release on
+# ERR_MODULE_NOT_FOUND rather than on anything in this repo. `pnpm add` will not
+# mend that tree either -- the store link is still there, so it reports the
+# package present and writes nothing back. Measured: after deleting one file,
+# `pnpm add` left it deleted.
+TOKDEPS_ENTRY = /tmp/poly-tokdeps/node_modules/vscode-textmate/release/main.js
+TOKDEPS_WASM = /tmp/poly-tokdeps/node_modules/vscode-oniguruma/release/onig.wasm
+
 tokdeps:
-	@mkdir -p /tmp/poly-tokdeps
-	@test -d /tmp/poly-tokdeps/node_modules/vscode-textmate || ( \
+	@test -s $(TOKDEPS_ENTRY) && test -s $(TOKDEPS_WASM) || ( \
+		rm -rf /tmp/poly-tokdeps && mkdir -p /tmp/poly-tokdeps && \
 		printf '{"name":"poly-tokdeps","private":true}\n' > /tmp/poly-tokdeps/package.json && \
 		pnpm --dir /tmp/poly-tokdeps add vscode-textmate vscode-oniguruma >/dev/null )
 
