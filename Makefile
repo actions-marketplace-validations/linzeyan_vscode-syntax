@@ -33,7 +33,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
-	version grammars tokdeps grammar-diff grammar-corpus editor-diff mermaid-diff engine-diff \
+	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus editor-diff mermaid-diff engine-diff \
 	lsp-fmt-diff ref-lens bump control clean
 
 help: ## List targets
@@ -194,6 +194,20 @@ tokdeps:
 # regression, because a real regression survives both.
 grammar-diff: tokdeps ## poly's grammars against the built-ins they take over
 	node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
+
+# The same two sides, asked what they do with input nobody would write. An
+# audit for the same reason as grammar-diff -- the reference is an editor this
+# repo does not ship -- and it takes two minutes, which is a minute and a half
+# more than any gate here.
+#
+# It reads the pass line off the editor rather than inventing one: VSCode gives
+# a line a time limit and paints the remainder as plain text when it runs out,
+# so a grammar fails when it would cost a reader their highlighting. Findings
+# the built-in of the same name shares are upstream's and reported; the ones
+# from grammars poly ships alone are listed by name in the tool, with a reason
+# each, and anything new is red.
+grammar-fuzz: tokdeps ## What the grammars do with input nobody would write on purpose
+	node tools/grammar-fuzz.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
 
 # The same comparison over VSCode's own colorize fixtures -- the files it
 # tokenizes in its own tests, most of them named for the issue number of a
