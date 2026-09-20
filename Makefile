@@ -33,7 +33,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
-	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus editor-diff mermaid-diff engine-diff \
+	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff mermaid-diff engine-diff \
 	lsp-fmt-diff ref-lens toc-fuzz list-fuzz bump control clean
 
 help: ## List targets
@@ -242,6 +242,24 @@ grammar-fuzz: tokdeps ## What the grammars do with input nobody would write on p
 # repo's own fixtures could not reach.
 grammar-corpus: tokdeps ## grammar-diff over VSCode's own colorize fixtures (downloads them)
 	POLY_DIFF_CORPUS="$$(node tools/colorize-corpus.mjs)" \
+		node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
+
+# And the same again over ordinary source files, sampled from a tree on this
+# machine. The other three corpora are all written to be interesting -- one
+# representative file per language, constructs that only matter when two
+# grammars are compared, files that broke a grammar badly enough to be filed as
+# an issue. None of them is a thousand lines of somebody's actual code, which is
+# where a grammar spends its life.
+#
+# GRAMMAR_TREE says which tree; there is no default worth committing, so this is
+# the one target here that does nothing useful on a machine that is not this one.
+#
+# It found the audit's own defect on its first run: a markdown file with a C++
+# block was reported as repainted by thirteen injections poly adds to markdown,
+# none of which has anything to do with C++.
+GRAMMAR_TREE ?= $(HOME)/git/resources
+grammar-real: tokdeps ## grammar-diff over ordinary source files from GRAMMAR_TREE
+	POLY_DIFF_CORPUS="$$(node tools/real-corpus.mjs $(GRAMMAR_TREE))" \
 		node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
 
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
