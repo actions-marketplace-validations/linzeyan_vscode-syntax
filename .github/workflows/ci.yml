@@ -59,6 +59,12 @@ jobs:
       - name: Package VSIX
         working-directory: extensions/syntax
         run: pnpm dlx @vscode/vsce package --allow-missing-repository
+      # Every grammar the manifest declares is really inside the package. vsce
+      # packages what `.vscodeignore` leaves behind without reading
+      # `contributes`, so a grammar that failed to generate ships as a manifest
+      # entry pointing at nothing and the extension installs without a word.
+      - name: The package contains what the manifest declares
+        run: python3 tools/vsix-check.py extensions/syntax
 
   # release.yml publishes this image, but a Dockerfile only exercised when a
   # tag is pushed is a Dockerfile that breaks when a tag is pushed. Native
@@ -454,6 +460,7 @@ jobs:
           pnpm test
           pnpm run build
           pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
+          python3 ../../tools/vsix-check.py .
       # Where the reference lens lands, asked of a real language server rather
       # than of a symbol tree this repo wrote. Here rather than in its own job
       # because both halves are already paid for: the step above installed

@@ -127,6 +127,7 @@ e2e: ## Typecheck and run the extension tests in a real extension host
 editor: ## Typecheck, test, build and package poly-editor
 	cd extensions/editor && pnpm run typecheck && pnpm test && pnpm run build && \
 		pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
+	python3 tools/vsix-check.py extensions/editor
 
 # A gate and not an audit, unlike the *-diff targets: it asserts about poly
 # alone, and the provider it asks -- TypeScript's -- ships inside the editor,
