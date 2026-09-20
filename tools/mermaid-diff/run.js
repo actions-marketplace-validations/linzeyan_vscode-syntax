@@ -68,7 +68,17 @@ async function measure(extraArgs, out) {
  * whole markdown half of this differential passed while measuring nothing.
  */
 function assertMeasured(report) {
-  const fields = ["containers", "sources", "codeFences", "svgs", "shapes", "labels", "failed"];
+  const fields = [
+    "containers",
+    "sources",
+    "codeFences",
+    "svgs",
+    "shapes",
+    "labels",
+    "failed",
+    "titles",
+    "tooltip",
+  ];
   for (const [name, one] of Object.entries(report.cases)) {
     const missing = fields.filter((field) => one[field] === undefined);
     if (missing.length > 0) {
@@ -107,6 +117,8 @@ function differences(theirs, ours) {
         "shapes",
         "labels",
         "failed",
+        "titles",
+        "tooltip",
       ]
     ) {
       const a = JSON.stringify(other[field]);
@@ -159,6 +171,13 @@ async function main() {
   const blank = unrendered(theirs, ours);
   if (blank.length > 0) {
     console.log(`  !! neither side drew: ${blank.join(", ")}`);
+  }
+  // The hover probe answers nothing unless some case draws a node carrying a
+  // tooltip, and a probe that measures nothing agrees with itself. Same shape
+  // as `unrendered`, one layer up.
+  const hoverable = Object.values(theirs.cases).filter((one) => one.titles > 0).length;
+  if (hoverable === 0) {
+    console.log("  !! no case drew a tooltip: the interaction probe measured nothing");
   }
   if (rows.length === 0) {
     console.log("no differences");

@@ -81,7 +81,10 @@ async function draw(): Promise<void> {
     try {
       // The id is what mermaid names the temporary element it measures in, so
       // it has to differ per diagram and per pass.
-      const { svg } = await mermaid.render(`${MERMAID_CLASS}-${mine}-${index}`, source);
+      const { svg, bindFunctions } = await mermaid.render(
+        `${MERMAID_CLASS}-${mine}-${index}`,
+        source,
+      );
       if (mine !== generation) {
         return;
       }
@@ -99,6 +102,13 @@ async function draw(): Promise<void> {
         drawn.removeAttribute("height");
       }
       block.replaceWith(host);
+      // The svg is only half of what a render produces. The other half is this,
+      // and under `securityLevel: "strict"` what it binds is the node tooltips
+      // -- a `click` callback is refused when the source is parsed, but a
+      // tooltip is attached here or not at all. Called after the host is in the
+      // document, because it selects inside what it is given and positions the
+      // tooltip from a layout that does not exist until then.
+      bindFunctions?.(host);
     } catch (error) {
       if (mine !== generation) {
         return;

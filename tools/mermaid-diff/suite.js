@@ -100,7 +100,21 @@ ${scriptTag}
         .filter(Boolean)
       : [];
     const box = svg ? svg.getBoundingClientRect() : null;
+    // Interactivity is invisible to geometry. mermaid hands the caller a
+    // bindFunctions, and what it binds under securityLevel strict is the node
+    // tooltips -- click callbacks are refused at parse time on both sides. A
+    // renderer that never calls it draws every shape and label identically and
+    // still loses every tooltip, which is what happened here.
+    const titled = Array.from(section.querySelectorAll("g.node")).filter((el) => el.hasAttribute("title"));
+    let tooltip = "";
+    if (titled.length > 0) {
+      titled[0].dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      tooltip = clean(document.querySelector(".mermaidTooltip")?.textContent ?? "");
+      titled[0].dispatchEvent(new MouseEvent("mouseout", { bubbles: true }));
+    }
     return {
+      titles: titled.length,
+      tooltip,
       svgs: section.querySelectorAll("svg").length,
       shapes: svg ? svg.querySelectorAll("g").length : 0,
       width: box ? Math.round(box.width) : 0,
