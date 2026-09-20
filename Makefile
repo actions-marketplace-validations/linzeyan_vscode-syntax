@@ -34,7 +34,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
 	version grammars tokdeps grammar-diff grammar-corpus editor-diff mermaid-diff engine-diff \
-	lsp-fmt-diff bump control clean
+	lsp-fmt-diff ref-lens bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -127,6 +127,17 @@ e2e: ## Typecheck and run the extension tests in a real extension host
 editor: ## Typecheck, test, build and package poly-editor
 	cd extensions/editor && pnpm run typecheck && pnpm test && pnpm run build && \
 		pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
+
+# A gate and not an audit, unlike the *-diff targets: it asserts about poly
+# alone, and the provider it asks -- TypeScript's -- ships inside the editor,
+# so there is nothing to download but VSCode itself, which `e2e` already has.
+#
+# It exists because `make editor`'s unit tests could not see the defect that
+# put a count over every parameter and local: they assert against a symbol tree
+# written by the same hand as the rule, and the rule was wrong about what a
+# real server reports.
+ref-lens: ## Where poly's reference lens lands, asked of a real language server
+	node tools/ref-lens-check/run.js
 
 # The offline half of ci.yml's grammars job. The other half re-fetches every
 # pinned grammar, which needs the network and a token; what stays here is
@@ -253,7 +264,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ref-lens ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0

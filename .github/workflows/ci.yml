@@ -454,6 +454,12 @@ jobs:
           pnpm test
           pnpm run build
           pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
+      # Where the reference lens lands, asked of a real language server rather
+      # than of a symbol tree this repo wrote. Here rather than in its own job
+      # because both halves are already paid for: the step above installed
+      # poly-editor, and the e2e step downloaded the VSCode this reuses.
+      - name: Reference lens lands on declarations only
+        run: xvfb-run -a make ref-lens
       # The other half of A9, here because it needs the tree the step above just
       # installed: what the preview bundle carries is decided by pnpm's
       # resolution, not by a manifest anyone can read without it.
