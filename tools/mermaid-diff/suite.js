@@ -47,7 +47,7 @@ function page(rendered, scriptTag, nonce, csp) {
 <head>
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 </head>
-<body class="vscode-dark">
+<body>
 ${sections}
 <script nonce="${nonce}">
   // Before anything renders: what the markdown layer produced. Taken here
@@ -62,6 +62,40 @@ ${sections}
   const api = acquireVsCodeApi();
   // The built-in's controls call this too, and a second call throws.
   window.acquireVsCodeApi = () => api;
+  // The variables the editor put on the page, read from the stylesheet it
+  // injected rather than from a list this file keeps: both renderers ask for
+  // names through fallback chains, and when a colour comes out different the
+  // question is whether the renderer chose differently or the editor offered
+  // something different. Enumerating them answers that without duplicating
+  // either renderer's table here, where it would drift.
+  //
+  // Both places they can live, because where the editor puts them is not
+  // documented and this has to hold across the version range: 1.138 sets them
+  // as inline style on the root element, and reading only stylesheets found
+  // none of them at all.
+  window.__vars = {};
+  const inline = document.documentElement.style;
+  for (const name of inline) {
+    if (name.startsWith("--vscode-")) {
+      window.__vars[name] = inline.getPropertyValue(name).trim();
+    }
+  }
+  for (const sheet of document.styleSheets) {
+    let rules;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      continue;
+    }
+    for (const rule of rules) {
+      if (!rule.style) continue;
+      for (const name of rule.style) {
+        if (name.startsWith("--vscode-")) {
+          window.__vars[name] = rule.style.getPropertyValue(name).trim();
+        }
+      }
+    }
+  }
   window.__before = {};
   for (const section of document.querySelectorAll("section[data-case]")) {
     const containers = section.querySelectorAll(".mermaid, .poly-mermaid");
@@ -112,9 +146,24 @@ ${scriptTag}
       tooltip = clean(document.querySelector(".mermaidTooltip")?.textContent ?? "");
       titled[0].dispatchEvent(new MouseEvent("mouseout", { bubbles: true }));
     }
+    // Every colour the drawing actually uses, as a set rather than a list:
+    // the two sides put the same shapes in a different DOM order, so asking
+    // "what is the first node's fill" invents differences. What this holds
+    // down is the other half of the theme question -- geometry says the same
+    // picture was drawn, and this says it was drawn in the same colours,
+    // which is the only thing the derived palette can get wrong on its own.
+    const palette = svg
+      ? [...new Set(
+        Array.from(svg.querySelectorAll("*")).flatMap((el) => {
+          const style = getComputedStyle(el);
+          return [style.fill, style.stroke, style.color];
+        }).filter((colour) => colour && colour !== "none"),
+      )].sort()
+      : [];
     return {
       titles: titled.length,
       tooltip,
+      palette,
       svgs: section.querySelectorAll("svg").length,
       shapes: svg ? svg.querySelectorAll("g").length : 0,
       width: box ? Math.round(box.width) : 0,
@@ -142,7 +191,18 @@ ${scriptTag}
       for (const section of document.querySelectorAll("section[data-case]")) {
         after[section.dataset.case] = measure(section);
       }
-      api.postMessage({ before: window.__before, after, pageErrors: errors });
+      // What the editor actually called this theme. The page does not set it:
+      // both renderers decide light from dark by reading it, so a suite that
+      // wrote it would be handing them the answer -- and one that never
+      // changed it would compare four identical measurements and call it
+      // agreement across four themes.
+      api.postMessage({
+        before: window.__before,
+        after,
+        pageErrors: errors,
+        bodyClass: document.body.className,
+        vars: window.__vars,
+      });
     }
   }, 250);
 </script>
@@ -150,16 +210,29 @@ ${scriptTag}
 </html>`;
 }
 
-exports.run = async function run() {
-  const builtIn = vscode.extensions.getExtension(BUILT_IN);
-  const side = builtIn ? "built-in" : "poly";
-  await vscode.extensions.getExtension("ricky.poly-editor").activate();
-  await builtIn?.activate();
+/**
+ * The themes to measure, and why more than one.
+ *
+ * poly derives mermaid's colours from `--vscode-*` through a table of fallback
+ * lists, and which entry in a list answers depends on the theme: a variable a
+ * dark theme defines may be absent from a light one, so the same table can send
+ * the two renderers to different colours without anything in the dark
+ * measurement moving. Four kinds because that is how many the editor has -- the
+ * two high-contrast ones are separate themes, not a dark theme with more
+ * contrast.
+ */
+const THEMES = (process.env.POLY_MERMAID_THEMES ?? "Default Dark Modern").split(",");
 
-  const rendered = [];
-  for (const one of CASES) {
-    rendered.push({ name: one.name, group: one.group, html: await renderCase(one.markdown) });
-  }
+/** Everything one theme's page reports, from a webview of its own. */
+async function measureTheme(theme, rendered, side, builtIn) {
+  await vscode.workspace.getConfiguration("workbench").update(
+    "colorTheme",
+    theme,
+    vscode.ConfigurationTarget.Global,
+  );
+  // The panel is created after the update so it opens into the new theme;
+  // the editor still needs a moment to push the variables down to webviews.
+  await new Promise((resolve) => setTimeout(resolve, 2000));
 
   const editorDist = join(process.env.POLY_EDITOR_DIST, "dist");
   const roots = [vscode.Uri.file(editorDist)];
@@ -197,9 +270,9 @@ exports.run = async function run() {
   });
   panel.dispose();
 
-  const report = {
-    side,
-    vscode: vscode.version,
+  return {
+    bodyClass: measured.bodyClass ?? "",
+    vars: measured.vars ?? {},
     cases: Object.fromEntries(
       rendered.map(({ name, group }) => [name, {
         group,
@@ -210,6 +283,28 @@ exports.run = async function run() {
     pageErrors: measured.pageErrors,
     timedOut: Boolean(measured.timedOut),
   };
+}
+
+exports.run = async function run() {
+  const builtIn = vscode.extensions.getExtension(BUILT_IN);
+  const side = builtIn ? "built-in" : "poly";
+  await vscode.extensions.getExtension("ricky.poly-editor").activate();
+  await builtIn?.activate();
+
+  // Once, outside the theme loop: what markdown-it makes of a fence does not
+  // depend on the colours, and 74 renders per theme is three times the wall
+  // clock for the same HTML.
+  const rendered = [];
+  for (const one of CASES) {
+    rendered.push({ name: one.name, group: one.group, html: await renderCase(one.markdown) });
+  }
+
+  const themes = {};
+  for (const theme of THEMES) {
+    themes[theme] = await measureTheme(theme, rendered, side, builtIn);
+    console.log(`${side}: measured ${Object.keys(themes[theme].cases).length} cases in ${theme}`);
+  }
+
+  const report = { side, vscode: vscode.version, themes };
   writeFileSync(process.env.POLY_MERMAID_OUT, `${JSON.stringify(report, null, 2)}\n`);
-  console.log(`${side}: measured ${Object.keys(report.cases).length} cases`);
 };

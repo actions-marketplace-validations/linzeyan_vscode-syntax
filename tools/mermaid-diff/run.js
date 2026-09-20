@@ -7,8 +7,10 @@
 // and after the editor is new enough for poly to stand down.
 //
 // Two launches of one extension host: the first with the built-in in charge,
-// the second with `--disable-extension` so poly is. Neither is a gate; it
-// compares poly against software this repo does not ship.
+// the second with `--disable-extension` so poly is. Each walks the editor
+// through four themes, because neither renderer is handed a palette -- both
+// derive one from the variables the theme puts on the page. Neither is a gate;
+// it compares poly against software this repo does not ship.
 //
 // Usage: node tools/mermaid-diff/run.js
 const { execFileSync } = require("node:child_process");
@@ -40,6 +42,26 @@ const CACHE = join(ROOT, "extensions", "lsp", ".vscode-test");
 const SERVED = ["1.85.0", "1.120.0"];
 
 /**
+ * The themes both renderers are asked to draw in.
+ *
+ * Neither of them is handed a palette: each derives mermaid's colours from the
+ * `--vscode-*` variables the editor puts on the page, through its own table of
+ * fallbacks. A table can agree in one theme and disagree in another -- a
+ * variable a dark theme defines need not exist in a light one -- so a
+ * difference here is invisible until the theme moves.
+ *
+ * The first one is the primary: it is what the cross-version runs use, because
+ * what those ask is whether an older editor draws the same picture, and the
+ * colour derivation does not depend on the editor's version.
+ */
+const THEMES = [
+  "Default Dark Modern",
+  "Default Light Modern",
+  "Default High Contrast",
+  "Default High Contrast Light",
+];
+
+/**
  * The newest VSCode already downloaded, because the built-in only exists in
  * 1.135 and later and there is no point downloading a second copy of one.
  *
@@ -64,11 +86,17 @@ function cachedVSCode() {
   return existsSync(macos) ? join(macos, readdirSync(macos)[0]) : null;
 }
 
-async function measure(extraArgs, out, version) {
+async function measure(extraArgs, out, version, themes = [THEMES[0]]) {
   await runTests({
     extensionDevelopmentPath: EDITOR,
     extensionTestsPath: resolve(__dirname, "suite.js"),
-    extensionTestsEnv: { POLY_MERMAID_OUT: out, POLY_EDITOR_DIST: EDITOR },
+    extensionTestsEnv: {
+      POLY_MERMAID_OUT: out,
+      POLY_EDITOR_DIST: EDITOR,
+      // One launch per side rather than one per theme: booting an extension
+      // host costs more than every diagram on the page put together.
+      POLY_MERMAID_THEMES: themes.join(","),
+    },
     // A named version is downloaded; without one the newest cached build is
     // reused. `cachePath` keeps both out of a `.vscode-test/` beside the
     // sources, which is where the harness puts it by default.
@@ -89,6 +117,42 @@ async function measure(extraArgs, out, version) {
   return JSON.parse(readFileSync(out, "utf8"));
 }
 
+/** One theme's measurement, in the shape the comparisons take. */
+function view(report, theme) {
+  const one = report.themes[theme];
+  if (!one) {
+    throw new Error(`${report.side}: theme ${theme} was never measured`);
+  }
+  return { side: report.side, vscode: report.vscode, theme, ...one };
+}
+
+/**
+ * That the editor really was in a different theme for each measurement.
+ *
+ * Both renderers read the body class to tell light from dark, so the page does
+ * not set it -- which leaves the `workbench.colorTheme` write as the only thing
+ * moving it. If that write does not take, four identical measurements compare
+ * equal and the report claims parity across four themes it never entered.
+ */
+function assertThemesDiffered(report) {
+  const seen = new Map();
+  for (const [theme, one] of Object.entries(report.themes)) {
+    if (!one.bodyClass) {
+      throw new Error(`${report.side}: the page carried no theme class in ${theme}`);
+    }
+    if (Object.keys(one.vars).length === 0) {
+      throw new Error(`${report.side}: no --vscode-* variables were readable in ${theme}`);
+    }
+    const twin = seen.get(one.bodyClass);
+    if (twin) {
+      throw new Error(
+        `${report.side}: ${theme} and ${twin} both drew under "${one.bodyClass}", so one of them never applied`,
+      );
+    }
+    seen.set(one.bodyClass, theme);
+  }
+}
+
 /**
  * Every field this compares, on every case, on both sides.
  *
@@ -107,6 +171,7 @@ function assertMeasured(report) {
     "failed",
     "titles",
     "tooltip",
+    "palette",
   ];
   for (const [name, one] of Object.entries(report.cases)) {
     const missing = fields.filter((field) => one[field] === undefined);
@@ -114,6 +179,24 @@ function assertMeasured(report) {
       throw new Error(`${report.side}: case ${name} measured nothing for ${missing.join(", ")}`);
     }
   }
+}
+
+/**
+ * What the two editors offered a renderer, where they differ.
+ *
+ * A palette difference has two possible authors: the renderer picked a
+ * different entry out of its fallback chain, or the editor handed it different
+ * paint. Only the second is visible here, and it is the one that makes a
+ * difference nobody has to fix -- an old editor whose theme is genuinely a
+ * different colour is not poly drawing it wrong.
+ */
+function themeVars(left, right) {
+  const names = new Set([...Object.keys(left.vars), ...Object.keys(right.vars)]);
+  const gone = [...names].filter((name) => !(name in right.vars));
+  const moved = [...names].filter((name) =>
+    name in left.vars && name in right.vars && left.vars[name] !== right.vars[name]
+  );
+  return { gone, moved };
 }
 
 /**
@@ -154,6 +237,7 @@ function differences(theirs, ours, labels = ["built-in", "poly"]) {
         "failed",
         "titles",
         "tooltip",
+        "palette",
       ]
     ) {
       const a = JSON.stringify(other[field]);
@@ -188,11 +272,9 @@ async function main() {
 
   execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
 
-  const theirs = await measure([], join(SCRATCH, "built-in.json"));
-  const ours = await measure(["--disable-extension", BUILT_IN], join(SCRATCH, "poly.json"));
+  const theirs = await measure([], join(SCRATCH, "built-in.json"), null, THEMES);
+  const ours = await measure(["--disable-extension", BUILT_IN], join(SCRATCH, "poly.json"), null, THEMES);
 
-  assertMeasured(theirs);
-  assertMeasured(ours);
   // The reference has to be the reference. Every field can be measured, every
   // case can agree, and the whole comparison still mean nothing -- which is
   // what happened when the editor picked for it turned out to predate the
@@ -205,56 +287,95 @@ async function main() {
   if (theirs.vscode !== ours.vscode) {
     throw new Error(`the two sides ran on ${theirs.vscode} and ${ours.vscode}, so nothing is held equal`);
   }
-  const rows = differences(theirs, ours);
+  assertThemesDiffered(theirs);
+  assertThemesDiffered(ours);
 
-  console.log(`\nVSCode ${theirs.vscode}, ${Object.keys(ours.cases).length} cases`);
-  for (const side of [theirs, ours]) {
-    if (side.timedOut) console.log(`  !! ${side.side} timed out before the page settled`);
-    if (side.pageErrors.length > 0) {
-      console.log(`  !! ${side.side} page errors: ${side.pageErrors.slice(0, 3).join(" | ")}`);
+  const byTheme = {};
+  for (const theme of THEMES) {
+    const left = view(theirs, theme);
+    const right = view(ours, theme);
+    assertMeasured(left);
+    assertMeasured(right);
+    if (left.bodyClass !== right.bodyClass) {
+      throw new Error(
+        `${theme} drew under "${left.bodyClass}" for the built-in and "${right.bodyClass}" for poly`,
+      );
     }
+    byTheme[theme] = differences(left, right);
+
+    console.log(
+      `\nVSCode ${theirs.vscode}, ${theme} (${left.bodyClass}), ${Object.keys(right.cases).length} cases`,
+    );
+    for (const side of [left, right]) {
+      if (side.timedOut) console.log(`  !! ${side.side} timed out before the page settled`);
+      if (side.pageErrors.length > 0) {
+        console.log(`  !! ${side.side} page errors: ${side.pageErrors.slice(0, 3).join(" | ")}`);
+      }
+    }
+    const blank = unrendered(left, right);
+    if (blank.length > 0) {
+      console.log(`  !! neither side drew: ${blank.join(", ")}`);
+    }
+    // The hover probe answers nothing unless some case draws a node carrying a
+    // tooltip, and a probe that measures nothing agrees with itself. Same shape
+    // as `unrendered`, one layer up.
+    const hoverable = Object.values(left.cases).filter((one) => one.titles > 0).length;
+    if (hoverable === 0) {
+      console.log("  !! no case drew a tooltip: the interaction probe measured nothing");
+    }
+    report(byTheme[theme]);
   }
-  const blank = unrendered(theirs, ours);
-  if (blank.length > 0) {
-    console.log(`  !! neither side drew: ${blank.join(", ")}`);
-  }
-  // The hover probe answers nothing unless some case draws a node carrying a
-  // tooltip, and a probe that measures nothing agrees with itself. Same shape
-  // as `unrendered`, one layer up.
-  const hoverable = Object.values(theirs.cases).filter((one) => one.titles > 0).length;
-  if (hoverable === 0) {
-    console.log("  !! no case drew a tooltip: the interaction probe measured nothing");
-  }
-  report(rows);
 
   // The second question, and the one the reference comparison cannot reach:
   // poly's renderer only runs below 1.135, and everything above was measured on
   // an editor where it stands down.
   const served = {};
+  const primary = view(ours, THEMES[0]);
   for (const version of SERVED) {
-    console.log(`\npoly on ${version} against poly on ${theirs.vscode}:`);
+    console.log(`\npoly on ${version} against poly on ${theirs.vscode}, ${THEMES[0]}:`);
     // An editor poly claims to support but cannot run on is the finding, not a
     // crash: the run keeps going and the failure is written down with the rest.
     try {
-      const one = await measure(
+      const measured = await measure(
         ["--disable-extension", BUILT_IN],
         join(SCRATCH, `poly-${version}.json`),
         version,
       );
+      const one = view(measured, THEMES[0]);
       assertMeasured(one);
+      if (one.bodyClass !== primary.bodyClass) {
+        throw new Error(
+          `${version} drew under "${one.bodyClass}" and ${theirs.vscode} under "${primary.bodyClass}"`,
+        );
+      }
+      one.differences = differences(primary, one, [theirs.vscode, one.vscode]);
+      one.varsDiff = themeVars(primary, one);
+      served[version] = one;
+      // Colour is reported apart from the rest here, and only here. An older
+      // editor's theme is a different theme: it defines fewer variables and
+      // gives some of the ones it has another value, so a palette that follows
+      // it is the derivation working rather than failing. What has to hold
+      // across versions is the drawing -- same shapes, same labels, same size.
+      const colourOnly = one.differences.filter((row) => Object.keys(row.diff).join() === "palette");
+      const { gone, moved } = one.varsDiff;
+      console.log(
+        `  ${version} defines ${gone.length} fewer colour variables than ${theirs.vscode} `
+          + `and gives ${moved.length} of the shared ones another value`,
+      );
       if (one.pageErrors.length > 0) {
         console.log(`  !! page errors: ${one.pageErrors.slice(0, 3).join(" | ")}`);
       }
-      one.differences = differences(ours, one, [theirs.vscode, one.vscode]);
-      served[version] = one;
-      report(one.differences);
+      if (colourOnly.length > 0) {
+        console.log(`  ${colourOnly.length} cases differ in colour alone, which follows from that`);
+      }
+      report(one.differences.filter((row) => !colourOnly.includes(row)));
     } catch (error) {
       served[version] = { failed: String(error.message ?? error) };
       console.log(`  !! poly could not be measured on ${version}: ${served[version].failed}`);
     }
   }
 
-  writeFileSync(OUT, `${JSON.stringify({ theirs, ours, served, differences: rows }, null, 2)}\n`);
+  writeFileSync(OUT, `${JSON.stringify({ theirs, ours, served, differences: byTheme }, null, 2)}\n`);
   console.log(`\nfull report: ${OUT.replace(`${ROOT}/`, "")}`);
 }
 
