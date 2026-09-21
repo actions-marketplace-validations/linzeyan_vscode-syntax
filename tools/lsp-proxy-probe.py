@@ -177,6 +177,11 @@ message(greet("world"))
 # navigate: until bash-language-server was registered a .sh reached the editor
 # with no symbols at all, so the outline was empty and the reference lens had no
 # declaration to count over.
+#
+# `noisy` is deliberate and so is the tab in front of its body: it is the only
+# defect in the file, it is the one thing `lint_finding` reads, and the tab is
+# what makes the column worth asserting. It sits last so every line number
+# written down below it stays what it was.
 MAIN_SH = """#!/usr/bin/env bash
 
 greet() {
@@ -188,6 +193,10 @@ main() {
 }
 
 main "$@"
+
+noisy() {
+\techo $1
+}
 """
 
 
@@ -232,6 +241,16 @@ class Case:
     # one -- selene and swiftlint are the only linters poly runs in the editor
     # for a proxied language, and no language server looks for what they do.
     merged_source: str = None
+    # One finding poly's own linter must publish for this language, exactly
+    # once, at exactly this spot: `(code, line, character)`, zero-based.
+    #
+    # Shell is where both halves have been wrong. bash-language-server runs
+    # shellcheck too when it finds one on PATH, and poly used to let both sets
+    # through, so every defect in a proxied .sh was reported twice; and
+    # shellcheck counts a tab as eight columns, which poly passed to the editor
+    # as an offset, so the squiggle sat seven characters right of the defect.
+    # The fixture's finding is on a tab-indented line for that second reason.
+    lint_finding: tuple = None
     # Set where poly downloads the server rather than finding it on PATH, which
     # buf is the only one of. PATH says nothing about whether it will run, so
     # the skip below has nothing to read -- and a case that can only ever skip
@@ -575,6 +594,9 @@ CASES = [
         # case with a name written down for it.
         document_symbol="greet",
         workspace_symbol="greet",
+        # `\techo $1` on the last line but one: shellcheck calls that column 14
+        # with the tab expanded, and the editor has to be told 6.
+        lint_finding=("shellcheck/SC2086", 13, 6),
         # The one server here thinner than COMMON: a shell call has no argument
         # list to fill in, so there is no signatureHelp to declare. What it does
         # have is the three a reader of somebody else's script needs -- rename,
@@ -1501,6 +1523,56 @@ def run(case, logs=True, graceful=True):
         sources = sorted({d.get("source") for d in both[-1]})
         print(f"  diagnostics merged from {sources}")
 
+    if case.lint_finding:
+        code, line, character = case.lint_finding
+
+        def matches(d):
+            return (
+                f"{d.get('source')}/{d.get('code')}" == code
+                and d["range"]["start"]["line"] == line
+            )
+
+        # Wait for the server's own set before reading anything. poly lints on
+        # open and answers in milliseconds; bash-language-server shells out to
+        # shellcheck and publishes seconds later, so without this the probe sees
+        # only poly's copy -- and then a binary that really does report every
+        # defect twice sails through. Measured against v0.14.0, which does: the
+        # duplicate lands in the second publish, and one pump gets there.
+        deadline = time.time() + 60
+        attempt = 0
+        while len(diagnostics_for(uri)) < 2 and time.time() < deadline:
+            ask(910000 + attempt, "textDocument/hover", at_call)
+            time.sleep(0.5)
+            attempt += 1
+        assert len(diagnostics_for(uri)) >= 2, (
+            f"{case.language}: only poly published in 60s. A shellcheck is on "
+            "PATH, so the server had one to run and its copy should have "
+            "arrived -- until it does, whether poly drops it is untested"
+        )
+
+        # Every publish, not the last one: the editor is left showing whichever
+        # arrived last, and the duplicate is in the message before it.
+        counts = [len([d for d in p if matches(d)]) for p in diagnostics_for(uri)]
+        assert counts and max(counts) == 1, (
+            f"{case.language}: {code} on line {line} was published "
+            f"{max(counts, default=0)} times in one message, wanted once -- "
+            "bash-language-server runs shellcheck too, and both sets reaching "
+            "the editor is how every defect in a proxied .sh got reported twice"
+        )
+        # And where every copy of it points. shellcheck reports a tab as eight
+        # columns; the editor reads the number as an offset into the line.
+        spots = {
+            d["range"]["start"]["character"]
+            for p in diagnostics_for(uri)
+            for d in p
+            if matches(d)
+        }
+        assert spots == {character}, (
+            f"{case.language}: {code} starts at {sorted(spots)}, not [{character}]"
+            " -- a tab is one character by the time the editor sees it"
+        )
+        print(f"  {code} published once per message, at {line}:{character}")
+
     if case.diagnostics:
         # The server owns diagnostics for its language. publishDiagnostics
         # replaces the whole set for a uri, so poly publishing its own (empty)
@@ -2390,6 +2462,36 @@ def a_cancelled_request_reaches_the_server():
         raise AssertionError("poly did not exit")
     shutil.rmtree(root, ignore_errors=True)
 
+
+def a_shellcheck_where_the_server_will_look():
+    """Put poly's own shellcheck on PATH before any server starts.
+
+    `lint_finding` checks that one defect reaches the editor once, and there is
+    only something to check when two copies exist: poly's, and the one
+    bash-language-server produces by shelling out to a shellcheck it found on
+    PATH. poly keeps its shellcheck in a tool cache that is deliberately not on
+    PATH, so on a machine without a system one -- CI is exactly that -- the
+    server would publish nothing and the assertion would pass having tested
+    nothing. Producing it here makes the doubling real everywhere instead of
+    leaving the interesting half to whatever the host happens to have.
+    """
+    printed = subprocess.run(
+        [BIN, "tools", "install", "shellcheck"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for line in printed.split("\n"):
+        if line.startswith("shellcheck:"):
+            found = line.split(":", 1)[1].strip()
+            os.environ["PATH"] = (
+                os.path.dirname(found) + os.pathsep + os.environ["PATH"]
+            )
+            return
+    raise AssertionError(f"`poly tools install shellcheck` printed no path:\n{printed}")
+
+
+a_shellcheck_where_the_server_will_look()
 
 ran = []
 for probe in CASES:
