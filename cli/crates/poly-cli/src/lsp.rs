@@ -379,12 +379,13 @@ impl Diagnostics {
         // shellcheck both on PATH: one `.sh` came back with every finding
         // twice.
         //
-        // Deduplicated on the line rather than the whole range because the two
-        // copies disagree about the column. shellcheck reports a tab as eight
-        // columns; bash-language-server converts to the code units LSP asks
-        // for, poly passes shellcheck's number straight through, and on a
-        // tab-indented line they differ by seven. Matching ranges would have
-        // left exactly the tab-indented duplicates, which is most of them.
+        // Deduplicated on the line rather than the whole range. Two programs
+        // reading the same defect are not obliged to underline it identically,
+        // and this pair did not: shellcheck reports a tab as eight columns, and
+        // poly passed that number through where bash-language-server converted
+        // it, so every tab-indented duplicate survived a range match. poly's
+        // side of that is fixed now and these two agree, which is exactly why
+        // the key must not depend on it -- the next pair gets no such promise.
         let mine: HashSet<_> = all.iter().filter_map(finding_key).collect();
         all.extend(
             self.downstream
