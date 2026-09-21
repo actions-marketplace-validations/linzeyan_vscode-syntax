@@ -10,6 +10,7 @@ import {
   enterAction,
   indentTarget,
   listItem,
+  movedWith,
   outdentTarget,
   renumberedAfterMove,
   renumberedTail,
@@ -328,9 +329,13 @@ async function shiftListItem(
     return;
   }
   // Moving an item between two levels leaves both of the ordered lists it
-  // touched counting wrong, and they are rewritten in the same edit so the
-  // whole move is one undo.
-  const renumbers = renumberedAfterMove(lines, cursor.line, target);
+  // touched counting wrong, and takes the item's own content with it -- its
+  // wrapped paragraph and its child lists, which mean nothing at the column
+  // they were left at. All of it in the same edit, so the whole move is one undo.
+  const renumbers = [
+    ...renumberedAfterMove(lines, cursor.line, target),
+    ...movedWith(lines, cursor.line, target),
+  ];
   await editor.edit((builder) => {
     builder.replace(
       new vscode.Range(cursor.line, 0, cursor.line, item.indent.length),

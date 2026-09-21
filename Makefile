@@ -33,8 +33,8 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
-	version grammars tokdeps grammar-diff grammar-corpus editor-diff mermaid-diff engine-diff \
-	lsp-fmt-diff bump control clean
+	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff mermaid-diff engine-diff \
+	lsp-fmt-diff ref-lens toc-fuzz list-fuzz bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -127,6 +127,41 @@ e2e: ## Typecheck and run the extension tests in a real extension host
 editor: ## Typecheck, test, build and package poly-editor
 	cd extensions/editor && pnpm run typecheck && pnpm test && pnpm run build && \
 		pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
+	python3 tools/vsix-check.py extensions/editor
+
+# A gate and not an audit, unlike the *-diff targets: it asserts about poly
+# alone, and the provider it asks -- TypeScript's -- ships inside the editor,
+# so there is nothing to download but VSCode itself, which `e2e` already has.
+#
+# It exists because `make editor`'s unit tests could not see the defect that
+# put a count over every parameter and local: they assert against a symbol tree
+# written by the same hand as the rule, and the rule was wrong about what a
+# real server reports.
+ref-lens: ## Where poly's reference lens lands, asked of a real language server
+	node tools/ref-lens-check/run.js
+
+# The table of contents command's anchors against the ones the preview writes,
+# for a corpus of headings that is half stated rules and half generated
+# punctuation. A gate for the same reason ref-lens is: the reference is the
+# editor's own renderer, reached through `markdown.api.render`, and nothing is
+# downloaded that `e2e` has not already downloaded.
+#
+# It earned its place on the first run: 134 of 448 anchors did not match, in a
+# module whose comment claimed its slugifier was VSCode's "transcribed
+# character for character". The unit tests could not see it -- they assert
+# against examples written by whoever wrote the rule.
+toc-fuzz: ## Heading anchors against the ones VSCode's own preview writes
+	node tools/toc-fuzz/run.js
+
+# What Tab, Shift+Tab and Enter do to a list, against `poly fmt`. A gate rather
+# than an audit because the reference is this repo's own binary: no VSCode, no
+# network, one process for the whole corpus.
+#
+# It earned its place on its first run too, with six defects the unit tests
+# could not see -- starting with Tab moving an item's marker and leaving its
+# children behind, at a column that made them somebody else's.
+list-fuzz: build ## List keystrokes against the formatter that has to accept them
+	node tools/list-fuzz/run.js
 
 # The offline half of ci.yml's grammars job. The other half re-fetches every
 # pinned grammar, which needs the network and a token; what stays here is
@@ -183,6 +218,20 @@ tokdeps:
 grammar-diff: tokdeps ## poly's grammars against the built-ins they take over
 	node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
 
+# The same two sides, asked what they do with input nobody would write. An
+# audit for the same reason as grammar-diff -- the reference is an editor this
+# repo does not ship -- and it takes two minutes, which is a minute and a half
+# more than any gate here.
+#
+# It reads the pass line off the editor rather than inventing one: VSCode gives
+# a line a time limit and paints the remainder as plain text when it runs out,
+# so a grammar fails when it would cost a reader their highlighting. Findings
+# the built-in of the same name shares are upstream's and reported; the ones
+# from grammars poly ships alone are listed by name in the tool, with a reason
+# each, and anything new is red.
+grammar-fuzz: tokdeps ## What the grammars do with input nobody would write on purpose
+	node tools/grammar-fuzz.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
+
 # The same comparison over VSCode's own colorize fixtures -- the files it
 # tokenizes in its own tests, most of them named for the issue number of a
 # highlighting bug somebody reported. Its own target because this one needs the
@@ -193,6 +242,24 @@ grammar-diff: tokdeps ## poly's grammars against the built-ins they take over
 # repo's own fixtures could not reach.
 grammar-corpus: tokdeps ## grammar-diff over VSCode's own colorize fixtures (downloads them)
 	POLY_DIFF_CORPUS="$$(node tools/colorize-corpus.mjs)" \
+		node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
+
+# And the same again over ordinary source files, sampled from a tree on this
+# machine. The other three corpora are all written to be interesting -- one
+# representative file per language, constructs that only matter when two
+# grammars are compared, files that broke a grammar badly enough to be filed as
+# an issue. None of them is a thousand lines of somebody's actual code, which is
+# where a grammar spends its life.
+#
+# GRAMMAR_TREE says which tree; there is no default worth committing, so this is
+# the one target here that does nothing useful on a machine that is not this one.
+#
+# It found the audit's own defect on its first run: a markdown file with a C++
+# block was reported as repainted by thirteen injections poly adds to markdown,
+# none of which has anything to do with C++.
+GRAMMAR_TREE ?= $(HOME)/git/resources
+grammar-real: tokdeps ## grammar-diff over ordinary source files from GRAMMAR_TREE
+	POLY_DIFF_CORPUS="$$(node tools/real-corpus.mjs $(GRAMMAR_TREE))" \
 		node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
 
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
@@ -253,7 +320,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ref-lens toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0

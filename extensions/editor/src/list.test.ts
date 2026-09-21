@@ -6,6 +6,7 @@ import {
   enterAction,
   indentTarget,
   listItem,
+  movedWith,
   outdentTarget,
   renumberedAfterMove,
   renumberedTail,
@@ -29,6 +30,39 @@ const enter = (text: string, index: number, dialect: Dialect = "markdown", colum
 /** The same pairs, for the renumbering Tab and Shift+Tab set off. */
 const moved = (text: string, index: number, indent: string) =>
   renumberedAfterMove(lines(text), index, indent).map((r) => [r.line, r.text]);
+
+/**
+ * The whole document a Tab or Shift+Tab produces.
+ *
+ * Composed the way the command composes it -- every span against the one
+ * snapshot -- because the interesting part of a move is how the spans meet.
+ */
+const shifted = (text: string, index: number, to: string) => {
+  const source = lines(text);
+  const out = source.slice();
+  const item = listItem(source[index])!;
+  const spans = [
+    ...renumberedAfterMove(source, index, to),
+    ...movedWith(source, index, to),
+    { line: index, start: 0, end: item.indent.length, text: to },
+  ];
+  for (const span of spans.sort((a, b) => b.line - a.line || b.start - a.start)) {
+    out[span.line] = out[span.line].slice(0, span.start) + span.text + out[span.line].slice(span.end);
+  }
+  return out.join("\n");
+};
+
+/** The same, for the renumbering an inserted item sets off. */
+const retailed = (text: string, index: number) => {
+  const source = lines(text);
+  const out = source.slice();
+  for (
+    const span of renumberedTail(source, index).sort((a, b) => b.line - a.line || b.start - a.start)
+  ) {
+    out[span.line] = out[span.line].slice(0, span.start) + span.text + out[span.line].slice(span.end);
+  }
+  return out.join("\n");
+};
 
 /** What else the same keystroke rewrites, as `[line, text]` pairs. */
 const also = (text: string, index: number, column?: number) =>
@@ -225,12 +259,12 @@ test("a checkbox goes with its words when Enter moves all of them", () => {
 });
 
 test("Tab renumbers both the list it left and the list it joined", () => {
-  // The differential's case: `2. test` becomes the third item of the nested
-  // list, and the item under it stops being that list's first.
-  assert.deepEqual(
-    moved("1. a\n   1. x\n   2. y\n2. b\n   1. z", 3, "   "),
-    [[3, "3."], [4, "4."]],
-  );
+  // The differential's case: `2. b` becomes the third item of the nested list.
+  // Its own `1. z` is not renumbered with it -- that is b's child list, which
+  // travels with b and goes on being numbered from 1. This expectation used to
+  // read `[[3, "3."], [4, "4."]]`, which is the module renumbering an item's
+  // child into its parent's list; `make list-fuzz` is what noticed.
+  assert.deepEqual(moved("1. a\n   1. x\n   2. y\n2. b\n   1. z", 3, "   "), [[3, "3."]]);
   // Nothing above it at the new level, so it starts the list it just made.
   assert.deepEqual(moved("1. a\n2. b", 1, "   "), [[1, "1."]]);
   // Outdenting splits the old list: the item joins the outer one, and what
@@ -240,4 +274,79 @@ test("Tab renumbers both the list it left and the list it joined", () => {
   assert.deepEqual(moved("- a\n  - x\n- b", 2, "  "), []);
   // The all-`1.` style is a style, not a list that lost count.
   assert.deepEqual(moved("1. a\n   1. x\n   1. y\n2. b", 3, "   "), [[3, "1."]]);
+});
+
+test("a move takes the item's own content with it", () => {
+  // An item is not a line. Left at their old column, the wrapped remainder of
+  // its paragraph and its child list belong to whatever item now owns that
+  // column -- which is how `- c` below stopped being a child and became a
+  // sibling. Every one of these was wrong until `make list-fuzz` asked the
+  // formatter, and the unit tests could not see it: they were written from the
+  // same reading of the rule as the rule.
+  assert.equal(shifted("- a\n- b\n  wrapped", 1, "  "), "- a\n  - b\n    wrapped");
+  assert.equal(shifted("- a\n- b\n  - c", 1, "  "), "- a\n  - b\n    - c");
+  assert.equal(shifted("- a\n  - b\n    - c", 1, ""), "- a\n- b\n  - c");
+  // The marker changes width on the way, so the children follow the content
+  // column and not the indent: `11.` joining a list at 4 becomes `2.`, and its
+  // child moves three columns while its marker moves four.
+  assert.equal(
+    shifted("10. a\n    1. x\n11. b\n    1. y", 2, "    "),
+    "10. a\n    1. x\n    2. b\n       1. y",
+  );
+});
+
+test("outdenting absorbs what followed the item, at its new content column", () => {
+  // The item is now the shallowest thing there, so its old siblings are inside
+  // it whether anyone meant that or not -- markdown has no column that keeps
+  // them where they were. They land at its content column, as one list.
+  assert.equal(shifted("1. a\n   - b\n   - c", 1, ""), "1. a\n- b\n  - c");
+  // Indenting is the other way round: the list it left is still there, and the
+  // items still in it are none of this keystroke's business.
+  assert.equal(shifted("- a\n- b\n- c", 1, "  "), "- a\n  - b\n- c");
+});
+
+test("a renumbering that changes a marker's width takes that item's children", () => {
+  // `9.` becoming `10.` moves the item's content column from 3 to 4, and a
+  // child left at 3 is outside it -- which reads as the child having been
+  // promoted into the list its parent is in.
+  assert.equal(retailed("8. a\n9. b\n   - x", 0), "8. a\n10. b\n    - x");
+});
+
+test("what an outdent absorbs joins the item's own list, in its style", () => {
+  // The item's children are already a list at the column its old siblings land
+  // at, so the arrivals go on from where that list counted to.
+  assert.equal(
+    shifted("- a\n  1. x\n     1. p\n     2. q\n  2. y", 1, ""),
+    "- a\n1. x\n   1. p\n   2. q\n   3. y",
+  );
+  // And when that list is the all-`1.` style, they adopt it. The items already
+  // in it are left alone because they are already right; these carried a number
+  // in from the list they were in, and that number is now wrong twice over.
+  assert.equal(
+    shifted("- a\n  1. x\n     1. p\n     1. q\n  2. y", 1, ""),
+    "- a\n1. x\n   1. p\n   1. q\n   1. y",
+  );
+});
+
+test("moving a bullet out of the way lets the lists it separated count on", () => {
+  // A bullet belongs to no numbering of its own, which is why this used to
+  // return nothing at all -- but it was the wall between two ordered lists, and
+  // indenting it away makes them one.
+  assert.equal(shifted("1. a\n- b\n7. c\n8. d", 1, "   "), "1. a\n   - b\n2. c\n3. d");
+});
+
+test("a quote is not a level to move under", () => {
+  // Two spaces do not put a list inside a quote, they only indent it, and the
+  // formatter puts it straight back.
+  assert.equal(indent("> quoted\n\n- a", 2), undefined);
+  assert.equal(indent("> quoted\n- a", 1), undefined);
+});
+
+test("Enter inside an item that carries on below belongs to the editor", () => {
+  // A marker inserted here would leave the rest of the item hanging off it at a
+  // column that is no longer its own. The same line with nothing under it is
+  // this module's, as it always was.
+  assert.equal(enter("- a\n  wrapped", 0), undefined);
+  assert.equal(enter("- a\n  - child", 0), undefined);
+  assert.equal(enter("- a\n- b", 0), ">- ");
 });

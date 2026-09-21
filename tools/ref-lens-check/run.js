@@ -1,0 +1,187 @@
+#!/usr/bin/env node
+// Does the reference lens land on declarations, and only on declarations?
+//
+// This is a gate rather than an audit: it compares poly against nothing but
+// itself, needs no marketplace extension and no network, and the provider it
+// leans on -- TypeScript's -- ships inside the editor. It exists because the
+// lens once counted parameters and locals, a defect the unit tests could not
+// see: they assert against a symbol tree written by the same hand that wrote
+// the rule, and the rule was wrong about what a real server reports.
+//
+// Usage: node tools/ref-lens-check/run.js
+const { execFileSync } = require("node:child_process");
+const { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join, resolve } = require("node:path");
+const { pathToFileURL } = require("node:url");
+
+const ROOT = resolve(__dirname, "..", "..");
+const EDITOR = join(ROOT, "extensions", "editor");
+const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
+
+const SCRATCH = join(tmpdir(), "poly-ref-lens");
+const WORKSPACE = join(SCRATCH, "workspace");
+const OUT = join(ROOT, ".logs", "audit", "ref-lens.json");
+const CACHE = join(ROOT, "extensions", "lsp", ".vscode-test");
+
+/**
+ * One file holding each shape the rule has an opinion about.
+ *
+ * Every name in it is either a declaration another file can reach -- and so
+ * worth a count -- or a name that lives and dies inside one body. The second
+ * kind is the point: `radius` is a property, `twice` and `scaled` are locals,
+ * `value` and `factor` are parameters, and `inner` is a local of an arrow
+ * function, which TypeScript reports as a child of the `Variable` the arrow is
+ * assigned to rather than of a function.
+ */
+const FIXTURE = `export interface Shape {
+  area(): number;
+}
+
+export class Circle implements Shape {
+  private radius = 1;
+
+  area(): number {
+    const twice = this.radius * 2;
+    return twice * Math.PI;
+  }
+}
+
+export function scale(value: number, factor: number): number {
+  const scaled = value * factor;
+  return scaled;
+}
+
+export const scaleAll = (values: number[]): number[] => {
+  const inner = values.map((one) => scale(one, 2));
+  return inner;
+};
+
+export enum Unit {
+  Meter,
+  Inch,
+}
+`;
+
+/** The declarations that must carry a lens, by the text of their line. */
+const EXPECTED = [
+  "export interface Shape {",
+  "area(): number;",
+  "export class Circle implements Shape {",
+  "area(): number {",
+  "export function scale(value: number, factor: number): number {",
+  "export const scaleAll = (values: number[]): number[] => {",
+  "export enum Unit {",
+  // `Unit.Meter` is a name another file writes, so it is counted -- and it is
+  // counted through `Variable`, which is the kind TypeScript reports an enum
+  // member as. Excluding `EnumMember` would not have taken this lens away.
+  // Measured 2026-09-20: the editor's own TypeScript lens puts a count here too.
+  "Meter,",
+];
+
+/** Names that must never carry one, and what each of them is. */
+const FORBIDDEN = {
+  // The one place poly and the editor deliberately disagree: VSCode counts a
+  // property, poly does not. "Who writes this field" is a different question
+  // from the one a count above a declaration answers -- see `COUNTED_KINDS`.
+  "private radius = 1;": "a property",
+  "const twice = this.radius * 2;": "a local",
+  "const scaled = value * factor;": "a local",
+  "const inner = values.map((one) => scale(one, 2));": "a local of an arrow function",
+};
+
+/** The newest VSCode already downloaded, ordered by version and not by name. */
+function cachedVSCode() {
+  if (!existsSync(CACHE)) return null;
+  const builds = readdirSync(CACHE)
+    .map((name) => ({ name, version: /(\d+)\.(\d+)\.(\d+)$/.exec(name) }))
+    .filter((build) => build.name.startsWith("vscode-") && build.version)
+    .sort((a, b) =>
+      Number(a.version[1]) - Number(b.version[1])
+      || Number(a.version[2]) - Number(b.version[2])
+      || Number(a.version[3]) - Number(b.version[3])
+    );
+  const build = builds.pop();
+  if (!build) return null;
+  const macos = join(CACHE, build.name, "Visual Studio Code.app", "Contents", "MacOS");
+  return existsSync(macos) ? join(macos, readdirSync(macos)[0]) : null;
+}
+
+async function main() {
+  delete process.env.ELECTRON_RUN_AS_NODE;
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("VSCODE_")) delete process.env[key];
+  }
+  mkdirSync(WORKSPACE, { recursive: true });
+  mkdirSync(join(ROOT, ".logs", "audit"), { recursive: true });
+  const fixture = join(WORKSPACE, "shapes.ts");
+  writeFileSync(fixture, FIXTURE);
+  // The editor's own TypeScript lens, turned on so this file can be read by
+  // both and the two placements compared. It is the only second opinion
+  // available offline about where a reference count belongs, and poly's README
+  // claims the editor ships one for TypeScript and nothing else.
+  mkdirSync(join(WORKSPACE, ".vscode"), { recursive: true });
+  writeFileSync(
+    join(WORKSPACE, ".vscode", "settings.json"),
+    `${
+      JSON.stringify(
+        {
+          "typescript.referencesCodeLens.enabled": true,
+          "typescript.referencesCodeLens.showOnAllFunctions": true,
+        },
+        null,
+        2,
+      )
+    }\n`,
+  );
+
+  execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
+
+  await runTests({
+    extensionDevelopmentPath: EDITOR,
+    extensionTestsPath: resolve(__dirname, "suite.js"),
+    extensionTestsEnv: { POLY_LENS_FIXTURE: fixture, POLY_LENS_OUT: OUT },
+    ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
+    launchArgs: [
+      `--folder-uri=${pathToFileURL(WORKSPACE).toString()}`,
+      `--user-data-dir=${join(SCRATCH, "user-data")}`,
+      `--extensions-dir=${join(SCRATCH, "extensions")}`,
+      "--disable-workspace-trust",
+    ],
+  });
+
+  const report = JSON.parse(readFileSync(OUT, "utf8"));
+  const lensed = new Set(report.lenses.filter((one) => one.poly.length > 0).map((one) => one.text));
+  const problems = [];
+  // A lens that never appeared would pass a "no forbidden lenses" check on its
+  // own, so both halves are required: the declarations have to be counted, and
+  // the names inside them have to be left alone.
+  for (const text of EXPECTED) {
+    if (!lensed.has(text)) problems.push(`no lens on a declaration: ${text}`);
+  }
+  for (const [text, what] of Object.entries(FORBIDDEN)) {
+    if (lensed.has(text)) problems.push(`lens on ${what}: ${text}`);
+  }
+
+  console.log(`\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens`);
+  console.log(
+    `  ${"line".padStart(4)}  ${"poly".padEnd(14)} ${"typescript".padEnd(13)} ${"kind".padEnd(11)} declaration`,
+  );
+  for (const one of report.lenses) {
+    console.log(
+      `  ${String(one.line + 1).padStart(4)}  ${one.poly.join(", ").padEnd(14)} `
+        + `${one.typescript.join(", ").padEnd(13)} ${one.kind.padEnd(11)} ${one.text}`,
+    );
+  }
+  if (problems.length > 0) {
+    console.error(`\n${problems.length} problem(s):`);
+    for (const problem of problems) console.error(`  ${problem}`);
+    process.exit(1);
+  }
+  console.log("\nevery declaration counted, nothing else touched");
+}
+
+main().catch((error) => {
+  console.error(error.message ?? error);
+  process.exit(1);
+});

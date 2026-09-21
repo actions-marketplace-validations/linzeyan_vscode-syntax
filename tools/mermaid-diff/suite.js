@@ -38,7 +38,7 @@ async function renderCase(markdown) {
  * them -- a document with many diagrams -- and because 40 extension-host round
  * trips to learn the same thing is 40 times the wall clock.
  */
-function page(rendered, scriptTag, nonce, csp) {
+function page(rendered, scriptTag, nonce, csp, probeStale) {
   const sections = rendered
     .map(({ name, html }) => `<section data-case="${name}">\n${html}\n</section>`)
     .join("\n");
@@ -47,7 +47,7 @@ function page(rendered, scriptTag, nonce, csp) {
 <head>
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 </head>
-<body class="vscode-dark">
+<body>
 ${sections}
 <script nonce="${nonce}">
   // Before anything renders: what the markdown layer produced. Taken here
@@ -62,6 +62,40 @@ ${sections}
   const api = acquireVsCodeApi();
   // The built-in's controls call this too, and a second call throws.
   window.acquireVsCodeApi = () => api;
+  // The variables the editor put on the page, read from the stylesheet it
+  // injected rather than from a list this file keeps: both renderers ask for
+  // names through fallback chains, and when a colour comes out different the
+  // question is whether the renderer chose differently or the editor offered
+  // something different. Enumerating them answers that without duplicating
+  // either renderer's table here, where it would drift.
+  //
+  // Both places they can live, because where the editor puts them is not
+  // documented and this has to hold across the version range: 1.138 sets them
+  // as inline style on the root element, and reading only stylesheets found
+  // none of them at all.
+  window.__vars = {};
+  const inline = document.documentElement.style;
+  for (const name of inline) {
+    if (name.startsWith("--vscode-")) {
+      window.__vars[name] = inline.getPropertyValue(name).trim();
+    }
+  }
+  for (const sheet of document.styleSheets) {
+    let rules;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      continue;
+    }
+    for (const rule of rules) {
+      if (!rule.style) continue;
+      for (const name of rule.style) {
+        if (name.startsWith("--vscode-")) {
+          window.__vars[name] = rule.style.getPropertyValue(name).trim();
+        }
+      }
+    }
+  }
   window.__before = {};
   for (const section of document.querySelectorAll("section[data-case]")) {
     const containers = section.querySelectorAll(".mermaid, .poly-mermaid");
@@ -112,9 +146,24 @@ ${scriptTag}
       tooltip = clean(document.querySelector(".mermaidTooltip")?.textContent ?? "");
       titled[0].dispatchEvent(new MouseEvent("mouseout", { bubbles: true }));
     }
+    // Every colour the drawing actually uses, as a set rather than a list:
+    // the two sides put the same shapes in a different DOM order, so asking
+    // "what is the first node's fill" invents differences. What this holds
+    // down is the other half of the theme question -- geometry says the same
+    // picture was drawn, and this says it was drawn in the same colours,
+    // which is the only thing the derived palette can get wrong on its own.
+    const palette = svg
+      ? [...new Set(
+        Array.from(svg.querySelectorAll("*")).flatMap((el) => {
+          const style = getComputedStyle(el);
+          return [style.fill, style.stroke, style.color];
+        }).filter((colour) => colour && colour !== "none"),
+      )].sort()
+      : [];
     return {
       titles: titled.length,
       tooltip,
+      palette,
       svgs: section.querySelectorAll("svg").length,
       shapes: svg ? svg.querySelectorAll("g").length : 0,
       width: box ? Math.round(box.width) : 0,
@@ -127,9 +176,79 @@ ${scriptTag}
     };
   }
 
+  // Whether a render that is already running gives way to the one after it.
+  //
+  // The preview sends its content again on every keystroke, so poly numbers
+  // each pass and drops the result of one that has been overtaken. Nothing
+  // exercised that: the corpus renders once, and a counter that is never raced
+  // is a counter that could be deleted without a test going red.
+  //
+  // The shape here is the one where the counter is load-bearing, and it took a
+  // run with the counter removed to find it. Two details decide whether this
+  // measures anything at all:
+  //
+  //   * the source is edited in place, in the same element. Replacing the
+  //     element leaves the older pass holding a node with no parent, and
+  //     replaceWith on a detached node does nothing -- so the page came out
+  //     right with the counter deleted, and the probe passed for no reason.
+  //   * the first source is the quick one and the second is the slow one. The
+  //     older pass has to finish first to have anything to corrupt; if it
+  //     finishes last, the newer drawing is already in the document and the
+  //     older one lands on a detached node again.
+  //
+  // With those two, an unguarded render leaves the abandoned drawing on screen
+  // for good: it replaces the block, and the pass that should have won then
+  // finds nothing to replace.
+  //
+  // poly's side only: the built-in has its own answer to the same problem, and
+  // this is about poly's.
+  async function raceRenders() {
+    const host = document.createElement("section");
+    host.dataset.case = "stale-render";
+    const block = document.createElement("pre");
+    block.className = "poly-mermaid";
+    host.append(block);
+    document.body.append(host);
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    // Built by concatenation: this lives inside a template literal, so a
+    // backtick would end the page and a dollar-brace would be interpolated
+    // here in node rather than there in the browser.
+    const slow = "graph TD\\n  a[LATEST] --> b0[KEPT 0]\\n"
+      + Array.from({ length: 400 }, (_, i) =>
+        "  b" + i + "[KEPT " + i + "] --> b" + (i + 1) + "[KEPT " + (i + 1) + "]"
+      ).join("\\n");
+    const fast = "graph TD\\n  z[STALE] --> y[GONE]";
+
+    block.textContent = fast;
+    window.dispatchEvent(new Event("vscode.markdown.updateContent"));
+    // No pause before the second keystroke, and none is needed: the listener
+    // calls draw synchronously, so by the time dispatch returns the first pass
+    // has taken its number and is parked on its first await. Waiting instead
+    // means guessing how long a diagram takes -- 40ms and 150 nodes was the
+    // first guess, and the probe reported that the render had already landed
+    // and nothing raced.
+    const raced = host.querySelector("svg") === null;
+    block.textContent = slow;
+    window.dispatchEvent(new Event("vscode.markdown.updateContent"));
+    await wait(15000);
+
+    const svg = host.querySelector("svg");
+    // Only the three labels that answer the question: the slow diagram carries
+    // hundreds, and none of the rest tells anyone which pass won.
+    const labels = svg
+      ? [...new Set(
+        Array.from(svg.querySelectorAll("text, foreignObject div, foreignObject span"), (el) => clean(el.textContent))
+          .filter((label) => label === "LATEST" || label === "STALE" || label === "GONE"),
+      )].sort()
+      : [];
+    const result = { raced, svgs: host.querySelectorAll("svg").length, labels };
+    host.remove();
+    return result;
+  }
+
   let settled = 0;
   let last = "";
-  const timer = setInterval(() => {
+  const timer = setInterval(async () => {
     const now = Array.from(document.querySelectorAll("section[data-case]"))
       .map((s) => s.querySelectorAll("svg").length).join(",");
     // Rendering is asynchronous and per diagram, so the page is done when it
@@ -142,7 +261,20 @@ ${scriptTag}
       for (const section of document.querySelectorAll("section[data-case]")) {
         after[section.dataset.case] = measure(section);
       }
-      api.postMessage({ before: window.__before, after, pageErrors: errors });
+      const stale = ${probeStale} ? await raceRenders() : null;
+      // What the editor actually called this theme. The page does not set it:
+      // both renderers decide light from dark by reading it, so a suite that
+      // wrote it would be handing them the answer -- and one that never
+      // changed it would compare four identical measurements and call it
+      // agreement across four themes.
+      api.postMessage({
+        before: window.__before,
+        after,
+        pageErrors: errors,
+        bodyClass: document.body.className,
+        vars: window.__vars,
+        stale,
+      });
     }
   }, 250);
 </script>
@@ -150,16 +282,29 @@ ${scriptTag}
 </html>`;
 }
 
-exports.run = async function run() {
-  const builtIn = vscode.extensions.getExtension(BUILT_IN);
-  const side = builtIn ? "built-in" : "poly";
-  await vscode.extensions.getExtension("ricky.poly-editor").activate();
-  await builtIn?.activate();
+/**
+ * The themes to measure, and why more than one.
+ *
+ * poly derives mermaid's colours from `--vscode-*` through a table of fallback
+ * lists, and which entry in a list answers depends on the theme: a variable a
+ * dark theme defines may be absent from a light one, so the same table can send
+ * the two renderers to different colours without anything in the dark
+ * measurement moving. Four kinds because that is how many the editor has -- the
+ * two high-contrast ones are separate themes, not a dark theme with more
+ * contrast.
+ */
+const THEMES = (process.env.POLY_MERMAID_THEMES ?? "Default Dark Modern").split(",");
 
-  const rendered = [];
-  for (const one of CASES) {
-    rendered.push({ name: one.name, group: one.group, html: await renderCase(one.markdown) });
-  }
+/** Everything one theme's page reports, from a webview of its own. */
+async function measureTheme(theme, rendered, side, builtIn) {
+  await vscode.workspace.getConfiguration("workbench").update(
+    "colorTheme",
+    theme,
+    vscode.ConfigurationTarget.Global,
+  );
+  // The panel is created after the update so it opens into the new theme;
+  // the editor still needs a moment to push the variables down to webviews.
+  await new Promise((resolve) => setTimeout(resolve, 2000));
 
   const editorDist = join(process.env.POLY_EDITOR_DIST, "dist");
   const roots = [vscode.Uri.file(editorDist)];
@@ -189,7 +334,7 @@ exports.run = async function run() {
     }"></script>`
     : `<script src="${panel.webview.asWebviewUri(vscode.Uri.file(join(editorDist, "preview.js")))}"></script>`;
 
-  panel.webview.html = page(rendered, scriptTag, nonce, csp);
+  panel.webview.html = page(rendered, scriptTag, nonce, csp, !builtIn);
 
   const measured = await new Promise((resolve) => {
     panel.webview.onDidReceiveMessage(resolve);
@@ -197,9 +342,10 @@ exports.run = async function run() {
   });
   panel.dispose();
 
-  const report = {
-    side,
-    vscode: vscode.version,
+  return {
+    bodyClass: measured.bodyClass ?? "",
+    stale: measured.stale ?? null,
+    vars: measured.vars ?? {},
     cases: Object.fromEntries(
       rendered.map(({ name, group }) => [name, {
         group,
@@ -210,6 +356,28 @@ exports.run = async function run() {
     pageErrors: measured.pageErrors,
     timedOut: Boolean(measured.timedOut),
   };
+}
+
+exports.run = async function run() {
+  const builtIn = vscode.extensions.getExtension(BUILT_IN);
+  const side = builtIn ? "built-in" : "poly";
+  await vscode.extensions.getExtension("ricky.poly-editor").activate();
+  await builtIn?.activate();
+
+  // Once, outside the theme loop: what markdown-it makes of a fence does not
+  // depend on the colours, and 74 renders per theme is three times the wall
+  // clock for the same HTML.
+  const rendered = [];
+  for (const one of CASES) {
+    rendered.push({ name: one.name, group: one.group, html: await renderCase(one.markdown) });
+  }
+
+  const themes = {};
+  for (const theme of THEMES) {
+    themes[theme] = await measureTheme(theme, rendered, side, builtIn);
+    console.log(`${side}: measured ${Object.keys(themes[theme].cases).length} cases in ${theme}`);
+  }
+
+  const report = { side, vscode: vscode.version, themes };
   writeFileSync(process.env.POLY_MERMAID_OUT, `${JSON.stringify(report, null, 2)}\n`);
-  console.log(`${side}: measured ${Object.keys(report.cases).length} cases`);
 };

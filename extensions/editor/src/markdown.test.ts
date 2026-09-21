@@ -42,20 +42,24 @@ test("anchors follow VSCode's slugifier, including where it is surprising", () =
   assert.equal(slug("設定系統"), "設定系統");
   assert.equal(slug("3.4 工具解析順序"), "34-工具解析順序");
   // Underscores survive as themselves, so emphasis written with them has to
-  // be unwrapped before the rule that keeps snake_case sees it.
+  // be unwrapped first -- but only where markdown would unwrap it, which is
+  // not inside a word.
   assert.equal(slug("snake_case-and-dash"), "snake_case-and-dash");
   assert.equal(slug("_stressed_ and __very__"), "stressed-and-very");
-  // Whitespace collapses first and punctuation is dropped after, so a run of
-  // spaces is one hyphen while a dropped em dash between two leaves two.
-  assert.equal(slug("spaced    out"), "spaced-out");
+  // Every expectation below was wrong until `make toc-fuzz` asked the editor
+  // rather than the author. Whitespace is replaced character by character and
+  // after punctuation is dropped, so four spaces are four hyphens and a
+  // dropped em dash between two spaces leaves two.
+  assert.equal(slug("spaced    out"), "spaced----out");
   assert.equal(slug("poly-lsp — the client"), "poly-lsp--the-client");
   // Full-width punctuation is on VSCode's list; ASCII parentheses are too.
   assert.equal(slug("3. CLI（Rust）"), "3-clirust");
   assert.equal(slug("a (b) c"), "a-b-c");
-  // Leading and trailing hyphens are trimmed, which is what makes a heading
-  // that opens with punctuation resolve at all.
-  assert.equal(slug("— dash first"), "dash-first");
-  assert.equal(slug("trailing …"), "trailing");
+  // And nothing trims the hyphens off either end. A heading that opens with
+  // punctuation really does anchor at a leading hyphen -- trimming them, which
+  // this module used to do, produced links that resolve nowhere.
+  assert.equal(slug("— dash first"), "-dash-first");
+  assert.equal(slug("trailing …"), "trailing-");
 });
 
 // VSCode numbers a repeat by re-slugging `${base}-${n}` and keying the counter

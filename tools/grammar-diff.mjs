@@ -64,7 +64,7 @@ const onigLib = oniguruma.loadWASM(wasm.buffer).then(() => ({
  * grammars loaded so far holding color ids from a map that no longer exists,
  * which reads out as a token with no color at all.
  */
-function side(manifests, painted) {
+function side(manifests, painted, without = new Set()) {
   const grammars = new Map(); // scopeName -> { path, meta }
   const injections = new Map(); // target scope -> [scopeName]
   const languages = new Map(); // language id -> { configuration, extensions, filenames, patterns }
@@ -104,7 +104,7 @@ function side(manifests, painted) {
       if (!entry) return null; // an embedded scope this side does not bundle
       return vsctm.parseRawGrammar(readFileSync(entry.path, "utf8"), entry.path);
     },
-    getInjections: (scopeName) => injections.get(scopeName) ?? [],
+    getInjections: (scopeName) => (injections.get(scopeName) ?? []).filter((scope) => !without.has(scope)),
   });
   return { grammars, languages, scopeOfLanguage, injections, registry };
 }
@@ -359,12 +359,53 @@ function repaints(mine, theirs, lines, plain, limit = 3) {
     const at = columns[0];
     found.push({
       line: i + 1,
+      // Kept so the verdict can ask what poly's grammars said *here*. Blaming
+      // a repaint on an injection that is nowhere near it reads as a defect in
+      // the language poly replaced.
+      at,
       text: (lines[i] ?? "").trim().slice(0, 60),
       detail: `${columns.length} chars from column ${at}: `
         + `poly ${mine[i]?.[at] || "(default)"} vs built-in ${theirs[i][at] || "(default)"}`,
     });
   }
   return found;
+}
+
+/**
+ * Did taking `without` out of poly's injections put any of `painted` back?
+ *
+ * The control for "poly's extra injection did this", asked by doing it. A
+ * repaint that survives the removal was never the injection's: something in
+ * the grammars themselves moved, which for markdown is usually one of the
+ * languages it embeds. A repaint that disappears is the injection's, and that
+ * is the defect this audit was built for.
+ *
+ * Spot by spot rather than file by file, because the two causes turn up in the
+ * same file: a markdown document has an embedded C++ block that drifted *and*
+ * a mermaid block only poly colours.
+ *
+ * Built lazily and kept, because most files never ask.
+ */
+const controls = new Map();
+async function fixedByRemoving(polyScope, builtinScope, lines, painted, without) {
+  const key = [...without].sort().join("|");
+  if (!controls.has(key)) {
+    controls.set(key, side(polyManifests, undefined, without));
+  }
+  const control = controls.get(key);
+  const left = new Set();
+  for (const which of THEMES) {
+    control.registry.setTheme(which);
+    builtin.registry.setTheme(which);
+    const [a, b] = await Promise.all([
+      colorsPerChar(control.registry, polyScope, lines),
+      colorsPerChar(builtin.registry, builtinScope, lines),
+    ]);
+    for (const spot of repaints(a, b, lines, which.plain)) {
+      left.add(`${which.name}:${spot.line}:${spot.at}`);
+    }
+  }
+  return painted.some((spot) => !left.has(`${spot.theme}:${spot.line}:${spot.at}`));
 }
 
 /** For each line, the set of scopes covering each character. */
@@ -589,11 +630,34 @@ for (const [name, path] of FIXTURE_FILES) {
     // the built-in had already coloured. Leaving this to `identicalFile` made
     // the check miss it for html and markdown, whose grammars borrow from css
     // and js, which drift -- exactly the languages the injections reach.
-    if (extraInjections.length > 0) {
+    // ...but only when they are what did it, which is asked by taking them out
+    // and looking again. A markdown file with a C++ block blamed every
+    // injection poly adds to markdown -- mermaid, graphql, kotlin, eleven more,
+    // none of which has anything to do with C++. What had moved was poly's
+    // pinned C++ grammar, reported as drift by the same run for every `.cpp`
+    // file in the corpus. Naming a cause that is not the cause is worse than
+    // naming none: it sends whoever reads it to the wrong grammar.
+    //
+    // Asked by removing them rather than by looking for their scope names on
+    // the repainted character, which was the first attempt and does not work:
+    // an injected grammar contributes the scopes its rules name and not its
+    // own, so `markdown.mermaid.codeblock` never appears in a token and that
+    // test would have quietly blamed nothing, ever.
+    const blamed = extraInjections.length > 0
+        && await fixedByRemoving(
+          polyScope,
+          builtinScope,
+          lines,
+          painted,
+          new Set(extraInjections),
+        )
+      ? extraInjections
+      : [];
+    if (blamed.length > 0) {
       failed++;
       console.log(
         `FAIL ${name}: ${langId} -- repainted by injections the built-in does not have: `
-          + extraInjections.join(", "),
+          + blamed.join(", "),
       );
     } else if (identicalFile) {
       failed++;
