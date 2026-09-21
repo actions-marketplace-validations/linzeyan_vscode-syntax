@@ -27,6 +27,13 @@ const READY_MS = 60_000;
  * no lens at all: an empty list is both "none" and "not published yet", so the
  * default of one keeps the wait honest, and a caller that means zero has to
  * say so.
+ *
+ * Zero settles after the count holds rather than after any proof the provider
+ * ran, which would be a real hole if poly's lenses could arrive late. They
+ * cannot: all three providers fire `onDidChangeCodeLenses` only when a `poly.*`
+ * setting changes, and no fixture changes one, so the first answer is the final
+ * one. The settle loop is here for TypeScript's lens, which waits for its
+ * project -- and the only TypeScript fixture asks for `atLeast` of one.
  */
 async function lensesFor(uri, atLeast = 1) {
   const deadline = Date.now() + READY_MS;

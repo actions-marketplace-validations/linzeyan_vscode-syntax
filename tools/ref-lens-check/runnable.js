@@ -25,6 +25,16 @@ const { join } = require("node:path");
 const OUT = join(tmpdir(), "poly-ref-lens", "runnable.json");
 
 /**
+ * What each button has to invoke, spelled out here rather than imported.
+ *
+ * Importing them from `extension.ts` would make this check agree with whatever
+ * that file says, which is not a check. These are the editor's own commands --
+ * F5 and ctrl+F5 -- and poly contributes no debugger, so this pair is the whole
+ * of what the feature does.
+ */
+const RUNS = { run: "workbench.action.debug.run", debug: "workbench.action.debug.start" };
+
+/**
  * One file per claim, and `entry` is the line that must carry the pair.
  *
  * `null` means the file must carry no pair at all. That is not an oversight in
@@ -147,6 +157,7 @@ exports.collect = async function collect(lensesFor) {
       lenses: lenses.map((lens) => ({
         line: lens.range.start.line,
         title: lens.command?.title ?? "(unresolved)",
+        command: lens.command?.command ?? "(none)",
         text: document.lineAt(lens.range.start.line).text.trim(),
       })),
     });
@@ -218,6 +229,21 @@ exports.check = function check() {
         `${fixture.file} puts run | debug on ${JSON.stringify(buttons[0].text)} `
           + `and not on ${JSON.stringify(fixture.entry)}`,
       );
+    }
+    // What the buttons actually invoke. poly ships no debugger and decides
+    // nothing but placement, so these two ids are the entire feature -- and a
+    // renamed one is the failure this cannot afford to miss, because it looks
+    // identical until someone clicks. The host will not press them for us
+    // (`workbench.action.debug.start` wants a launch configuration and a user),
+    // so the id is as far as an offline check can follow the click.
+    for (const button of buttons) {
+      const wanted = RUNS[button.title];
+      if (button.command !== wanted) {
+        problems.push(
+          `${fixture.file}'s "${button.title}" runs ${JSON.stringify(button.command)}, `
+            + `not ${JSON.stringify(wanted)}`,
+        );
+      }
     }
   }
 

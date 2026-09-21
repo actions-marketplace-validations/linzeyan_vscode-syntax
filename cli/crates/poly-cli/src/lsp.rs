@@ -321,6 +321,20 @@ struct Diagnostics {
     downstream: HashMap<Url, Vec<lsp_types::Diagnostic>>,
 }
 
+/// What makes two publishes of the same defect the same defect.
+///
+/// A finding with no source or no code is not matchable this way and is never
+/// dropped: poly knows nothing about it, and guessing it is a duplicate loses
+/// it. That is the safe direction -- reporting a defect twice is a nuisance,
+/// and silently dropping one is a bug nobody can see.
+fn finding_key(found: &lsp_types::Diagnostic) -> Option<(String, String, u32)> {
+    let code = match found.code.as_ref()? {
+        lsp_types::NumberOrString::String(code) => code.clone(),
+        lsp_types::NumberOrString::Number(code) => code.to_string(),
+    };
+    Some((found.source.clone()?, code, found.range.start.line))
+}
+
 impl Diagnostics {
     /// The whole set for a uri, as the editor should see it.
     ///
@@ -358,7 +372,28 @@ impl Diagnostics {
         if !proxied && !all.iter().any(says_it_does_not_parse) {
             all.extend(self.format.get(uri).cloned());
         }
-        all.extend(self.downstream.get(uri).cloned().unwrap_or_default());
+        // A server that runs a linter poly also runs publishes the same finding
+        // under the same name, and the rule above cannot see it: it matches a
+        // source against server names, and `shellcheck` is a tool's name, not a
+        // server's. Measured 2026-09-21 with bash-language-server and
+        // shellcheck both on PATH: one `.sh` came back with every finding
+        // twice.
+        //
+        // Deduplicated on the line rather than the whole range because the two
+        // copies disagree about the column. shellcheck reports a tab as eight
+        // columns; bash-language-server converts to the code units LSP asks
+        // for, poly passes shellcheck's number straight through, and on a
+        // tab-indented line they differ by seven. Matching ranges would have
+        // left exactly the tab-indented duplicates, which is most of them.
+        let mine: HashSet<_> = all.iter().filter_map(finding_key).collect();
+        all.extend(
+            self.downstream
+                .get(uri)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|d| finding_key(d).is_none_or(|key| !mine.contains(&key))),
+        );
         all
     }
 
@@ -2558,6 +2593,48 @@ mod tests {
 
     /// A file that does not parse says so once, not twice.
     ///
+    /// bash-language-server runs shellcheck when it finds one on PATH, and so
+    /// does poly. Measured 2026-09-21 with both installed: one `.sh` came back
+    /// with every finding twice, because the rule that drops poly's copy for a
+    /// proxied document matches a source against *server* names and this one is
+    /// a tool's name. Registering a shell server in 0.14.0 is what made this
+    /// reachable; nothing about it is specific to shell.
+    #[test]
+    fn a_server_running_polys_own_linter_does_not_double_report() {
+        let mut store = Diagnostics::default();
+        store.lint.insert(
+            uri(),
+            vec![
+                finding("shellcheck", "SC2086"),
+                finding("shellcheck", "SC2119"),
+            ],
+        );
+
+        // The server's copy of one of them, at a different column: shellcheck
+        // counts a tab as eight and the server converts to the code units LSP
+        // asks for, so the two copies of a finding on a tab-indented line never
+        // share a range. Matching ranges would leave exactly those duplicates.
+        let mut elsewhere = finding("shellcheck", "SC2119");
+        elsewhere.range.start.character = 7;
+        elsewhere.range.end.character = 12;
+        store.downstream.insert(
+            uri(),
+            vec![
+                finding("shellcheck", "SC2086"),
+                elsewhere,
+                finding("bashIde", "parse"),
+            ],
+        );
+
+        // Each defect once, poly's copy kept -- it is the pinned shellcheck,
+        // and the one `poly check` reports in CI where no server runs. What the
+        // server found on its own is untouched.
+        assert_eq!(
+            sources(&store.merged(&uri(), true)),
+            ["shellcheck", "shellcheck", "bashIde"]
+        );
+    }
+
     /// The linter reports `toml/syntax` on change and the formatter fails on
     /// the same error on save, at the same line and column and in the same
     /// words. Both were published, so the editor drew two squiggles over one
