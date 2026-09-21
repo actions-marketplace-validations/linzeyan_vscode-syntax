@@ -82,7 +82,7 @@ dogfood: build ## poly formats and lints its own repo
 	$(POLY) fmt --check .
 	$(POLY) check --strict .
 
-smoke: build ## LSP handshake and formatting over stdio
+smoke: build ## LSP handshake, formatting and a memory soak over stdio
 	python3 tools/lsp-smoke.py $(POLY)
 
 # Skips a language whose server is not installed and says so. CI installs five
