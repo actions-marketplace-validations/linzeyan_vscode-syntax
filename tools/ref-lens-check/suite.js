@@ -14,10 +14,20 @@ const { writeFileSync } = require("node:fs");
 
 const vscode = require("vscode");
 
+const runnable = require("./runnable");
+
 /** Long enough for the TypeScript server to load the file, then give up. */
 const READY_MS = 60_000;
 
-async function lensesFor(uri) {
+/**
+ * The lenses on `uri`, once there are `atLeast` of them and the count holds.
+ *
+ * `atLeast` exists for the one caller that is testing a file which must carry
+ * no lens at all: an empty list is both "none" and "not published yet", so the
+ * default of one keeps the wait honest, and a caller that means zero has to
+ * say so.
+ */
+async function lensesFor(uri, atLeast = 1) {
   const deadline = Date.now() + READY_MS;
   let lenses = [];
   let settled = 0;
@@ -28,7 +38,7 @@ async function lensesFor(uri) {
   while (Date.now() < deadline && settled < 6) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     const now = await vscode.commands.executeCommand("vscode.executeCodeLensProvider", uri, 50) ?? [];
-    settled = now.length > 0 && now.length === lenses.length ? settled + 1 : 0;
+    settled = now.length >= atLeast && now.length === lenses.length ? settled + 1 : 0;
     lenses = now;
   }
   return lenses;
@@ -136,4 +146,8 @@ exports.run = async function run() {
     `${JSON.stringify({ vscode: vscode.version, lenses: lines, flat }, null, 2)}\n`,
   );
   console.log(`ref-lens: ${lines.length} lines carry a lens, ${flat.length} on the flat shape`);
+
+  // Last, and with the TypeScript server already warm: it writes its own file
+  // and needs nothing from the report above.
+  await runnable.collect(lensesFor);
 };
