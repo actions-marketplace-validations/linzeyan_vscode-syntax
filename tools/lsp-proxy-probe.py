@@ -173,6 +173,23 @@ MAIN_R = """greet <- function(name) {
 message(greet("world"))
 """
 
+# The one language here poly could already format and lint without being able to
+# navigate: until bash-language-server was registered a .sh reached the editor
+# with no symbols at all, so the outline was empty and the reference lens had no
+# declaration to count over.
+MAIN_SH = """#!/usr/bin/env bash
+
+greet() {
+  echo "hello $1"
+}
+
+main() {
+  greet "world"
+}
+
+main "$@"
+"""
+
 
 @dataclass
 class Second:
@@ -260,6 +277,12 @@ class Case:
     # with nothing to run -- asserting a lens there would need a fixture built
     # to produce one, and would be testing the server rather than the route.
     code_lens: str = None
+    # A name that must appear in the outline. poly implements no document
+    # symbol provider, so every name here came from the server -- which is the
+    # one thing shell had none of before it was routed. Set where that is what
+    # the language gained; the rest get the routing check and no more, the same
+    # split `workspace_symbol` makes below.
+    document_symbol: str = None
     # A name that must come back from `workspace/symbol`. Set only where the
     # server answers from what it has already parsed; the ones that answer out
     # of an index this probe never builds get the routing check and no more,
@@ -273,9 +296,11 @@ class Case:
     edit: tuple = field(default=("world", "there"))
 
 
-# What every server here declares, so the per-case sets below are only the
-# differences worth reading. Nothing is derived from PROXIED on purpose: a
-# table built from the code under test agrees with it by construction.
+# What every server here declares but one, so the per-case sets below are only
+# the differences worth reading. bash-language-server is the exception, and it
+# is the only case that subtracts from this set rather than adding to it.
+# Nothing is derived from PROXIED on purpose: a table built from the code under
+# test agrees with it by construction.
 COMMON = {
     "hover",
     "definition",
@@ -536,6 +561,28 @@ CASES = [
         # `inlayHint/resolve` even though nothing registers it.
         registers=FULL | {"inlayHint"} | COMMANDS | LENS | SYMBOL | SEMTOK | DID_RENAME,
         command="lua.getConfig",
+    ),
+    Case(
+        language="shellscript",
+        server="bash-language-server",
+        files={"deploy.sh": MAIN_SH},
+        entry="deploy.sh",
+        definition_line=2,
+        call_line=7,
+        call_character=4,  # inside `greet` on the call line
+        hover_needle="greet",
+        # The outline is why this server is registered at all, so it is the one
+        # case with a name written down for it.
+        document_symbol="greet",
+        workspace_symbol="greet",
+        # The one server here thinner than COMMON: a shell call has no argument
+        # list to fill in, so there is no signatureHelp to declare. What it does
+        # have is the three a reader of somebody else's script needs -- rename,
+        # the highlight over every use of a name, and a quickfix (shellcheck's,
+        # so an empty list wherever shellcheck is not installed).
+        registers=(COMMON - {"signatureHelp"})
+        | {"rename", "codeAction", "documentHighlight"}
+        | SYMBOL,
     ),
 ]
 
@@ -886,7 +933,24 @@ def run(case, logs=True, graceful=True):
 
     # poly declared none of these at initialize, so the editor only learns about
     # them once the server is up and poly registers them scoped to the language.
-    registration, _ = pump(want_method="client/registerCapability")
+    #
+    # Guarded, because this is where a language poly routes nowhere arrives: the
+    # server is on PATH so the case was not skipped, and poly then opens the
+    # document without starting anything. Nothing is coming, and the wait for it
+    # is not a failure -- it is a probe that sits there. Measured against a poly
+    # with shellscript missing from LANGUAGE_SERVERS, which is what this
+    # registry entry looked like one release ago.
+    guard = threading.Timer(60, proc.kill)
+    guard.start()
+    try:
+        registration, _ = pump(want_method="client/registerCapability")
+    except EOFError:
+        raise AssertionError(
+            f"poly registered nothing for {case.language} in 60s — {case.server} "
+            f"is on PATH, so it was never asked to start"
+        ) from None
+    finally:
+        guard.cancel()
     methods = {r["method"]: r for r in registration["params"]["registrations"]}
     assert "textDocument/definition" in methods, methods
     # One registration covers every language the server answers for, so the
@@ -1149,6 +1213,27 @@ def run(case, logs=True, graceful=True):
             print(f"  {len(kinds)} semantic token(s): {named}")
         else:
             print(f"  semanticTokens routed; {len(kinds)} for this fixture")
+
+    # The outline, and the one request here poly answers for nothing at all: it
+    # has no document symbol provider, so every name below came from the server.
+    # That is what a language gains the moment it is routed -- an unrouted .sh
+    # reached the editor with an empty outline, and a reference lens draws over
+    # declarations it is never told about.
+    #
+    # Both shapes carry `name`: a flat SymbolInformation list and a
+    # DocumentSymbol tree differ in what hangs off it, and nothing here asks
+    # about anything nested.
+    outline = ask(18, "textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+    assert "result" in outline, f"documentSymbol was not routed: {outline}"
+    names = {symbol["name"] for symbol in outline["result"] or []}
+    if case.document_symbol:
+        # Named rather than counted, for the reason the Ctrl+T check below is.
+        assert case.document_symbol in names, (
+            f"no symbol named {case.document_symbol!r} in the outline: {sorted(names)}"
+        )
+        print(f"  outline carries {case.document_symbol!r} among {sorted(names)}")
+    else:
+        print(f"  documentSymbol routed; {len(names)} symbol(s) for this fixture")
 
     # Ctrl+T. The only request poly sends to every server rather than one, so
     # "was it routed" and "did it come back exactly once" are different
