@@ -355,12 +355,13 @@ jobs:
             echo "$HOME/ci-tools/bin"
             echo "$HOME/ci-tools/lua-language-server/bin"
           } >> "$GITHUB_PATH"
-      # The two that are not worth caching: both come from a package manager
-      # already on the runner, and neither is compiled here.
-      - name: Install clangd and rust-analyzer
+      # The three that are not worth caching: each comes from a package manager
+      # already on the runner, and none is compiled here.
+      - name: Install clangd, rust-analyzer and bash-language-server
         run: |
           sudo apt-get install -y clangd
           rustup component add rust-analyzer
+          npm install -g bash-language-server
       - name: Build poly
         run: cargo build --release --manifest-path cli/Cargo.toml
       - name: Language server proxy probe
@@ -384,6 +385,7 @@ jobs:
           clangd --version
           terraform-ls version
           lua-language-server --version
+          bash-language-server --version
           python tools/lsp-proxy-probe.py cli/target/release/poly
       # The other half of Go, and the half no gate touched until it was written:
       # gofumpt and golangci-lint are poly's own to drive, and the Rust tests
