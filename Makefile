@@ -268,17 +268,22 @@ grammar-real: tokdeps ## grammar-diff over ordinary source files from GRAMMAR_TR
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 	node tools/editor-diff/run.js
 
-# The other half of ref-lens, and an audit rather than a gate for one reason:
-# it needs `go`, `gopls` and buf, which CI does not have. What it holds down is the
-# half of poly-editor that is not poly's code -- five lenses and commands are
-# wired to particular code action kinds and to `textDocument/implementation`
-# read backwards, and each of those is a claim about gopls that was true when
-# measured. ref-lens cannot see any of it: what answers there is TypeScript's
-# provider, which does not answer the backwards question at all, and fixtures
-# shaped like what gopls and buf were measured to say -- which holds poly's
-# wiring down and says nothing about whether they still say it.
-lens-probe: ## What gopls and buf still offer the lenses poly routes to
-	python3 tools/lens-probe.py
+# The other half of ref-lens. What it holds down is the half of poly-editor
+# that is not poly's code -- five lenses and commands are wired to particular
+# code action kinds and to `textDocument/implementation` read backwards, and
+# each of those is a claim about gopls that was true when measured. ref-lens
+# cannot see any of it: what answers there is TypeScript's provider, which does
+# not answer the backwards question at all, and fixtures shaped like what gopls
+# and buf were measured to say -- which holds poly's wiring down and says
+# nothing about whether they still say it.
+#
+# It was an audit, on the grounds that CI has neither gopls nor buf. Both halves
+# of that were wrong: ci.yml installs a pinned gopls for `probe` in the same
+# job, and buf is poly's to download. So it is a gate that skips when the Go
+# toolchain is absent, and CI passes `--require` to say that skipping there is
+# a failure -- the same contract `probe` already has.
+lens-probe: build ## What gopls and buf still offer the lenses poly routes to
+	python3 tools/lens-probe.py $(POLY)
 
 # The one differential whose reference ships inside the editor rather than
 # beside it: from 1.135 VSCode draws mermaid fences itself, and poly's renderer
@@ -335,7 +340,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ref-lens toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config smoke dogfood version probe lens-probe go tf rust deadcode grammars e2e editor ref-lens toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0

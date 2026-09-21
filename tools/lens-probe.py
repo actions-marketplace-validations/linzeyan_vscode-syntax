@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 """Do gopls and buf still answer what poly-editor's lenses and commands route to?
 
-An audit and not a gate. Every other check in this repo compares poly against
-poly, or against something the editor ships; this one needs `go` and `gopls` on
-PATH and buf in poly's tool cache, which CI does not have. What it holds down
-is the half of poly-editor that is not poly's code at all: seven features are
-wired to particular code action kinds, to `textDocument/implementation` reading
-backwards, and to the shape of two servers' symbol trees -- each of those a
-claim about somebody else's server that was true when measured.
+What it holds down is the half of poly-editor that is not poly's code at all:
+seven features are wired to particular code action kinds, to
+`textDocument/implementation` reading backwards, and to the shape of two
+servers' symbol trees -- each of those a claim about somebody else's server that
+was true when measured.
 
-`make lens-probe`. It asks each server directly rather than through poly's
-proxy, because the question is what the server has to give. If the answer here
-is no, no amount of wiring in the extension produces it.
+`make lens-probe`, and part of `make gates`. It skips when `go` and `gopls` are
+not on PATH, which is right on a machine that does not build Go and wrong in
+CI: pass `--require` and a skip becomes a failure. That flag is the whole
+reason this can be a gate, because a check that only ever skips is a check
+nobody is running.
 
-Measured 2026-09-21 against gopls v0.23.0. Two findings shaped the code it
-guards, and both are asserted below:
+It is also the only thing standing behind `make ref-lens`'s protobuf and shell
+sections. Those supply providers shaped like what was measured here, so they
+pin poly's wiring and are deliberately blind to a server changing shape. This
+is what sees that.
+
+It asks each server directly rather than through poly's proxy, because the
+question is what the server has to give. If the answer here is no, no amount of
+wiring in the extension produces it.
+
+Measured 2026-09-21 against gopls v0.23.0. Three findings shaped the code it
+guards, and all three are asserted below:
 
   * A Go method is a top-level symbol named `(Circle).Area`, not a child of
     `Circle`. `lensTargets` decides the implementation direction from a
     symbol's own kind for that reason.
+  * An interface's methods are the opposite: children of the interface, named
+    bare. `linkGeneratedGo` keys the generated Go on `${symbol.name}.${member
+    .name}` to turn an rpc into `GreeterServer.SayHello`, so it reads the tree
+    both ways and neither is a guess.
   * `refactor.move` answers null. The gesture is filed under
     `refactor.extract.toNewFile`, which is why `REFACTORINGS.moveToNewFile`
     asks for the extract kind.
@@ -115,10 +128,6 @@ KINDS = {
 
 READY_S = 60
 
-# poly pins buf and downloads it; `make pins` is what keeps this version in step
-# with the lock, and buf is not expected on PATH.
-BUF = os.path.expanduser("~/.cache/poly/tools/buf-1.72.0/buf")
-
 PROTO = """syntax = "proto3";
 
 package greet.v1;
@@ -210,6 +219,24 @@ class Client:
             if line.lower().startswith(b"content-length:"):
                 length = int(line.split(b":")[1])
         return None if length is None else json.loads(self.proc.stdout.read(length))
+
+
+def buf_path(poly):
+    """Where poly keeps the buf it downloads, asked of poly rather than guessed.
+
+    This was a literal `~/.cache/poly/tools/buf-1.72.0/buf`, and nothing kept it
+    in step -- `make pins` checks poly's lock, not this file, so the first buf
+    bump would have turned every .proto assertion below into a skip. `tools
+    install` fetches when it has to, prints the resolved path either way, and
+    costs 10ms once the tool is there.
+    """
+    printed = subprocess.run(
+        [poly, "tools", "install", "buf"], check=True, capture_output=True, text=True
+    ).stdout
+    for line in printed.split("\n"):
+        if line.startswith("buf:"):
+            return line.split(":", 1)[1].strip()
+    raise SystemExit(f"`{poly} tools install buf` printed no path:\n{printed}")
 
 
 def uri(root, name):
@@ -338,7 +365,7 @@ def flatten(symbols, depth=0):
     return out
 
 
-def probe_buf(check):
+def probe_buf(check, buf):
     """The .proto half: what `buf lsp serve` reports, which poly routes .proto to.
 
     Three of poly-editor's decisions rest on this and on nothing else. The
@@ -354,7 +381,7 @@ def probe_buf(check):
         handle.write(BUF_YAML)
     target = "file://" + os.path.join(root, "greet.proto")
 
-    client = Client(root, os.path.join(root, "buf.log"), (BUF, "lsp", "serve"))
+    client = Client(root, os.path.join(root, "buf.log"), (buf, "lsp", "serve"))
     ready = client.request(
         "initialize",
         {
@@ -441,19 +468,29 @@ def probe_buf(check):
 
 
 def main():
-    for tool in ("go", "gopls"):
-        if shutil.which(tool) is None:
-            print(
-                f"lens-probe: {tool} is not on PATH — this is an audit, not a gate",
-                file=sys.stderr,
-            )
-            return 2
-    if not os.path.exists(BUF):
-        print(
-            f"lens-probe: no buf at {BUF} — run `poly check` on a .proto to fetch it",
-            file=sys.stderr,
-        )
+    argv = sys.argv[1:]
+    required = "--require" in argv
+    rest = [one for one in argv if one != "--require"]
+    if len(rest) != 1:
+        print("usage: lens-probe.py <poly binary> [--require]", file=sys.stderr)
         return 2
+    poly = rest[0]
+
+    # Skipping is right on a machine with no Go toolchain and wrong in CI, so
+    # the caller says which it is. Without `--require` this exits 0, because a
+    # gate that fails for a missing optional tool is a gate people delete.
+    missing = [tool for tool in ("go", "gopls") if shutil.which(tool) is None]
+    if missing:
+        absent = ", ".join(missing)
+        if required:
+            print(
+                f"lens-probe: {absent} not on PATH, and --require says that is a failure"
+            )
+            return 1
+        print(f"SKIPPED lens-probe: {absent} not on PATH")
+        return 0
+
+    buf = buf_path(poly)
 
     root = tempfile.mkdtemp(prefix="poly-go-lens-")
     for name, body in FIXTURE.items():
@@ -495,6 +532,22 @@ def main():
         methods == [(0, "(Circle).Area"), (0, "(Circle).Name")],
         "a method is top-level and carries its receiver in its name",
         methods,
+    )
+    # The other half of the same tree, and the one `linkGeneratedGo` keys on:
+    # an rpc becomes `GreeterServer.SayHello` only because the generated
+    # interface owns its methods as children under bare names. A struct method
+    # and an interface method sit in opposite places, so reading one told us
+    # nothing about the other -- and until this was written down, the key every
+    # `N impls` on a .proto depends on was the one thing here nobody measured.
+    members = [
+        (depth, name)
+        for depth, kind, name in flat
+        if kind == "Method" and name in ("Area", "Name")
+    ]
+    check(
+        members == [(1, "Area"), (1, "Name")],
+        "an interface's methods are its children, named bare",
+        members,
     )
 
     print("\ncodeAction — the kinds poly's commands ask for")
@@ -592,9 +645,9 @@ def main():
     client.proc.kill()
 
     print("\n`buf lsp serve` — the .proto lenses")
-    probe_buf(check)
+    probe_buf(check, buf)
 
-    print(f"\ngopls {version}, buf {os.path.basename(os.path.dirname(BUF))}")
+    print(f"\ngopls {version}, buf {os.path.basename(os.path.dirname(buf))}")
     if problems:
         print(f"\n{len(problems)} of poly-editor's assumptions no longer hold:")
         for problem in problems:

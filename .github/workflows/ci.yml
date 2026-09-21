@@ -387,6 +387,17 @@ jobs:
           lua-language-server --version
           bash-language-server --version
           python tools/lsp-proxy-probe.py cli/target/release/poly
+      - name: Lens probe
+        run: |
+          # What poly-editor's lenses route to, asked of gopls and buf directly.
+          # `--require` turns its skip into a failure: the tools are right here
+          # -- gopls is asserted above and buf is poly's own download -- so a
+          # skip in this job means something broke, not that a machine is thin.
+          #
+          # It is separate from the step above because it is the only thing
+          # standing behind `make ref-lens`'s protobuf and shell sections, which
+          # are deliberately blind to a server changing shape.
+          python tools/lens-probe.py cli/target/release/poly --require
       # The other half of Go, and the half no gate touched until it was written:
       # gofumpt and golangci-lint are poly's own to drive, and the Rust tests
       # only ever covered the path where they do not run. `go` is on the runner
