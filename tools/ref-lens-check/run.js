@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// Does the reference lens land on declarations, and only on declarations?
+// Do poly's code lenses land where they should, and nowhere else?
 //
 // This is a gate rather than an audit: it compares poly against nothing but
-// itself, needs no marketplace extension and no network, and the provider it
-// leans on -- TypeScript's -- ships inside the editor. It exists because the
-// lens once counted parameters and locals, a defect the unit tests could not
-// see: they assert against a symbol tree written by the same hand that wrote
-// the rule, and the rule was wrong about what a real server reports.
+// itself, needs no marketplace extension and no network, and the one real
+// provider it leans on -- TypeScript's -- ships inside the editor. It exists
+// because the reference lens once counted parameters and locals, a defect the
+// unit tests could not see: they assert against a symbol tree written by the
+// same hand that wrote the rule, and the rule was wrong about what a real
+// server reports. Every lens added since has been given its own section here
+// for the same reason, and each section says what it does and does not prove.
 //
 // Usage: node tools/ref-lens-check/run.js
 const { execFileSync } = require("node:child_process");
@@ -15,6 +17,7 @@ const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
+const proto = require("./proto");
 const runnable = require("./runnable");
 
 const ROOT = resolve(__dirname, "..", "..");
@@ -147,15 +150,20 @@ async function main() {
     }\n`,
   );
 
+  const protoEnv = proto.writeFixture(WORKSPACE);
+
   execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
 
   await runTests({
-    extensionDevelopmentPath: EDITOR,
+    // poly-syntax alongside, because it is what gives a .proto the `protobuf`
+    // language id poly's lens is registered for -- see proto.js.
+    extensionDevelopmentPath: [EDITOR, proto.SYNTAX],
     extensionTestsPath: resolve(__dirname, "suite.js"),
     extensionTestsEnv: {
       POLY_LENS_FIXTURE: fixture,
       POLY_FLAT_FIXTURE: flat,
       POLY_LENS_OUT: OUT,
+      ...protoEnv,
     },
     ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
     launchArgs: [
@@ -210,6 +218,8 @@ async function main() {
       );
     }
   }
+
+  problems.push(...proto.checkProto(report.proto));
 
   console.log(
     `\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens; `

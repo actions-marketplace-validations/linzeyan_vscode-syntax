@@ -130,14 +130,17 @@ editor: ## Typecheck, test, build and package poly-editor
 	python3 tools/vsix-check.py extensions/editor
 
 # A gate and not an audit, unlike the *-diff targets: it asserts about poly
-# alone, and the provider it asks -- TypeScript's -- ships inside the editor,
-# so there is nothing to download but VSCode itself, which `e2e` already has.
+# alone, and the only real provider it asks -- TypeScript's -- ships inside the
+# editor, so there is nothing to download but VSCode itself, which `e2e` already
+# has. The protobuf and shell sections have no offline server to ask, so they
+# supply providers shaped like what `make lens-probe` measured; that pins poly's
+# wiring, and `lens-probe` is what says the real servers still behave that way.
 #
 # It exists because `make editor`'s unit tests could not see the defect that
 # put a count over every parameter and local: they assert against a symbol tree
 # written by the same hand as the rule, and the rule was wrong about what a
-# real server reports.
-ref-lens: ## Where poly's reference lens lands, asked of a real language server
+# real server reports. Every lens added since is checked here for that reason.
+ref-lens: ## Where poly's code lenses land, in a real extension host
 	node tools/ref-lens-check/run.js
 
 # The table of contents command's anchors against the ones the preview writes,
@@ -270,8 +273,10 @@ editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 # half of poly-editor that is not poly's code -- five lenses and commands are
 # wired to particular code action kinds and to `textDocument/implementation`
 # read backwards, and each of those is a claim about gopls that was true when
-# measured. ref-lens cannot see any of it: the provider it asks is TypeScript's,
-# which does not answer the backwards question at all.
+# measured. ref-lens cannot see any of it: what answers there is TypeScript's
+# provider, which does not answer the backwards question at all, and fixtures
+# shaped like what gopls and buf were measured to say -- which holds poly's
+# wiring down and says nothing about whether they still say it.
 lens-probe: ## What gopls and buf still offer the lenses poly routes to
 	python3 tools/lens-probe.py
 
