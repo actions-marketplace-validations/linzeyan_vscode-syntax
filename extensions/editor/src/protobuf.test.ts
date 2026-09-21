@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { generatedFiles, goLinksFor, goNameOf, protoPackage } from "./protobuf";
+import { generatedFiles, goLinksFor, goNameOf, goServerMethod, protoPackage } from "./protobuf";
 
 // vscode.SymbolKind, as `buf lsp serve` reports a .proto.
 const CLASS = 4; // message
@@ -43,6 +43,18 @@ test("a message and an enum are one type each", () => {
   assert.deepEqual(goLinksFor("greet.v1.Tone", ENUM, "greet.v1"), [
     { label: "go type", name: "Tone" },
   ]);
+});
+
+test("an rpc's implementations are found through the generated interface", () => {
+  // buf declares no implementation provider, so "who implements this rpc" has
+  // no answer on the .proto side. It does on the Go side: the rpc is a method
+  // on `GreeterServer`, and whatever answers for Go answers about that.
+  assert.equal(goServerMethod("greet.v1.Greeter.SayHello", "greet.v1"), "GreeterServer.SayHello");
+  assert.equal(goServerMethod("Greeter.SayHello", undefined), "GreeterServer.SayHello");
+  // A message, a field, and a nested message are not rpcs. Only a service and
+  // the rpc inside it make a path of exactly two.
+  assert.equal(goServerMethod("greet.v1.HelloRequest", "greet.v1"), undefined);
+  assert.equal(goServerMethod("greet.v1.HelloRequest.Nested.deep", "greet.v1"), undefined);
 });
 
 test("an rpc gets no link of its own", () => {

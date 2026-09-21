@@ -70,6 +70,13 @@ pub(crate) const LANGUAGE_SERVERS: &[(&str, &str)] = &[
     // module that makes no sense.
     ("terraform", "terraform-ls"),
     ("lua", "lua-language-server"),
+    // Shell is the one language here poly already lints and formats without
+    // being able to navigate: `.sh` reaches the editor with no symbols at all,
+    // so the outline is empty and every lens poly draws over a declaration has
+    // nothing to draw over. bash-language-server is the server for it, and it
+    // is PATH-only like the rest -- a project that wants shell navigation
+    // installs it, and one that does not pays nothing.
+    ("shellscript", "bash-language-server"),
     ("protobuf", "buf"),
     // buf's reasoning again: an R script has no build behind it, so there is no
     // toolchain for `arity lsp` to be out of step with, and poly already pins
@@ -87,6 +94,7 @@ const LAUNCH: &[(&str, &[&str])] = &[
     ("terraform-ls", &["serve"]),
     ("buf", &["lsp", "serve"]),
     ("arity", &["lsp"]),
+    ("bash-language-server", &["start"]),
 ];
 
 /// How poly gets hold of a language server binary.

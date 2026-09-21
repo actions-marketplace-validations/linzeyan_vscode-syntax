@@ -51,9 +51,10 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **語言伺服器（預設關閉）**：`poly.languageServers` 打開後，poly 會啟動專案自己
   toolchain 裡的 language server，把 hover、go-to-definition、declaration、type
   definition、implementation、references、outline、completion、signature help、
-  symbol highlight、folding、expand selection、rename、code action 路由給它。目前八個：
+  symbol highlight、folding、expand selection、rename、code action 路由給它。目前九個：
   gopls（Go）、rust-analyzer（Rust）、clangd（C／C++）、sourcekit-lsp（Swift）、terraform-ls
-  （Terraform）、lua-language-server（Lua）、buf（Protobuf）、arity（R）。poly **不實作**這些功能，
+  （Terraform）、lua-language-server（Lua）、bash-language-server（Shell）、buf（Protobuf）、
+  arity（R）。poly **不實作**這些功能，
   server 一律從 PATH 找，找不到就說一聲——所以品質就是那支 server 的品質。
   **buf 與 arity 是例外**，poly 會代抓：其他 server 都得配合建置專案的 toolchain（gopls 讀
   go.mod 的 Go 版本、rust-analyzer 要編譯該 crate 的 rustc），而 `.proto` 與 `.R` 背後沒有建置，
@@ -119,12 +120,14 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   `1 interface`，方法寫在型別外面的語言（Go）再多一顆 `4 methods`。只有一筆就直接跳過去，多筆
   開 References 面板。全部的數字都來自該語言已註冊的 provider，poly 只數與畫。
   `poly.referencesCodeLens.enabled` 可關。
-- **`run | debug` CodeLens**：程式進入點（Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`）
-  上方一行。poly 沒有 debugger——按下去是編輯器自己的 Start Debugging，跑你已經裝的 debug
-  extension。`poly.runCodeLens.enabled` 可關。
+- **`run | debug` CodeLens**：程式進入點（Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`、
+  Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。poly 沒有 debugger——
+  按下去是編輯器自己的 Start Debugging，跑你已經裝的 debug extension。
+  `poly.runCodeLens.enabled` 可關。
 - **protobuf → 生成的 Go**：`.proto` 的 `message`／`enum` 上方 `go type`，`service` 上方
-  `go server`／`go client`，跳到 protoc 生出來的宣告。認 protoc-gen-go 與 protoc-gen-go-grpc
-  的命名規則；生成檔不在 workspace 裡就不畫。`poly.protobufCodeLens.enabled` 可關。
+  `go server`／`go client`，跳到 protoc 生出來的宣告；`rpc` 上方 `N impls`，跳到寫在 Go 裡的
+  handler。認 protoc-gen-go 與 protoc-gen-go-grpc 的命名規則；生成檔不在 workspace 裡就不畫。
+  `poly.protobufCodeLens.enabled` 可關。
 - **跨檔案 next／previous change ＋ `Poly: Revert Selected Changes and Save`**：
   `cmd/ctrl+alt+z`／`cmd/ctrl+alt+a` 跳到上／下一個有改動的檔案並落在改動上，`alt+q`
   還原游標所在的 hunk 並存檔。VSCode 內建的是「同一個檔案裡的下一處改動」，跨檔案那

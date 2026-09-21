@@ -20,10 +20,10 @@ import { toc, TOC_END, TOC_START } from "./markdown";
 import { mermaidPlugin } from "./markdownIt";
 import { methodLabel, methodsOf } from "./methods";
 import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } from "./postfix";
-import { generatedFiles, goLinksFor, protoPackage } from "./protobuf";
+import { generatedFiles, goLinksFor, goServerMethod, protoPackage } from "./protobuf";
 import { refactorChoices, Refactoring, REFACTORINGS } from "./refactors";
 import { Direction, elsewhere, implLabel, LensTarget, lensTargets, refLabel } from "./references";
-import { entryPoints } from "./runnable";
+import { entryLine, entryPoints, findsEntryInText } from "./runnable";
 import { registerTodoTree } from "./todoTree";
 
 /**
@@ -832,6 +832,9 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       if (!config.get<boolean>("referencesCodeLens.enabled", true)) {
         return [];
       }
+      // A server may answer in either symbol shape and this reads only one of
+      // them -- see `registerFlatProvider` in tools/ref-lens-check for why that
+      // is safe, and for the check that says it stays safe.
       const symbols = await vscode.commands.executeCommand<
         vscode.DocumentSymbol[]
       >("vscode.executeDocumentSymbolProvider", document.uri);
@@ -972,21 +975,22 @@ function runFromGutter(context: vscode.ExtensionContext): void {
       if (!on) {
         return [];
       }
-      const symbols = await vscode.commands.executeCommand<
-        vscode.DocumentSymbol[]
-      >("vscode.executeDocumentSymbolProvider", document.uri);
-      return entryPoints(symbols ?? []).flatMap((symbol) =>
+      const buttons = (range: vscode.Range) =>
         [
           { title: "run", command: "workbench.action.debug.run" },
           { title: "debug", command: "workbench.action.debug.start" },
-        ].map(({ title, command }) =>
-          new vscode.CodeLens(symbol.selectionRange, {
-            title,
-            command,
-            arguments: [],
-          })
-        )
-      );
+        ].map(({ title, command }) => new vscode.CodeLens(range, { title, command, arguments: [] }));
+
+      // Python and shell have no declaration to sit on, and asking their
+      // symbol provider first would cost a request whose answer is discarded.
+      if (findsEntryInText(document.languageId)) {
+        const line = entryLine(document.languageId, document.getText());
+        return line === undefined ? [] : buttons(document.lineAt(line).range);
+      }
+      const symbols = await vscode.commands.executeCommand<
+        vscode.DocumentSymbol[]
+      >("vscode.executeDocumentSymbolProvider", document.uri);
+      return entryPoints(symbols ?? []).flatMap((symbol) => buttons(symbol.selectionRange));
     },
   };
 
@@ -999,6 +1003,19 @@ function runFromGutter(context: vscode.ExtensionContext): void {
       }
     }),
   );
+}
+
+/**
+ * An rpc's `N impls`, which are Go's and not the .proto's.
+ *
+ * It carries where the question has to be asked rather than where the answer
+ * is drawn: the lens sits on the rpc, and the implementation query runs at the
+ * generated `GreeterServer.SayHello` that gopls knows about.
+ */
+class ProtoImplLens extends vscode.CodeLens {
+  constructor(readonly generated: vscode.Location, range: vscode.Range) {
+    super(range);
+  }
 }
 
 /**
@@ -1036,15 +1053,23 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
         return [];
       }
       // One symbol list per generated file, keyed by name. A workspace with two
-      // `greet.pb.go` in it keeps both, and the click asks which.
+      // `greet.pb.go` in it keeps both, and the click asks which. Interface
+      // members are keyed `GreeterServer.SayHello`, because an rpc's answer is
+      // a method inside a generated interface rather than a top-level type.
       const generated = new Map<string, vscode.Location[]>();
       for (const file of files) {
         const symbols = await vscode.commands.executeCommand<
           vscode.DocumentSymbol[]
         >("vscode.executeDocumentSymbolProvider", file);
+        const keep = (key: string, range: vscode.Range) => {
+          const at = new vscode.Location(file, range);
+          generated.set(key, [...(generated.get(key) ?? []), at]);
+        };
         for (const symbol of symbols ?? []) {
-          const at = new vscode.Location(file, symbol.selectionRange);
-          generated.set(symbol.name, [...(generated.get(symbol.name) ?? []), at]);
+          keep(symbol.name, symbol.selectionRange);
+          for (const member of symbol.children ?? []) {
+            keep(`${symbol.name}.${member.name}`, member.selectionRange);
+          }
         }
       }
 
@@ -1052,8 +1077,8 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
         vscode.DocumentSymbol[]
       >("vscode.executeDocumentSymbolProvider", document.uri);
       const pkg = protoPackage(document.getText());
-      return (symbols ?? []).flatMap((symbol) =>
-        goLinksFor(symbol.name, symbol.kind, pkg).flatMap((link) => {
+      return (symbols ?? []).flatMap((symbol) => {
+        const links = goLinksFor(symbol.name, symbol.kind, pkg).flatMap((link) => {
           const found = generated.get(link.name);
           return found
             ? [
@@ -1067,8 +1092,40 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
               }),
             ]
             : [];
-        })
+        });
+        // The rpc's own lens, and the one thing on a .proto that has to stay
+        // lazy: the count is an implementation query against the generated
+        // interface method, not something already in hand.
+        const method = goServerMethod(symbol.name, pkg);
+        const at = method ? generated.get(method)?.[0] : undefined;
+        return at
+          ? [...links, new ProtoImplLens(at, symbol.selectionRange)]
+          : links;
+      });
+    },
+
+    async resolveCodeLens(lens) {
+      const { generated } = lens as ProtoImplLens;
+      const found = await vscode.commands.executeCommand<
+        (vscode.Location | vscode.LocationLink)[]
+      >("vscode.executeImplementationProvider", generated.uri, generated.range.start);
+      const locations = (found ?? []).map((one) =>
+        "targetUri" in one
+          ? new vscode.Location(one.targetUri, one.targetSelectionRange ?? one.targetRange)
+          : one
       );
+      // The generated interface declares the method; it does not implement it.
+      const others = elsewhere(
+        locations,
+        { uri: generated.uri.toString(), line: generated.range.start.line },
+        (one) => ({ uri: one.uri.toString(), line: one.range.start.line }),
+      );
+      lens.command = {
+        title: implLabel(others.length, "down"),
+        command: others.length > 0 ? "poly.showReferences" : "",
+        arguments: [generated.uri, generated.range.start, "down", others],
+      };
+      return lens;
     },
   };
 

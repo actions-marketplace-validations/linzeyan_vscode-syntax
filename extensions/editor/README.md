@@ -193,7 +193,8 @@ code action kind——真正做事的是該語言的 server，poly 只負責挑�
 
 ### `run | debug` CodeLens
 
-程式進入點上方一行 `run | debug`——Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`。
+程式進入點上方一行 `run | debug`——Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`、
+Python 的 `if __name__ == "__main__"`、shell script 的 shebang。
 `poly.runCodeLens.enabled` 可關。
 
 **poly 沒有 debugger，也不啟動任何行程。** 那兩個字按下去就是編輯器自己的
@@ -203,8 +204,11 @@ extension——Go 就是 `golang.go` 的 delve。`contributes.debuggers` 一個�
 設定），沒有時由該語言的 debug extension 給 active file 一份動態設定——後者正是這條 lens
 存在的理由，也是「我在看的這個檔」跟「F5 會跑什麼」剛好是同一件事的情況。
 
-Python 沒有：它的進入點是 `if __name__ == "__main__"`，一個敘述句，沒有任何 symbol
-provider 會把它報成宣告。
+**Python 與 shell 的進入點不是宣告**，所以它們兩個不走符號走文字：Python 找
+`if __name__ == "__main__"`（一個敘述句，沒有任何 symbol provider 會把它報成宣告），
+shell 找第一行的 shebang。一個檔最多一顆，而且**只認這一條規則**——否則一個 Python 檔
+會在 guard 上有一顆、在它呼叫的 `def main` 上再有一顆。沒有 guard 的 `.py` 跟沒有
+shebang 的 `.sh` 都不畫：前者跑起來什麼都不做，後者通常是被 source 進去的函式庫。
 
 ### protobuf → 生成的 Go
 
@@ -222,8 +226,11 @@ provider 會把它報成宣告。
   都是安靜的。
 - 只認 protoc-gen-go 與 protoc-gen-go-grpc。connect-go 的 `greet.connect.go` 之類不碰——
   跳錯地方比沒有 lens 更糟，而那些從 `.proto` 本身看不出來。
-- rpc 沒有 `impls`：`buf lsp serve` 不宣告 implementation provider。同一份資訊走另一條路——
-  service 上的 `go server`／`go client` 就是「誰實作這些 rpc」。
+- **rpc 上方另有一顆 `N impls`**，點下去就是寫在 Go 裡的那些 handler。`buf lsp serve` 不宣告
+  implementation provider，但回答這題的本來就不該是它：rpc 是生成的 `GreeterServer` 上的一個
+  method，而那對 Go 的 server 只是個普通問題。poly 把 `greet.v1.Greeter.SayHello` 組成
+  `GreeterServer.SayHello`、在生成檔裡找到那個位置、在那裡問一次 implementation——組名字的是
+  poly，找 handler 的是 gopls。
 
 ### 跨檔案 next／previous change ＋ Revert and Save
 

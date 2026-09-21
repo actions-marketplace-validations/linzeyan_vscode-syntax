@@ -122,6 +122,10 @@ async function main() {
   mkdirSync(join(ROOT, ".logs", "audit"), { recursive: true });
   const fixture = join(WORKSPACE, "shapes.ts");
   writeFileSync(fixture, FIXTURE);
+  // Plaintext, so the only symbol provider in play is the one the suite
+  // registers -- see `registerFlatProvider` for what it is proving.
+  const flat = join(WORKSPACE, "flat.txt");
+  writeFileSync(flat, "deploy\n\nusage\n\ncalled here\n");
   // The editor's own TypeScript lens, turned on so this file can be read by
   // both and the two placements compared. It is the only second opinion
   // available offline about where a reference count belongs, and poly's README
@@ -146,7 +150,11 @@ async function main() {
   await runTests({
     extensionDevelopmentPath: EDITOR,
     extensionTestsPath: resolve(__dirname, "suite.js"),
-    extensionTestsEnv: { POLY_LENS_FIXTURE: fixture, POLY_LENS_OUT: OUT },
+    extensionTestsEnv: {
+      POLY_LENS_FIXTURE: fixture,
+      POLY_FLAT_FIXTURE: flat,
+      POLY_LENS_OUT: OUT,
+    },
     ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
     launchArgs: [
       `--folder-uri=${pathToFileURL(WORKSPACE).toString()}`,
@@ -168,6 +176,17 @@ async function main() {
   for (const [text, what] of Object.entries(FORBIDDEN)) {
     if (lensed.has(text)) problems.push(`lens on ${what}: ${text}`);
   }
+  // The other symbol shape. A provider answering in `SymbolInformation` has no
+  // `selectionRange`, and every lens poly draws reads one -- so this is either
+  // two counts or an exception swallowed into an empty lens list.
+  const flatSaid = (report.flat ?? []).map((one) => `${one.line}:${one.title}`).sort();
+  if (flatSaid.join() !== ["0:1 ref", "2:1 ref"].join()) {
+    problems.push(
+      `the flat symbol shape got no usable lens — expected 1 ref on lines 1 and 3, got `
+        + JSON.stringify(flatSaid),
+    );
+  }
+
   const titles = new Map(report.lenses.map((one) => [one.text, one.poly]));
   for (const [text, said] of Object.entries(IMPLS)) {
     if (!(titles.get(text) ?? []).includes(said)) {
@@ -190,7 +209,10 @@ async function main() {
     }
   }
 
-  console.log(`\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens`);
+  console.log(
+    `\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens; `
+      + `the flat symbol shape got ${JSON.stringify(flatSaid)}`,
+  );
   console.log(
     `  ${"line".padStart(4)}  ${"poly".padEnd(14)} ${"typescript".padEnd(13)} ${"kind".padEnd(11)} declaration`,
   );

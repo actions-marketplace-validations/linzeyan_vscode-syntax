@@ -277,7 +277,11 @@ pub fn export() -> String {
             Source::Analysis => ("-", "whole-program analysis (`poly deadcode`)"),
             Source::Embedded(_) => ("-", "compiled into poly; remove the entry"),
         };
-        let _ = writeln!(tools, "#   {:<20}{:<9}{}", tool.name, version, note);
+        // Widths are a floor, not a cap: a name at or over the column runs into
+        // the version with no space at all, and the table is the file people
+        // read to find out what poly will download. `bash-language-server` is
+        // exactly twenty characters, which is how that came out.
+        let _ = writeln!(tools, "#   {:<20} {:<8} {}", tool.name, version, note);
     }
 
     let embedded: Vec<&str> = poly_tools::EMBEDDED.iter().map(|(n, _)| *n).collect();

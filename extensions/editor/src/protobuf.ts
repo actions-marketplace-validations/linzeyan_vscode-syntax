@@ -84,6 +84,32 @@ export function goLinksFor(
 }
 
 /**
+ * The generated interface method an rpc becomes, as `Owner.Method`.
+ *
+ * This is the whole answer to "who implements this rpc". `buf lsp serve`
+ * declares no implementation provider, so asking the .proto is a dead end --
+ * but the rpc is a method on the generated `GreeterServer` interface, and the
+ * server that answers for Go answers that question about it in the ordinary
+ * way. poly forms the name; gopls finds the handlers.
+ *
+ * `Server` and not `Client`: an rpc's implementations are the things that
+ * serve it. The client interface has exactly one implementation, the generated
+ * struct, which nobody is looking for.
+ */
+export function goServerMethod(
+  qualified: string,
+  pkg: string | undefined,
+): string | undefined {
+  const inside = pkg && qualified.startsWith(`${pkg}.`)
+    ? qualified.slice(pkg.length + 1)
+    : qualified;
+  const path = inside.split(".");
+  // Exactly two: a service and an rpc in it. Proto has no nested services, so
+  // anything else is not an rpc and this must not guess at it.
+  return path.length === 2 ? `${path[0]}Server.${path[1]}` : undefined;
+}
+
+/**
  * The files protoc writes for `greet.proto`, by name.
  *
  * The stem is protoc's rule and not a guess: the output file is the input file

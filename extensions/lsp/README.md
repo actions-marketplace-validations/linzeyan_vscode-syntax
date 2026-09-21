@@ -58,9 +58,9 @@
 ## 語言功能（`poly.languageServers`，預設關閉）
 
 打開之後，poly 把請求轉給**專案自己 toolchain 裡的** language server——gopls、
-rust-analyzer、clangd、sourcekit-lsp、terraform-ls、lua-language-server，以及 poly
-自己代管的 buf。poly 不實作任何一行語意分析（A6），只做路由，所以答案的品質是那些
-server 的，不是 poly 的。
+rust-analyzer、clangd、sourcekit-lsp、terraform-ls、lua-language-server、
+bash-language-server，以及 poly 自己代管的 buf 與 arity。poly 不實作任何一行語意分析
+（A6），只做路由，所以答案的品質是那些 server 的，不是 poly 的。
 
 轉的是：hover、definition／typeDefinition／implementation／declaration、
 **references**、documentSymbol、completion、rename、code action、signatureHelp、

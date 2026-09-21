@@ -46,7 +46,7 @@
         "poly.runCodeLens.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show `run | debug` above a program's entry point -- `main` in Go, Rust, C, C++ and Java, `Main` in C#. poly ships no debugger: both start whatever the editor's own F5 would, out of the debug extension already installed for the language."
+          "description": "Show `run | debug` above a program's entry point -- `main` in Go, Rust, C, C++ and Java, `Main` in C#, `if __name__ == \"__main__\"` in Python, and the shebang of a shell script. poly ships no debugger: both start whatever the editor's own F5 would, out of the debug extension already installed for the language."
         },
         "poly.markdownMermaid.enabled": {
           "type": "boolean",
