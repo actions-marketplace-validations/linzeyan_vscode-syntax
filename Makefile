@@ -34,7 +34,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
 	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff mermaid-diff engine-diff \
-	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz bump control clean
+	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz gutter-cache bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -162,6 +162,19 @@ toc-fuzz: ## Heading anchors against the ones VSCode's own preview writes
 # children behind, at a column that made them somebody else's.
 list-fuzz: build ## List keystrokes against the formatter that has to accept them
 	node tools/list-fuzz/run.js
+
+# The gutter thumbnail cache, counted rather than argued about. No editor here
+# either: `previewImages` is driven against a stub of the API it uses, which is
+# the only way to ask a question whose answer is a number after a thousand
+# repaints.
+#
+# It earned its place the way the two above did. The cache was keyed by image
+# path and never evicted, so a session that scrolled 400 images past a 20-line
+# window kept 400 decoration types and set every one of them on every repaint --
+# under a comment claiming it was "bounded because a file only has so many
+# visible lines".
+gutter-cache: ## The image gutter cache stays the size of what is on screen
+	node tools/gutter-cache-check.js
 
 # The offline half of ci.yml's grammars job. The other half re-fetches every
 # pinned grammar, which needs the network and a token; what stays here is
@@ -330,7 +343,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ref-lens toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ref-lens toc-fuzz list-fuzz gutter-cache ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0

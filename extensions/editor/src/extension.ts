@@ -531,15 +531,21 @@ function imageOnLine(document: vscode.TextDocument, text: string): string | unde
  * A thumbnail in the gutter for every visible line that names an image.
  *
  * `gutterIconPath` belongs to the decoration *type*, not to a range, so there
- * has to be one type per distinct image. They are cached across repaints and
- * disposed with the extension; the cache is bounded because a file only has so
- * many visible lines.
+ * has to be one type per distinct image. A type is kept while some editor is
+ * showing it and disposed once none is, which is what bounds the cache by what
+ * is on screen rather than by every image the session has scrolled past.
  */
 function previewImages(context: vscode.ExtensionContext): void {
   const types = new Map<string, vscode.TextEditorDecorationType>();
+  // Decorations are cleared per editor and only a repaint of that editor can
+  // clear them, so its last paint is the only record of what its gutter still
+  // holds -- and the only way to tell whether an image is still on screen.
+  const painted = new Map<vscode.TextEditor, Set<string>>();
   context.subscriptions.push({
     dispose: () => types.forEach((type) => type.dispose()),
   });
+
+  const onScreen = (file: string) => [...painted.values()].some((files) => files.has(file));
 
   const paint = (editor: vscode.TextEditor) => {
     const shown = new Map<string, vscode.Range[]>();
@@ -553,26 +559,40 @@ function previewImages(context: vscode.ExtensionContext): void {
           if (!file) {
             continue;
           }
-          if (!types.has(file)) {
-            types.set(
-              file,
-              vscode.window.createTextEditorDecorationType({
-                gutterIconPath: vscode.Uri.file(file),
-                gutterIconSize: "contain",
-              }),
-            );
-          }
           const ranges = shown.get(file) ?? [];
           ranges.push(new vscode.Range(line, 0, line, 0));
           shown.set(file, ranges);
         }
       }
     }
-    // Every known type is set on this editor, including to nothing: a type
-    // left alone keeps whatever it was showing the last time this editor
-    // scrolled past that line.
+    const before = painted.get(editor) ?? new Set<string>();
+    painted.set(editor, new Set(shown.keys()));
+    for (const [file, ranges] of shown) {
+      let type = types.get(file);
+      if (!type) {
+        type = vscode.window.createTextEditorDecorationType({
+          gutterIconPath: vscode.Uri.file(file),
+          gutterIconSize: "contain",
+        });
+        types.set(file, type);
+      }
+      editor.setDecorations(type, ranges);
+    }
+    // A type left alone keeps whatever it was showing the last time this
+    // editor scrolled past that line, so a line this editor has moved off has
+    // to be set to nothing by name -- unless no editor is showing that image
+    // at all, where disposing clears it everywhere and retires the type with
+    // the same call.
     for (const [file, type] of types) {
-      editor.setDecorations(type, shown.get(file) ?? []);
+      if (shown.has(file)) {
+        continue;
+      }
+      if (!onScreen(file)) {
+        type.dispose();
+        types.delete(file);
+      } else if (before.has(file)) {
+        editor.setDecorations(type, []);
+      }
     }
   };
 
@@ -581,7 +601,18 @@ function previewImages(context: vscode.ExtensionContext): void {
     clearTimeout(pending);
     // Slower than the indent repaint on purpose: this one stats files, and
     // nobody needs a thumbnail to keep up with typing.
-    pending = setTimeout(() => vscode.window.visibleTextEditors.forEach(paint), 250);
+    pending = setTimeout(() => {
+      // An editor that is gone is never painted again, so its last paint has
+      // to stop counting as something on screen or it pins those types for the
+      // rest of the session.
+      const open = new Set(vscode.window.visibleTextEditors);
+      for (const editor of painted.keys()) {
+        if (!open.has(editor)) {
+          painted.delete(editor);
+        }
+      }
+      vscode.window.visibleTextEditors.forEach(paint);
+    }, 250);
   };
   context.subscriptions.push({ dispose: () => clearTimeout(pending) });
 

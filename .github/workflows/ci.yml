@@ -477,6 +477,11 @@ jobs:
       # is what puts it here rather than in its own job.
       - name: List keystrokes survive the formatter
         run: node tools/list-fuzz/run.js
+      # No editor here either, for the same reason: the question is how many
+      # decoration types a long scroll keeps alive, and counting them needs the
+      # esbuild the step above installed rather than a window.
+      - name: Image gutter cache stays the size of the screen
+        run: node tools/gutter-cache-check.js
       # The other half of A9, here because it needs the tree the step above just
       # installed: what the preview bundle carries is decided by pnpm's
       # resolution, not by a manifest anyone can read without it.
