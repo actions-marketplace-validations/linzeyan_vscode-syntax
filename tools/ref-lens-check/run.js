@@ -79,6 +79,12 @@ const EXPECTED = [
   "Meter,",
 ];
 
+/** Declarations that must carry an implementation count, and what it must say. */
+const IMPLS = {
+  "export interface Shape {": "1 impl",
+  "area(): number;": "1 impl",
+};
+
 /** Names that must never carry one, and what each of them is. */
 const FORBIDDEN = {
   // The one place poly and the editor deliberately disagree: VSCode counts a
@@ -161,6 +167,27 @@ async function main() {
   }
   for (const [text, what] of Object.entries(FORBIDDEN)) {
     if (lensed.has(text)) problems.push(`lens on ${what}: ${text}`);
+  }
+  const titles = new Map(report.lenses.map((one) => [one.text, one.poly]));
+  for (const [text, said] of Object.entries(IMPLS)) {
+    if (!(titles.get(text) ?? []).includes(said)) {
+      problems.push(`no "${said}" on ${text} — got ${JSON.stringify(titles.get(text) ?? [])}`);
+    }
+  }
+  // The other direction of the same query, and the reason it is not simply
+  // drawn everywhere: measured 2026-09-21, TypeScript's implementation provider
+  // answers nothing at `class Circle implements Shape`, so an unconditional
+  // upward lens reads `no interfaces` over every class and method in the
+  // language. poly earns that lens per language instead -- and this is the
+  // check that says whether it stayed earned.
+  for (const one of report.lenses) {
+    const upward = one.poly.filter((title) => /interface/.test(title));
+    if (upward.length > 0) {
+      problems.push(
+        `an upward implementation lens where the provider does not answer upward: `
+          + `${one.text} says ${upward.join(", ")}`,
+      );
+    }
   }
 
   console.log(`\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens`);

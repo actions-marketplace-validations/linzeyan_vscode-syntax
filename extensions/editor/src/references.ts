@@ -20,20 +20,41 @@ export interface LensSymbol {
   readonly children?: readonly LensSymbol[];
 }
 
+/**
+ * Which way the implementation question points at a declaration.
+ *
+ * `textDocument/implementation` is one request with two readings, and the
+ * declaration under the cursor decides which one you get. Measured against
+ * gopls 0.23 (2026-09-21): asked at `type Shape interface` it answers with
+ * `Circle` and `Square`, and asked at `type Circle struct` it answers with
+ * `Shape`. Same for a method in either direction.
+ *
+ * So the count is the same query either way and only the word differs -- and
+ * the word has to differ, because "2 impls" over a struct would read as "this
+ * struct has two implementations", which is not a thing.
+ */
+export type Direction = "down" | "up";
+
 /** A declaration that gets a lens, and which lenses it gets. */
 export interface LensTarget<T extends LensSymbol> {
   readonly symbol: T;
   /**
-   * Whether an implementation count belongs above it.
+   * Which implementation count belongs above it, if any.
    *
-   * "How many types satisfy this" is a question only an abstract declaration
-   * has an answer to, and asking it of every function would put `no impls` over
-   * most of the file. An interface and the methods declared inside one are that
-   * case in every language measured -- Go's interface, Rust's trait, Java's and
-   * TypeScript's interface all arrive as `SymbolKind.Interface` with their
-   * methods as children.
+   * Neither question means anything over a free function or a constant, and
+   * asking anyway would put a second grey word over most of the file. What is
+   * left is the two halves of the same relation: an abstract declaration, whose
+   * answer is who satisfies it (`down`), and a concrete type or method, whose
+   * answer is what it satisfies (`up`).
+   *
+   * An interface and the methods declared inside one arrive as
+   * `SymbolKind.Interface` with their methods as children in every language
+   * measured -- Go's interface, Rust's trait, Java's and TypeScript's
+   * interface. A Go method is the case that does not nest: gopls reports it at
+   * the top level as `(Circle).Area` rather than as a child of `Circle`, which
+   * is why `up` is decided by the symbol's own kind and not by its parent's.
    */
-  readonly implementable: boolean;
+  readonly implementation?: Direction;
 }
 
 /** A reference location, and the declaration it might be. */
@@ -108,6 +129,25 @@ const CONTAINER_KINDS: ReadonlySet<number> = new Set([
 ]);
 
 /**
+ * The kinds that can satisfy an interface, and so have an `up` answer.
+ *
+ * A function and a constant are left out on purpose: nothing implements them,
+ * so every one of them would carry a permanent `no interfaces`.
+ */
+const CONCRETE_KINDS: ReadonlySet<number> = new Set([
+  4, // Class
+  5, // Method
+  22, // Struct
+]);
+
+function directionFor(kind: number, insideInterface: boolean): Direction | undefined {
+  if (kind === INTERFACE || insideInterface) {
+    return "down";
+  }
+  return CONCRETE_KINDS.has(kind) ? "up" : undefined;
+}
+
+/**
  * The declarations in `symbols` that get a lens, outermost first.
  *
  * `cap` bounds a generated file -- a protobuf stub is thousands of symbols, and
@@ -128,7 +168,7 @@ export function lensTargets<T extends LensSymbol>(
       }
       const isInterface = symbol.kind === INTERFACE;
       if (COUNTED_KINDS.has(symbol.kind)) {
-        found.push({ symbol, implementable: isInterface || insideInterface });
+        found.push({ symbol, implementation: directionFor(symbol.kind, insideInterface) });
       }
       if (depth < MAX_DEPTH && symbol.children && CONTAINER_KINDS.has(symbol.kind)) {
         // A symbol's children are the same concrete type it is; the interface
@@ -156,13 +196,15 @@ export function lensTargets<T extends LensSymbol>(
  * same identifier in every server measured, but they are two answers to two
  * questions and only one of them has to be the identifier.
  */
-export function countElsewhere(
-  locations: readonly At[],
+export function elsewhere<T>(
+  locations: readonly T[],
   declaration: At,
-): number {
-  return locations.filter(
-    (at) => at.uri !== declaration.uri || at.line !== declaration.line,
-  ).length;
+  where: (one: T) => At,
+): T[] {
+  return locations.filter((one) => {
+    const at = where(one);
+    return at.uri !== declaration.uri || at.line !== declaration.line;
+  });
 }
 
 /** What the reference lens says. */
@@ -176,14 +218,16 @@ export function refLabel(count: number): string {
 }
 
 /**
- * What the implementation lens says.
+ * What the implementation lens says, in whichever direction it points.
  *
  * Same shape as `refLabel` for the same reason: an interface nothing implements
- * is worth a word, not a nought.
+ * is worth a word, not a nought. The noun is the whole difference between the
+ * two readings of the one query -- see `Direction`.
  */
-export function implLabel(count: number): string {
+export function implLabel(count: number, direction: Direction): string {
+  const noun = direction === "down" ? "impl" : "interface";
   if (count === 0) {
-    return "no impls";
+    return `no ${noun}s`;
   }
-  return count === 1 ? "1 impl" : `${count} impls`;
+  return count === 1 ? `1 ${noun}` : `${count} ${noun}s`;
 }

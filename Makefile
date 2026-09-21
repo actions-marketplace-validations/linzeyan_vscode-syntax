@@ -34,7 +34,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
 	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff mermaid-diff engine-diff \
-	lsp-fmt-diff ref-lens toc-fuzz list-fuzz bump control clean
+	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -264,6 +264,16 @@ grammar-real: tokdeps ## grammar-diff over ordinary source files from GRAMMAR_TR
 
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 	node tools/editor-diff/run.js
+
+# The other half of ref-lens, and an audit rather than a gate for one reason:
+# it needs `go`, `gopls` and buf, which CI does not have. What it holds down is the
+# half of poly-editor that is not poly's code -- five lenses and commands are
+# wired to particular code action kinds and to `textDocument/implementation`
+# read backwards, and each of those is a claim about gopls that was true when
+# measured. ref-lens cannot see any of it: the provider it asks is TypeScript's,
+# which does not answer the backwards question at all.
+lens-probe: ## What gopls and buf still offer the lenses poly routes to
+	python3 tools/lens-probe.py
 
 # The one differential whose reference ships inside the editor rather than
 # beside it: from 1.135 VSCode draws mermaid fences itself, and poly's renderer

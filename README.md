@@ -110,6 +110,21 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   `Extract subexpression to variable`／`Extract to constant in enclosing scope`），快捷鍵
   綁不到任何一個。poly 問的是 LSP 標準的 `refactor.extract`／`refactor.inline` kind，
   過濾掉 `Extract function` 那種不是變數的，剛好一項就直接套用。做事的是語言自己的 server。
+- **`Poly: Move to New File` ／ `Change Signature` ／ `Implement Interface`**：同一個形狀再
+  三個，從命令面板叫。Move to New File 問 `refactor.extract` 挑 `toNewFile`；Change Signature
+  在游標原位問 `refactor.rewrite`，**游標要在參數上**；Implement Interface 問 `quickfix` 挑
+  「補上缺的方法」，**要先有一個編不過的斷言**（Go 是 `var _ Shape = Triangle{}`），因為
+  server 是對著診斷提供那條修正的。
+- **引用與實作 CodeLens**：每個宣告一行 `11 refs`；interface 多一顆 `3 impls`，具體型別多一顆
+  `1 interface`，方法寫在型別外面的語言（Go）再多一顆 `4 methods`。只有一筆就直接跳過去，多筆
+  開 References 面板。全部的數字都來自該語言已註冊的 provider，poly 只數與畫。
+  `poly.referencesCodeLens.enabled` 可關。
+- **`run | debug` CodeLens**：程式進入點（Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`）
+  上方一行。poly 沒有 debugger——按下去是編輯器自己的 Start Debugging，跑你已經裝的 debug
+  extension。`poly.runCodeLens.enabled` 可關。
+- **protobuf → 生成的 Go**：`.proto` 的 `message`／`enum` 上方 `go type`，`service` 上方
+  `go server`／`go client`，跳到 protoc 生出來的宣告。認 protoc-gen-go 與 protoc-gen-go-grpc
+  的命名規則；生成檔不在 workspace 裡就不畫。`poly.protobufCodeLens.enabled` 可關。
 - **跨檔案 next／previous change ＋ `Poly: Revert Selected Changes and Save`**：
   `cmd/ctrl+alt+z`／`cmd/ctrl+alt+a` 跳到上／下一個有改動的檔案並落在改動上，`alt+q`
   還原游標所在的 hunk 並存檔。VSCode 內建的是「同一個檔案裡的下一處改動」，跨檔案那
@@ -706,7 +721,8 @@ poly **不寫使用者的 `settings.json`**（A8），所以下面這些必須�
       "rangeVariableTypes": true
     }
   },
-  // 點 `N refs`／`N impl` CodeLens 時開 peek 還是開 References 面板。預設 "peek"。
+  // 編輯器自己的 Find All References 開 peek 還是開 References 面板。預設 "peek"；
+  // 設成 "view" 會和 poly 的 `N refs` CodeLens 一致（那顆一律開面板）。
   "references.preferredLocation": "view"
 }
 ```

@@ -82,7 +82,9 @@ Enter 由這裡接管，那份是單獨安裝 syntax 時的退路——它接不
 ### 引用計數 CodeLens
 
 每個宣告上方一行 `11 refs`／`1 ref`／`no refs`，點下去開引用清單。interface 與它的
-方法再多一顆 `1 impl`／`3 impls`／`no impls`，點下去列出實作它的型別。
+方法再多一顆 `1 impl`／`3 impls`／`no impls`，點下去列出實作它的型別；反過來，具體
+型別與它的方法拿到 `1 interface`／`2 interfaces`，點下去到它滿足的那個 interface。
+方法寫在型別外面的語言（Go）再多一顆 `4 methods`。
 
 **poly 不做任何分析。** 它問編輯器要 `vscode.executeReferenceProvider` 的結果，編輯器
 去問該語言已經註冊的 provider——Go 的話那就是 poly-lsp 前面那層轉給 gopls 的 proxy——
@@ -110,14 +112,25 @@ TypeScript 有這個 lens，其他語言都沒有。
     漏掉它會讓 Rust 的每個方法都失去 lens。
 - 數字**不含宣告自己**。`executeReferenceProvider` 是帶 `includeDeclaration: true` 問的，
   不扣掉的話沒人用的東西會顯示成 `1 ref`——而那正是這個計數最該讓人看見的一種。
-- 點下去開 peek 還是開 References 面板，由 VSCode 自己的
-  `references.preferredLocation`（`peek`／`view`）決定，不是 poly 選的。要圖上那種樹狀
-  面板就設成 `"view"`。
-- **`N impl` 只掛在 interface 與 interface 的成員上。** 一顆 lens 只掛一個命令，所以
-  `1 ref | 1 impl` 其實是兩顆共用同一行的 lens。問一個普通 function「有幾個型別滿足它」
-  沒有答案，整份檔案掛滿 `no impls` 等於沒說話；而「interface，或它底下的成員」在 Go 的
-  interface、Rust 的 trait、Java／TypeScript 的 interface 都成立。
-- `poly.referencesCodeLens.enabled` 可關（兩種 lens 一起）。編輯器只解析**看得見**的那幾條
+- **點下去分三種，因為 `N refs` 其實是三個手勢。** 沒人引用就沒地方去，那條 lens 是純文字；
+  **只有一個就直接跳過去**，為了一筆結果開一個清單是多按一次；兩個以上開 References 樹狀
+  面板——peek 一碰編輯器就關掉，清單要讀就該留著。`references-view` 的命令不吃參數（它讀
+  active editor 的游標），所以 poly 先把游標移到宣告上再叫它。
+- **`N impl` 掛在 interface 與它的成員上，`N interfaces` 掛在具體型別與方法上。** 一顆 lens
+  只掛一個命令，所以 `1 ref | 1 impl` 其實是兩顆共用同一行的 lens。同一個
+  `textDocument/implementation` 兩個方向讀，只有字不一樣——「2 impls」掛在 struct 上會變成
+  「這個 struct 有兩個實作」，那不是一句話。
+  - **每個方向由每個語言各自賺到。** 實測（2026-09-21）：gopls 在 `type Circle struct` 上答
+    得出 `Shape`，**TypeScript 在 `class Circle implements Shape` 上什麼都不答**，而
+    `buf lsp serve` 兩個方向都不答——無條件畫的結果是 TS 每個 class 一條永久的
+    `no interfaces`、`.proto` 每個 service 與 rpc 一條永久的 `no impls`。現在是：某個語言的
+    provider 在某個方向答出過一次，那個方向才開，而且**只記 yes 不記 no**（一整檔沒人實作的
+    interface 跟「這語言問不到」長得一樣，記成 no 會讓之後長出實作的專案再也看不到）。
+- **`N methods` 不問任何人**，它就在畫 outline 用的那份符號樹裡。gopls 把 Go 的方法報成頂層
+  的 `(Circle).Area`，`buf lsp serve` 把 rpc 報成 `greet.v1.Greeter.SayHello`——兩種都是
+  「方法在型別外面」，也就是唯一需要一個數字的情況。方法就寫在型別裡面的語言（TypeScript、
+  Java、Python）不畫：數一個已經在畫面上的東西是裝飾。
+- `poly.referencesCodeLens.enabled` 可關（全部一起）。編輯器只解析**看得見**的那幾條
   lens，所以成本是「畫面上幾個宣告」而不是「檔案裡幾個宣告」。
 
 ### Postfix completion
@@ -156,6 +169,61 @@ code action kind——真正做事的是該語言的 server，poly 只負責挑�
 - 剛好只有一項就直接套用，多於一項才跳 QuickPick。
 - 選取範圍是空的時候用游標所在的那個字。再寬就是 poly 在決定「運算式從哪裡開始」，那是語言
   的工作，不是 poly 的。
+
+### Poly: Move to New File ／ Change Signature ／ Implement Interface
+
+同一個形狀再三個：問一種標準的 code action kind，挑出名字對得上的那幾項，套用。做事的一樣
+是該語言的 server。三個都沒有預設快捷鍵，從命令面板叫。
+
+- **Move to New File** 問 `refactor.extract`，挑 `toNewFile`。**不是**問標準的
+  `refactor.move`——實測 gopls 對那個 kind 回 null，這個手勢它歸在
+  `refactor.extract.toNewFile`（`Extract declarations to new file`）底下。
+- **Change Signature** 在游標原位問 `refactor.rewrite`。沒有「改簽名」對話框這種東西：
+  gopls 把它拆成 `Move parameter left`、`Split parameters into separate lines`、參數沒用到
+  時的 `Remove unused parameter`，各自是一條 code action。**游標要在參數上**——在函式名上
+  問同一個 kind，gopls 回 null。
+- **Implement Interface** 問 `quickfix`，挑「補上缺的方法」那條（gopls 說
+  `Declare missing methods of X`、rust-analyzer 說 `Implement missing members`、TypeScript
+  說 `Implement interface 'X'`）。**要先有一個編不過的斷言**，例如 Go 的
+  `var _ Shape = Triangle{}`：server 是對著診斷提供這個 quickfix 的，沒有診斷就沒有東西可
+  挑。poly 不替你決定「你想實作哪個 interface」——那是分析，01 A6 擋掉的正是它。
+- 這三個**沒有 fallback**，另外兩個有。`refactor.inline` 整個 kind 就是那件事，所以沒量過的
+  講法讓你多按一次選單是對的；`quickfix` 是每個 server 丟所有修正的那個桶子，一個叫
+  Implement Interface 的命令跑出 `Add missing import` 比什麼都不做更糟。
+
+### `run | debug` CodeLens
+
+程式進入點上方一行 `run | debug`——Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`。
+`poly.runCodeLens.enabled` 可關。
+
+**poly 沒有 debugger，也不啟動任何行程。** 那兩個字按下去就是編輯器自己的
+Start Debugging／Start Without Debugging（F5／`ctrl+F5`），跑的是你已經裝的 debug
+extension——Go 就是 `golang.go` 的 delve。`contributes.debuggers` 一個都沒有，DAP 一行都
+沒有：poly 決定的只是那顆按鈕放哪裡。有 `launch.json` 時它等於按 F5（跑你選中的那個
+設定），沒有時由該語言的 debug extension 給 active file 一份動態設定——後者正是這條 lens
+存在的理由，也是「我在看的這個檔」跟「F5 會跑什麼」剛好是同一件事的情況。
+
+Python 沒有：它的進入點是 `if __name__ == "__main__"`，一個敘述句，沒有任何 symbol
+provider 會把它報成宣告。
+
+### protobuf → 生成的 Go
+
+`.proto` 裡 `message`／`enum` 上方一行 `go type`，`service` 上方 `go server`、`go client`，
+點下去跳到 protoc 生出來的 Go 宣告。`poly.protobufCodeLens.enabled` 可關。
+
+- **這是命名規則，不是分析。** `message HelloRequest`（package `greet.v1`）在
+  `greet.pb.go` 裡就叫 `HelloRequest`，巢狀的 `HelloRequest.Nested` 叫
+  `HelloRequest_Nested`，`service Greeter` 生出 `GreeterServer` 與 `GreeterClient`——因為
+  protoc-gen-go 的定義就是這樣。poly 組出名字，去問已經在跑的 Go server 那個名字在哪。
+- proto 這邊的宣告來自 `buf lsp serve`（poly 本來就把 `.proto` 路由給它），Go 那邊來自替
+  生成檔回答的 server。生成檔是**照檔名找一次、整份符號讀一次**，不是每個 message 去做一次
+  workspace 搜尋。
+- **找不到就不畫**，不畫一顆按了沒反應的。所以「還沒 generate」跟「生在 workspace 外面」
+  都是安靜的。
+- 只認 protoc-gen-go 與 protoc-gen-go-grpc。connect-go 的 `greet.connect.go` 之類不碰——
+  跳錯地方比沒有 lens 更糟，而那些從 `.proto` 本身看不出來。
+- rpc 沒有 `impls`：`buf lsp serve` 不宣告 implementation provider。同一份資訊走另一條路——
+  service 上的 `go server`／`go client` 就是「誰實作這些 rpc」。
 
 ### 跨檔案 next／previous change ＋ Revert and Save
 

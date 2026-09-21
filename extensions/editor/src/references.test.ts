@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { countElsewhere, implLabel, lensTargets, refLabel } from "./references";
+import { At, elsewhere, implLabel, lensTargets, refLabel } from "./references";
 
 // vscode.SymbolKind, by the numbers the provider actually hands over.
 const FUNCTION = 11;
@@ -91,18 +91,30 @@ test("the declaration itself is not one of its references", () => {
   // executeReferenceProvider asks with includeDeclaration: true, so leaving it
   // in would put "1 ref" over something nothing uses -- the exact case the
   // count exists to make visible.
+  const itself = (one: At) => one;
   const declaration = { uri: "file:///p/naming.go", line: 9 };
   const locations = [
     declaration,
     { uri: "file:///p/naming.go", line: 16 },
     { uri: "file:///p/scraper_test.go", line: 42 },
   ];
-  assert.equal(countElsewhere(locations, declaration), 2);
-  assert.equal(countElsewhere([declaration], declaration), 0);
+  assert.deepEqual(elsewhere(locations, declaration, itself), locations.slice(1));
+  assert.deepEqual(elsewhere([declaration], declaration, itself), []);
   // Same line number in a different file is a different place.
-  assert.equal(
-    countElsewhere([{ uri: "file:///p/other.go", line: 9 }], declaration),
-    1,
+  const other = { uri: "file:///p/other.go", line: 9 };
+  assert.deepEqual(elsewhere([other], declaration, itself), [other]);
+});
+
+test("what survives the filter is what a click navigates to", () => {
+  // Not just how many: a lens over a declaration with exactly one reference
+  // jumps straight there, so the surviving entry has to be the reference and
+  // never the declaration -- jumping to the line the user is already on is the
+  // one outcome worse than opening a list of one.
+  const declaration = { uri: "file:///p/naming.go", line: 9 };
+  const use = { uri: "file:///p/scraper.go", line: 3 };
+  assert.deepEqual(
+    elsewhere([declaration, use], declaration, (one) => one),
+    [use],
   );
 });
 
@@ -110,28 +122,49 @@ test("the label says what the number means", () => {
   assert.equal(refLabel(0), "no refs");
   assert.equal(refLabel(1), "1 ref");
   assert.equal(refLabel(11), "11 refs");
-  assert.equal(implLabel(0), "no impls");
-  assert.equal(implLabel(1), "1 impl");
-  assert.equal(implLabel(3), "3 impls");
+  assert.equal(implLabel(0, "down"), "no impls");
+  assert.equal(implLabel(1, "down"), "1 impl");
+  assert.equal(implLabel(3, "down"), "3 impls");
+  // The same query read the other way round. "2 impls" over a struct would
+  // claim the struct has implementations, which is not a thing.
+  assert.equal(implLabel(0, "up"), "no interfaces");
+  assert.equal(implLabel(1, "up"), "1 interface");
+  assert.equal(implLabel(2, "up"), "2 interfaces");
 });
 
-test("only an interface and its methods are asked for implementations", () => {
-  // Asking a plain function "how many types satisfy this" has no answer, so a
-  // second lens over every declaration in the file would read `no impls` all
-  // the way down and say nothing.
+test("each declaration is asked the implementation question its kind has", () => {
+  // Both readings of `textDocument/implementation`: an interface is asked who
+  // satisfies it, a concrete type and its methods what they satisfy, and a free
+  // function is asked nothing -- a second grey word over every function in the
+  // file would say the same nothing on every line.
   const file = [
     symbol("Store", INTERFACE, [symbol("Get", METHOD)]),
     symbol("memStore", STRUCT, [symbol("Get", METHOD)]),
     symbol("New", FUNCTION),
   ];
   assert.deepEqual(
-    lensTargets(file, 100).map((t) => [t.symbol.name, t.implementable]),
+    lensTargets(file, 100).map((t) => [t.symbol.name, t.implementation]),
     [
-      ["Store", true],
-      ["Get", true],
-      ["memStore", false],
-      ["Get", false],
-      ["New", false],
+      ["Store", "down"],
+      ["Get", "down"],
+      ["memStore", "up"],
+      ["Get", "up"],
+      ["New", undefined],
     ],
+  );
+});
+
+test("a Go method is asked too, though it is nobody's child", () => {
+  // gopls reports a method at the top level as `(Circle).Area` rather than as a
+  // child of `Circle` -- measured 2026-09-21. Deciding the direction from the
+  // parent would have left every Go method without the lens that says which
+  // interface it satisfies, which is most of what the lens is for in Go.
+  const file = [
+    symbol("Circle", STRUCT, [symbol("Radius", FIELD)]),
+    symbol("(Circle).Area", METHOD),
+  ];
+  assert.deepEqual(
+    lensTargets(file, 100).map((t) => [t.symbol.name, t.implementation]),
+    [["Circle", "up"], ["(Circle).Area", "up"]],
   );
 });
