@@ -379,8 +379,20 @@ assert declined.get("error", {}).get("code") == -32601, (
     f"expected a decline: {declined}"
 )
 
-# Idle RSS after real work (budget: <150MB, 02 §9). ps works on mac/linux;
-# the Windows number comes from the VM checklist.
+# RSS after the handshake and a few small buffers. ps works on mac/linux; the
+# Windows number comes from the VM checklist.
+#
+# This bounds a daemon born fat and nothing more, which is less than it used to
+# claim. It read "idle RSS budget < 150MB, exceeding it is a bug" -- measured
+# 2026-09-21, that is not true of a session: opening and formatting one 121 KB
+# minified `.js` takes a fresh daemon from 13 MB to 164 MB, and `didClose`
+# returns none of it, because macOS libmalloc keeps large blocks. Three such
+# files and it sits at 285 MB for good. The number this asserts is safe only
+# because the workload above it is four small documents.
+#
+# What is true is the shape, and the soak below is what checks it: RSS is a
+# high-water mark set by the heaviest buffer the session has seen, not a slope
+# that follows how much work has been done.
 if sys.platform != "win32":
 
     def rss_kb_now():
@@ -388,7 +400,7 @@ if sys.platform != "win32":
 
     rss_kb = rss_kb_now()
     print(f"daemon RSS after formatting+lint: {rss_kb / 1024:.1f} MB")
-    assert rss_kb < 150 * 1024, f"RSS budget exceeded: {rss_kb} KB"
+    assert rss_kb < 150 * 1024, f"fat for four small buffers: {rss_kb} KB"
 
     # That snapshot catches a daemon born fat. It cannot see what an editor
     # session actually hits -- RSS climbing buffer after buffer for hours and
