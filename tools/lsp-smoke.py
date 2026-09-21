@@ -382,9 +382,163 @@ assert declined.get("error", {}).get("code") == -32601, (
 # Idle RSS after real work (budget: <150MB, 02 §9). ps works on mac/linux;
 # the Windows number comes from the VM checklist.
 if sys.platform != "win32":
-    rss_kb = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(proc.pid)]))
+
+    def rss_kb_now():
+        return int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(proc.pid)]))
+
+    rss_kb = rss_kb_now()
     print(f"daemon RSS after formatting+lint: {rss_kb / 1024:.1f} MB")
     assert rss_kb < 150 * 1024, f"RSS budget exceeded: {rss_kb} KB"
+
+    # That snapshot catches a daemon born fat. It cannot see what an editor
+    # session actually hits -- RSS climbing buffer after buffer for hours and
+    # never coming back down -- because it is one measurement after a little
+    # work.
+    #
+    # Measured 2026-09-21 (macOS 26.6, poly 0.14.0) by driving 14k files of a
+    # real source tree through open/change/format/save/close: the daemon's RSS
+    # is a high-water mark, not a slope. It is set by the heaviest single
+    # buffer the session has seen -- one 121KB minified .js takes it from 13MB
+    # to 164MB on its own, and macOS libmalloc keeps those large blocks long
+    # after the close -- and repeating work stops moving it after three passes:
+    # passes 4 to 25 over that same document added 0.2MB between them, and a
+    # 400-file round repeated twelve times ended flat for its last 1600 cycles.
+    #
+    # So the slope is the thing worth holding down and the level is not: an
+    # absolute ceiling here would be a claim about which file the user opens.
+    # Four buffers, a fresh uri each round, and the second half of the rounds
+    # measured against the first.
+    SOAK_ROUNDS = 120
+
+    # 4MB, from both ends. Eleven runs of this exact soak drift +0.0MB at the
+    # median and 1.6MB at worst. The same soak with the didClose taken out --
+    # where the daemon genuinely does keep every buffer it was shown -- drifts
+    # +9.5, +9.7 and +9.6MB, and fails. 4MB is between the two on a log scale:
+    # 2.5x over anything a healthy run has produced, 2.4x under the smallest
+    # reading of the failure it exists to catch.
+    SOAK_BUDGET_MB = 4
+
+    def grow(block):
+        """~16KB of buffer, numbered so nothing downstream can fold the repeats."""
+        pieces, size, n = [], 0, 0
+        while size < 16 * 1024:
+            piece = block.replace("$n", str(n))
+            pieces.append(piece)
+            size += len(piece)
+            n += 1
+        return "".join(pieces)
+
+    # Unformatted, and misspelt on purpose: a clean buffer soaks a much
+    # shorter chain than an editor's, because nothing reaches the diagnostic
+    # store or a publish. These four produce ~160 findings per round between
+    # them, and every one of them is memory somebody has to hand back.
+    TS_BLOCK = """export  function handler$n(request:Request, context :Context) {
+  const  payload = {id:$n, kind:"soak", tags:["alpha","beta"], nested:{deep:1}};
+  if(!request.ok){ throw new Error("teh request failed") }
+  return context.send( payload )
+}
+"""
+    JSON_BLOCK = '  {"id": $n,  "kind":"soak",   "tags":["alpha","beta"]},\n'
+    MD_BLOCK = """## Section $n
+
+Some prose that is spelt teh wrong way, with a very long line that some linter
+somewhere is going to have an opinion about, followed by a list:
+
+*   one
+*   two
+"""
+    CSS_BLOCK = ".block-$n { color :#FFF ;  margin:0px;  padding : 1px 2px 3px }\n"
+
+    SOAK_DOCS = [
+        ("typescript", "ts", grow(TS_BLOCK)),
+        ("json", "json", "[\n" + grow(JSON_BLOCK)[:-2] + "\n]\n"),
+        ("markdown", "md", grow(MD_BLOCK)),
+        ("css", "css", grow(CSS_BLOCK)),
+    ]
+    soak_dir = tempfile.mkdtemp(prefix="poly-smoke-soak-")
+    marks = []
+    soak_id = 1000
+    for round_no in range(SOAK_ROUNDS):
+        for language, ext, body in SOAK_DOCS:
+            # A real file per round. Real, because typos reads the path and
+            # not the buffer, so a uri with nothing under it quietly drops a
+            # linter out of the soak. Per round, because a document map that
+            # never lets go of an entry can only show as growth if the keys
+            # differ. Left behind rather than unlinked: didSave is a
+            # notification, so the lint reading this path is still in flight
+            # when the next cycle starts, and removing it here raced that read.
+            soak_path = os.path.join(soak_dir, f"{round_no}.{ext}")
+            with open(soak_path, "w") as f:
+                f.write(body)
+            soak_uri = "file://" + soak_path
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": soak_uri,
+                            "languageId": language,
+                            "version": 1,
+                            "text": body,
+                        }
+                    },
+                }
+            )
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": {"uri": soak_uri, "version": 2},
+                        "contentChanges": [{"text": body + "\n"}],
+                    },
+                }
+            )
+            soak_id += 1
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": soak_id,
+                    "method": "textDocument/formatting",
+                    "params": {
+                        "textDocument": {"uri": soak_uri},
+                        "options": {"tabSize": 2, "insertSpaces": True},
+                    },
+                }
+            )
+            recv_response(soak_id)
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didSave",
+                    "params": {"textDocument": {"uri": soak_uri}},
+                }
+            )
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didClose",
+                    "params": {"textDocument": {"uri": soak_uri}},
+                }
+            )
+            # recv_response keeps every notification it walked past, and a
+            # round publishes ~160 diagnostics. Holding 120 rounds of them
+            # would have this script's memory dwarf the thing it measures.
+            NOTIFICATIONS.clear()
+        marks.append(rss_kb_now())
+
+    half = SOAK_ROUNDS // 2
+    drift_mb = (marks[-1] - marks[half - 1]) / 1024
+    print(
+        f"daemon RSS over {SOAK_ROUNDS} soak rounds:"
+        f" {marks[0] / 1024:.1f} -> {marks[half - 1] / 1024:.1f} ->"
+        f" {marks[-1] / 1024:.1f} MB (drift {drift_mb:+.1f} MB)"
+    )
+    assert drift_mb < SOAK_BUDGET_MB, (
+        f"RSS still climbing {SOAK_ROUNDS - half} rounds after warm-up:"
+        f" {drift_mb:+.1f} MB, series {[round(kb / 1024) for kb in marks]}"
+    )
 
 send({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": None})
 recv_response(3)
@@ -398,5 +552,5 @@ assert proc.returncode == 0, f"server exit code {proc.returncode}"
 print(
     "LSP SMOKE PASS: formatting, Format Selection, diagnostics, spelling,"
     " lint excludes, rule hover, batch executeCommand, minify, .editorconfig,"
-    " unhandled methods declined, clean shutdown"
+    " unhandled methods declined, RSS settles under a soak, clean shutdown"
 )
