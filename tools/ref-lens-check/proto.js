@@ -241,6 +241,15 @@ exports.observeProto = async function observeProto() {
   // `buf lsp serve`, as measured: flat, and every name already qualified by the
   // proto package -- which is the package `goNameOf` has to strip back off. An
   // rpc is a top-level `Method` named through its service, not a child of it.
+  //
+  // Built as `DocumentSymbol` where buf sends the other shape. Measured
+  // 2026-09-22: buf answers in `SymbolInformation`, which VSCode re-nests by
+  // range containment, and the only reason nothing nests is that buf's ranges
+  // cover a name rather than a body. Both arrive here as the same flat tree,
+  // so this fixture asks the right question -- but it could not tell you if
+  // buf started sending body-spanning ranges, because as a `DocumentSymbol`
+  // tree it would still be taken as written. `make lens-probe` asserts both
+  // halves of that, and is the half of this pair that would see it.
   const proto = [
     symbol(PROTO, Class, "greet.v1.HelloRequest", "message HelloRequest"),
     symbol(PROTO, Enum, "greet.v1.Tone", "enum Tone"),

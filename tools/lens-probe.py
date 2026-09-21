@@ -36,6 +36,15 @@ guards, and all three are asserted below:
     `refactor.extract.toNewFile`, which is why `REFACTORINGS.moveToNewFile`
     asks for the extract kind.
 
+And one more, measured 2026-09-22, which is here because it was assumed rather
+than asked: buf answers in `SymbolInformation`, the flat shape, and VSCode
+re-nests that one by range containment. Nothing nests anyway, but only because
+buf's ranges cover a symbol's name rather than its body -- `service Greeter` is
+eight columns of one line and does not reach the rpc below it. Body-spanning
+ranges are what most servers send, and with them every rpc would arrive as a
+child of its service. Both halves are asserted, because either one changing
+moves the tree `linkGeneratedGo` walks.
+
 It also found a gopls bug worth not tripping over: asked for an implementation
 at the `func` keyword of a method declaration, gopls v0.23.0 segfaults in
 `implFuncs`. poly asks at the symbol's `selectionRange.start`, which is the
@@ -429,8 +438,64 @@ def probe_buf(check, buf):
         if isinstance(tree, list) and tree:
             break
         time.sleep(1)
-    flat = flatten(tree if isinstance(tree, list) else [])
+    top = tree if isinstance(tree, list) else []
+    # Which of the two symbol shapes buf answers in. Measured 2026-09-22: the
+    # older one, `SymbolInformation` -- flat, carrying a `location` and no
+    # `selectionRange`. It is asserted rather than merely read because the two
+    # shapes reach the editor differently: VSCode takes a `DocumentSymbol` tree
+    # as given, and re-nests a flat list by range containment. `make ref-lens`
+    # feeds the proto lens a fixture, and a fixture in the other shape would be
+    # a check of a tree no server sends.
+    shape = (
+        "DocumentSymbol"
+        if top and all("selectionRange" in one for one in top)
+        else "SymbolInformation"
+        if top and all("location" in one for one in top)
+        else "(neither, or mixed)"
+    )
+    check(
+        shape == "SymbolInformation",
+        "buf answers in SymbolInformation, which the editor re-nests by range",
+        shape,
+    )
+    flat = flatten(top)
     by_name = {name: (depth, kind) for depth, kind, name in flat}
+
+    # And what stops that re-nesting from happening: buf's ranges cover the
+    # name, not the body. `service Greeter` is columns 8-15 of its own line, so
+    # it does not reach the rpc a line below, and no symbol here contains
+    # another. The flat list therefore stays flat.
+    #
+    # Both halves are load-bearing and neither is obvious. A server that sent
+    # the same names with body-spanning ranges -- the shape most of them use --
+    # would hand poly's provider a tree where every rpc is a child of its
+    # service and every field a child of its message, and `linkGeneratedGo`
+    # reads top-level symbols and their children differently.
+    spans = {one["name"]: one["location"]["range"] for one in top if "location" in one}
+
+    def inside(outer, inner):
+        start = (outer["start"]["line"], outer["start"]["character"])
+        end = (outer["end"]["line"], outer["end"]["character"])
+        return (
+            start <= (inner["start"]["line"], inner["start"]["character"])
+            and (
+                inner["end"]["line"],
+                inner["end"]["character"],
+            )
+            <= end
+        )
+
+    nested = sorted(
+        f"{inner} inside {outer}"
+        for outer, out_range in spans.items()
+        for inner, in_range in spans.items()
+        if outer != inner and inside(out_range, in_range)
+    )
+    check(
+        not nested,
+        "buf's ranges cover the name and not the body, so nothing contains anything",
+        nested or "(nothing nests)",
+    )
     check(
         by_name.get("greet.v1.HelloRequest") == (0, "Class")
         and by_name.get("greet.v1.Tone") == (0, "Enum")
