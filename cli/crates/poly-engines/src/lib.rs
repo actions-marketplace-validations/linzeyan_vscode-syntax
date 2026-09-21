@@ -392,6 +392,7 @@ fn format_markdown(text: &str, opts: FormatOptions) -> Result<Option<String>> {
             Err(_) => Ok(None),
         }
     })
+    .map_err(Into::into)
 }
 
 /// Map a fenced-code info string to an extension our detection understands.
@@ -1340,6 +1341,55 @@ mod tests {
     fn already_formatted_returns_none() {
         let out = format_file(Path::new("a.json"), "{ \"a\": 1 }\n").unwrap();
         assert_eq!(out, None);
+    }
+
+    /// A line that is prose only because of where it sits must not come back
+    /// as a block of its own.
+    ///
+    /// `1. a` / `   10. b` / `       - c` is one paragraph: `10.` cannot
+    /// interrupt a paragraph, so the second line continues the first, and the
+    /// third line's indentation puts it four columns past the item's content,
+    /// where nothing starts a block either. Write that third line at the
+    /// content column and `-` *can* interrupt -- the document now has a bullet
+    /// list nobody typed, which is a different document, not a different
+    /// layout. Formatting is allowed to move the line, join it, or escape it;
+    /// it is not allowed to change the answer.
+    #[test]
+    fn markdown_does_not_invent_a_block_a_line_never_started() {
+        // Each is a list item whose paragraph carries a continuation line that
+        // would open a block at the content column: the three bullets, an
+        // ordered marker that may interrupt, a heading, and a setext
+        // underline -- which turns the item's text into a heading, not merely
+        // adds a block.
+        for input in [
+            "1. a\n   10. b\n       - c\n",
+            "1. a\n   10. b\n       * c\n",
+            "1. a\n   10. b\n       + c\n",
+            "1. a\n   10. b\n       1. c\n",
+            "- a\n      # c\n",
+            "- a\n      ---\n",
+        ] {
+            let out = format_file(Path::new("a.md"), input)
+                .expect("markdown must format")
+                .unwrap_or_else(|| input.to_string());
+            assert_eq!(
+                commonmark_blocks(&out),
+                commonmark_blocks(input),
+                "poly fmt changed what this document means:\n{input:?}\n=>\n{out:?}"
+            );
+        }
+    }
+
+    /// The blocks and inline runs a CommonMark parser finds, in order. Text is
+    /// left out on purpose: the formatter may rewrite a marker or rewrap a
+    /// line, and the claim is only about what the document is made of.
+    fn commonmark_blocks(text: &str) -> Vec<String> {
+        pulldown_cmark::Parser::new(text)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Start(tag) => Some(format!("{tag:?}")),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
