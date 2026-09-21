@@ -60,4 +60,9 @@ xmlem.workspace = true
 yaml_parser.workspace = true
 
 [dev-dependencies]
+# A second reader of markdown, for tests only: whether `poly fmt` changed what a
+# document means is CommonMark's question, and asking it of the formatter's own
+# parser would only prove the formatter agrees with itself. Already in the tree
+# at this version -- rumdl parses with it -- so it costs no new crate.
+pulldown-cmark = "0.13"
 tempfile = "3"

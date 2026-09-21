@@ -37,7 +37,19 @@ deno_ast = "0.53"
 deno_lint = "=0.84.1"
 dprint-plugin-dockerfile = "0.6"
 dprint-plugin-json = "0.23"
-dprint-plugin-markdown = "0.22"
+# 0.24, and the floor is load-bearing rather than housekeeping: 0.22 rewrites a
+# paragraph's continuation line at the column the paragraph starts at, which is
+# a column where markers interrupt. `1. a` / `   10. b` / `       - c` is one
+# paragraph -- `10.` cannot interrupt one, and the third line sits four columns
+# past the item's content, where nothing starts a block -- and 0.22 returns it
+# with a bullet list nobody wrote. Measured by calling the plugin directly:
+# across six shapes (the three bullets, an ordered marker that may interrupt, an
+# ATX heading, a setext underline) 0.22.1 changes the blocks a CommonMark parser
+# finds and 0.24.0 changes none of them. 0.23 is where the parser was replaced
+# with one that keeps the indentation a line was written with. Over 5,428
+# markdown files the bump fixes 36 whose meaning `poly fmt` was changing and
+# breaks none.
+dprint-plugin-markdown = "0.24"
 dprint-plugin-toml = "0.8"
 dprint-plugin-typescript = "0.96"
 # .editorconfig parsing. Worth a dependency rather than a hand-rolled INI

@@ -132,7 +132,7 @@ named inline.
 - dprint-core-macros 0.1.0 (MIT) — https://github.com/dprint/dprint
 - dprint-plugin-dockerfile 0.6.0 (MIT) — https://github.com/dprint/dprint-plugin-dockerfile
 - dprint-plugin-json 0.23.0 (MIT) — https://github.com/dprint/dprint-plugin-json
-- dprint-plugin-markdown 0.22.1 (MIT) — https://github.com/dprint/dprint-plugin-markdown
+- dprint-plugin-markdown 0.24.0 (MIT) — https://github.com/dprint/dprint-plugin-markdown
 - dprint-plugin-toml 0.8.0 (MIT) — https://github.com/dprint/dprint-plugin-toml
 - dprint-plugin-typescript 0.96.1 (MIT) — https://github.com/dprint/dprint-plugin-typescript
 - dprint-swc-ext 0.26.1 (MIT) — https://github.com/dprint/dprint-swc-ext
@@ -352,7 +352,6 @@ named inline.
 - prost-types 0.14.4 (Apache-2.0) — https://github.com/tokio-rs/prost
 - protox-parse 0.9.0 (MIT OR Apache-2.0) — https://github.com/andrewhickman/protox
 - psm 0.1.32 (MIT OR Apache-2.0) — https://github.com/rust-lang/stacker/
-- pulldown-cmark 0.11.3 (MIT) — https://github.com/raphlinus/pulldown-cmark
 - pulldown-cmark 0.13.4 (MIT) — https://github.com/raphlinus/pulldown-cmark
 - pulldown-cmark-escape 0.11.0 (MIT) — https://github.com/raphlinus/pulldown-cmark
 - pyproject-toml 0.13.7 (MIT) — https://github.com/PyO3/pyproject-toml-rs.git
