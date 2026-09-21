@@ -15,6 +15,8 @@ const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
+const runnable = require("./runnable");
+
 const ROOT = resolve(__dirname, "..", "..");
 const EDITOR = join(ROOT, "extensions", "editor");
 const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
@@ -222,6 +224,8 @@ async function main() {
         + `${one.typescript.join(", ").padEnd(13)} ${one.kind.padEnd(11)} ${one.text}`,
     );
   }
+  problems.push(...runnable.check());
+
   if (problems.length > 0) {
     console.error(`\n${problems.length} problem(s):`);
     for (const problem of problems) console.error(`  ${problem}`);
