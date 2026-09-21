@@ -18,6 +18,12 @@ const ID = /<h[1-6][^>]*\sid="([^"]*)"/g;
 
 /** Every heading id the preview wrote, in document order. */
 async function anchors(markdown) {
+  // One untitled document per heading and none of them closed, which is why
+  // this run prints "[LanguageService._onDidChange] potential listener LEAK
+  // detected" and the same for ThemeService: VSCode registers listeners per
+  // text model and warns past its own thresholds of 200 and 400. Measured
+  // 2026-09-21 by opening 500 documents under an extension whose `activate` is
+  // empty -- identical warnings, so they are the document count and not poly.
   const document = await vscode.workspace.openTextDocument({ language: "markdown", content: markdown });
   const html = await vscode.commands.executeCommand("markdown.api.render", document);
   return [...String(html).matchAll(ID)].map((match) => match[1]);
