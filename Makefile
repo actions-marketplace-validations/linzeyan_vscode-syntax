@@ -270,8 +270,10 @@ editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 # half of poly-editor that is not poly's code -- five lenses and commands are
 # wired to particular code action kinds and to `textDocument/implementation`
 # read backwards, and each of those is a claim about gopls that was true when
-# measured. ref-lens cannot see any of it: the provider it asks is TypeScript's,
-# which does not answer the backwards question at all.
+# measured. ref-lens cannot see any of it: what answers there is TypeScript's
+# provider, which does not answer the backwards question at all, and fixtures
+# shaped like what gopls and buf were measured to say -- which holds poly's
+# wiring down and says nothing about whether they still say it.
 lens-probe: ## What gopls and buf still offer the lenses poly routes to
 	python3 tools/lens-probe.py
 

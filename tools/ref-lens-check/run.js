@@ -15,6 +15,8 @@ const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
+const proto = require("./proto");
+
 const ROOT = resolve(__dirname, "..", "..");
 const EDITOR = join(ROOT, "extensions", "editor");
 const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
@@ -145,15 +147,20 @@ async function main() {
     }\n`,
   );
 
+  const protoEnv = proto.writeFixture(WORKSPACE);
+
   execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
 
   await runTests({
-    extensionDevelopmentPath: EDITOR,
+    // poly-syntax alongside, because it is what gives a .proto the `protobuf`
+    // language id poly's lens is registered for -- see proto.js.
+    extensionDevelopmentPath: [EDITOR, proto.SYNTAX],
     extensionTestsPath: resolve(__dirname, "suite.js"),
     extensionTestsEnv: {
       POLY_LENS_FIXTURE: fixture,
       POLY_FLAT_FIXTURE: flat,
       POLY_LENS_OUT: OUT,
+      ...protoEnv,
     },
     ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
     launchArgs: [
@@ -208,6 +215,8 @@ async function main() {
       );
     }
   }
+
+  problems.push(...proto.checkProto(report.proto));
 
   console.log(
     `\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens; `

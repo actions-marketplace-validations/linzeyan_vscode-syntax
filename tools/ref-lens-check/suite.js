@@ -14,6 +14,8 @@ const { writeFileSync } = require("node:fs");
 
 const vscode = require("vscode");
 
+const { observeProto } = require("./proto");
+
 /** Long enough for the TypeScript server to load the file, then give up. */
 const READY_MS = 60_000;
 
@@ -131,9 +133,12 @@ exports.run = async function run() {
     ...byLine.get(line),
   }));
 
+  // The .proto half, whole in its own module: it brings its own servers.
+  const proto = await observeProto();
+
   writeFileSync(
     process.env.POLY_LENS_OUT,
-    `${JSON.stringify({ vscode: vscode.version, lenses: lines, flat }, null, 2)}\n`,
+    `${JSON.stringify({ vscode: vscode.version, lenses: lines, flat, proto }, null, 2)}\n`,
   );
   console.log(`ref-lens: ${lines.length} lines carry a lens, ${flat.length} on the flat shape`);
 };
