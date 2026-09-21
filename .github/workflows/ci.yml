@@ -355,12 +355,13 @@ jobs:
             echo "$HOME/ci-tools/bin"
             echo "$HOME/ci-tools/lua-language-server/bin"
           } >> "$GITHUB_PATH"
-      # The two that are not worth caching: both come from a package manager
-      # already on the runner, and neither is compiled here.
-      - name: Install clangd and rust-analyzer
+      # The three that are not worth caching: each comes from a package manager
+      # already on the runner, and none is compiled here.
+      - name: Install clangd, rust-analyzer and bash-language-server
         run: |
           sudo apt-get install -y clangd
           rustup component add rust-analyzer
+          npm install -g bash-language-server
       - name: Build poly
         run: cargo build --release --manifest-path cli/Cargo.toml
       - name: Language server proxy probe
@@ -384,7 +385,19 @@ jobs:
           clangd --version
           terraform-ls version
           lua-language-server --version
+          bash-language-server --version
           python tools/lsp-proxy-probe.py cli/target/release/poly
+      - name: Lens probe
+        run: |
+          # What poly-editor's lenses route to, asked of gopls and buf directly.
+          # `--require` turns its skip into a failure: the tools are right here
+          # -- gopls is asserted above and buf is poly's own download -- so a
+          # skip in this job means something broke, not that a machine is thin.
+          #
+          # It is separate from the step above because it is the only thing
+          # standing behind `make ref-lens`'s protobuf and shell sections, which
+          # are deliberately blind to a server changing shape.
+          python tools/lens-probe.py cli/target/release/poly --require
       # The other half of Go, and the half no gate touched until it was written:
       # gofumpt and golangci-lint are poly's own to drive, and the Rust tests
       # only ever covered the path where they do not run. `go` is on the runner
@@ -477,6 +490,11 @@ jobs:
       # is what puts it here rather than in its own job.
       - name: List keystrokes survive the formatter
         run: node tools/list-fuzz/run.js
+      # No editor here either, for the same reason: the question is how many
+      # decoration types a long scroll keeps alive, and counting them needs the
+      # esbuild the step above installed rather than a window.
+      - name: Image gutter cache stays the size of the screen
+        run: node tools/gutter-cache-check.js
       # The other half of A9, here because it needs the tree the step above just
       # installed: what the preview bundle carries is decided by pnpm's
       # resolution, not by a manifest anyone can read without it.

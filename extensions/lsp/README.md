@@ -58,9 +58,9 @@
 ## 語言功能（`poly.languageServers`，預設關閉）
 
 打開之後，poly 把請求轉給**專案自己 toolchain 裡的** language server——gopls、
-rust-analyzer、clangd、sourcekit-lsp、terraform-ls、lua-language-server，以及 poly
-自己代管的 buf。poly 不實作任何一行語意分析（A6），只做路由，所以答案的品質是那些
-server 的，不是 poly 的。
+rust-analyzer、clangd、sourcekit-lsp、terraform-ls、lua-language-server、
+bash-language-server，以及 poly 自己代管的 buf 與 arity。poly 不實作任何一行語意分析
+（A6），只做路由，所以答案的品質是那些 server 的，不是 poly 的。
 
 轉的是：hover、definition／typeDefinition／implementation／declaration、
 **references**、documentSymbol、completion、rename、code action、signatureHelp、
@@ -172,7 +172,7 @@ sourcekit-lsp 是等編輯器表示看得懂之後才自己註冊的，時機比
 這個 extension 0.6.0 前叫 `poly-lint`（另一個叫 `poly-syntax`）。id 換了就是新
 extension，只能手動裝。
 
-0.5.0 的更新提示還是會跳，但按下 Install 必定失敗（它找的是 `poly-syntax-0.13.3.vsix`
+0.5.0 的更新提示還是會跳，但按下 Install 必定失敗（它找的是 `poly-syntax-0.15.0.vsix`
 這個已經不存在的檔名），而且錯誤訊息會說「The VSIX files were downloaded」——
 其實一個都沒下載，所以「Show Files」也沒東西可看。那段程式碼凍在已安裝的 0.5.0
 裡，改不了。

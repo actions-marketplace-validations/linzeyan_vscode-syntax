@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// Does the reference lens land on declarations, and only on declarations?
+// Do poly's code lenses land where they should, and nowhere else?
 //
 // This is a gate rather than an audit: it compares poly against nothing but
-// itself, needs no marketplace extension and no network, and the provider it
-// leans on -- TypeScript's -- ships inside the editor. It exists because the
-// lens once counted parameters and locals, a defect the unit tests could not
-// see: they assert against a symbol tree written by the same hand that wrote
-// the rule, and the rule was wrong about what a real server reports.
+// itself, needs no marketplace extension and no network, and the one real
+// provider it leans on -- TypeScript's -- ships inside the editor. It exists
+// because the reference lens once counted parameters and locals, a defect the
+// unit tests could not see: they assert against a symbol tree written by the
+// same hand that wrote the rule, and the rule was wrong about what a real
+// server reports. Every lens added since has been given its own section here
+// for the same reason, and each section says what it does and does not prove.
 //
 // Usage: node tools/ref-lens-check/run.js
 const { execFileSync } = require("node:child_process");
@@ -14,6 +16,9 @@ const { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } = requ
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
+
+const proto = require("./proto");
+const runnable = require("./runnable");
 
 const ROOT = resolve(__dirname, "..", "..");
 const EDITOR = join(ROOT, "extensions", "editor");
@@ -79,6 +84,12 @@ const EXPECTED = [
   "Meter,",
 ];
 
+/** Declarations that must carry an implementation count, and what it must say. */
+const IMPLS = {
+  "export interface Shape {": "1 impl",
+  "area(): number;": "1 impl",
+};
+
 /** Names that must never carry one, and what each of them is. */
 const FORBIDDEN = {
   // The one place poly and the editor deliberately disagree: VSCode counts a
@@ -116,6 +127,10 @@ async function main() {
   mkdirSync(join(ROOT, ".logs", "audit"), { recursive: true });
   const fixture = join(WORKSPACE, "shapes.ts");
   writeFileSync(fixture, FIXTURE);
+  // Plaintext, so the only symbol provider in play is the one the suite
+  // registers -- see `registerFlatProvider` for what it is proving.
+  const flat = join(WORKSPACE, "flat.txt");
+  writeFileSync(flat, "deploy\n\nusage\n\ncalled here\n");
   // The editor's own TypeScript lens, turned on so this file can be read by
   // both and the two placements compared. It is the only second opinion
   // available offline about where a reference count belongs, and poly's README
@@ -135,12 +150,21 @@ async function main() {
     }\n`,
   );
 
+  const protoEnv = proto.writeFixture(WORKSPACE);
+
   execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
 
   await runTests({
-    extensionDevelopmentPath: EDITOR,
+    // poly-syntax alongside, because it is what gives a .proto the `protobuf`
+    // language id poly's lens is registered for -- see proto.js.
+    extensionDevelopmentPath: [EDITOR, proto.SYNTAX],
     extensionTestsPath: resolve(__dirname, "suite.js"),
-    extensionTestsEnv: { POLY_LENS_FIXTURE: fixture, POLY_LENS_OUT: OUT },
+    extensionTestsEnv: {
+      POLY_LENS_FIXTURE: fixture,
+      POLY_FLAT_FIXTURE: flat,
+      POLY_LENS_OUT: OUT,
+      ...protoEnv,
+    },
     ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
     launchArgs: [
       `--folder-uri=${pathToFileURL(WORKSPACE).toString()}`,
@@ -162,8 +186,45 @@ async function main() {
   for (const [text, what] of Object.entries(FORBIDDEN)) {
     if (lensed.has(text)) problems.push(`lens on ${what}: ${text}`);
   }
+  // The other symbol shape. A provider answering in `SymbolInformation` has no
+  // `selectionRange`, and every lens poly draws reads one -- so this is either
+  // two counts or an exception swallowed into an empty lens list.
+  const flatSaid = (report.flat ?? []).map((one) => `${one.line}:${one.title}`).sort();
+  if (flatSaid.join() !== ["0:1 ref", "2:1 ref"].join()) {
+    problems.push(
+      `the flat symbol shape got no usable lens — expected 1 ref on lines 1 and 3, got `
+        + JSON.stringify(flatSaid),
+    );
+  }
 
-  console.log(`\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens`);
+  const titles = new Map(report.lenses.map((one) => [one.text, one.poly]));
+  for (const [text, said] of Object.entries(IMPLS)) {
+    if (!(titles.get(text) ?? []).includes(said)) {
+      problems.push(`no "${said}" on ${text} — got ${JSON.stringify(titles.get(text) ?? [])}`);
+    }
+  }
+  // The other direction of the same query, and the reason it is not simply
+  // drawn everywhere: measured 2026-09-21, TypeScript's implementation provider
+  // answers nothing at `class Circle implements Shape`, so an unconditional
+  // upward lens reads `no interfaces` over every class and method in the
+  // language. poly earns that lens per language instead -- and this is the
+  // check that says whether it stayed earned.
+  for (const one of report.lenses) {
+    const upward = one.poly.filter((title) => /interface/.test(title));
+    if (upward.length > 0) {
+      problems.push(
+        `an upward implementation lens where the provider does not answer upward: `
+          + `${one.text} says ${upward.join(", ")}`,
+      );
+    }
+  }
+
+  problems.push(...proto.checkProto(report.proto));
+
+  console.log(
+    `\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens; `
+      + `the flat symbol shape got ${JSON.stringify(flatSaid)}`,
+  );
   console.log(
     `  ${"line".padStart(4)}  ${"poly".padEnd(14)} ${"typescript".padEnd(13)} ${"kind".padEnd(11)} declaration`,
   );
@@ -173,6 +234,8 @@ async function main() {
         + `${one.typescript.join(", ").padEnd(13)} ${one.kind.padEnd(11)} ${one.text}`,
     );
   }
+  problems.push(...runnable.check());
+
   if (problems.length > 0) {
     console.error(`\n${problems.length} problem(s):`);
     for (const problem of problems) console.error(`  ${problem}`);

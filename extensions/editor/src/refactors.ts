@@ -14,26 +14,41 @@
  * worth testing.
  */
 
-/** Which of the two commands is asking. */
-export type Refactoring = "extract" | "inline";
+/** Which command is asking. */
+export type Refactoring =
+  | "extractVariable"
+  | "inlineVariable"
+  | "moveToNewFile"
+  | "changeSignature"
+  | "implementInterface";
 
-/**
- * The standard `CodeActionKind` each command asks the providers for.
- *
- * These are the kinds the LSP specification names, so every server that
- * implements the refactoring at all tags it with one of them -- which is why
- * this works without knowing anything about the language.
- */
-export const REFACTOR_KIND: Readonly<Record<Refactoring, string>> = {
-  extract: "refactor.extract",
-  inline: "refactor.inline",
-};
-
-/** As much of `vscode.CodeAction` as the choice below depends on. */
-export interface Offered {
+/** What one command asks for, and how it recognises the answer. */
+export interface Wanted {
+  /**
+   * The `CodeActionKind` to ask the providers for.
+   *
+   * These are the kinds the LSP specification names, so every server that
+   * implements the refactoring at all tags it with one of them -- which is why
+   * this works without knowing anything about the language.
+   */
+  readonly kind: string;
+  /** Titles and sub-kinds that mean this command's name. */
+  readonly means: RegExp;
+  /**
+   * Whether an unrecognised answer of the right kind is offered anyway.
+   *
+   * True only where the kind is already the refactoring: `refactor.inline` is
+   * one thing, so a server whose wording this file has never seen should cost
+   * the user a menu rather than the feature. False where the kind is a shared
+   * bucket -- `quickfix` holds every fix in the file, and a command called
+   * Implement Interface that offers "remove unused import" is worse than one
+   * that says it found nothing.
+   */
+  readonly fallback: boolean;
+  /** What the command is called, in a message to the user. */
   readonly title: string;
-  /** `vscode.CodeActionKind.value`; absent is legal and means "unclassified". */
-  readonly kind?: string;
+  /** What to try when nothing came back, in the same message. */
+  readonly hint: string;
 }
 
 /**
@@ -46,39 +61,96 @@ export interface Offered {
  * has no other word for a local binding, and someone who asked for a variable
  * and got `const x = ...` got what they asked for.
  */
-const VARIABLE = /\b(variable|constant|const|local)\b/i;
+const VARIABLE = /\b(variable|constant|const|local)\b|\.(variable|constant)\b/i;
 
-/** Sub-kinds that say the same thing the title does, when a server tags them. */
-const VARIABLE_KIND = /\.(variable|constant)\b/i;
+export const REFACTORINGS: Readonly<Record<Refactoring, Wanted>> = {
+  extractVariable: {
+    kind: "refactor.extract",
+    means: VARIABLE,
+    fallback: true,
+    title: "Extract Variable",
+    hint: "select an expression",
+  },
+  inlineVariable: {
+    kind: "refactor.inline",
+    means: VARIABLE,
+    fallback: true,
+    title: "Inline Variable",
+    hint: "put the cursor on the binding",
+  },
+  moveToNewFile: {
+    // Not `refactor.move`: the standard kind exists and gopls 0.23 answers null
+    // for it (measured 2026-09-21). What it does offer is
+    // `refactor.extract.toNewFile`, "Extract declarations to new file", which
+    // is the same gesture filed under the other kind.
+    kind: "refactor.extract",
+    means: /\bnew file\b|toNewFile/i,
+    fallback: false,
+    title: "Move to New File",
+    hint: "put the cursor on a declaration's name",
+  },
+  changeSignature: {
+    // There is no "Change signature…" dialog to route to. gopls spells a
+    // signature change as several small rewrites -- "Move parameter left",
+    // "Split parameters into separate lines", and "Remove unused parameter"
+    // when one is unused -- and each is a code action of this kind. Offering
+    // the list is the honest version of the one dialog other tools show.
+    kind: "refactor.rewrite",
+    means: /\bparam(eter)?s?\b|\bsignature\b/i,
+    fallback: false,
+    title: "Change Signature",
+    // Measured: gopls answers null for `refactor.rewrite` at a function's name
+    // and answers with the parameter rewrites at a parameter. The position is
+    // the whole difference, so the message has to say which one.
+    hint: "put the cursor on a parameter",
+  },
+  implementInterface: {
+    // A quickfix and not a refactoring, because that is where every server
+    // files it: the missing methods are a type error, and stubbing them is the
+    // fix for it. gopls says "Declare missing methods of Shape", rust-analyzer
+    // "Implement missing members", TypeScript "Implement interface 'Shape'".
+    kind: "quickfix",
+    means: /\bmissing (method|member)|\bunimplemented\b|\bimplement\b.*\binterface\b/i,
+    fallback: false,
+    title: "Implement Interface",
+    // The server offers this against a diagnostic, so there has to be one:
+    // in Go that means the assignment that fails to compile, `var _ Shape =
+    // Triangle{}`, already being in the file. poly cannot conjure the
+    // diagnostic without deciding which interface was meant, which is the
+    // analysis it does not do.
+    hint: "put the cursor where the compiler says a method is missing",
+  },
+};
 
-function aboutAVariable(one: Offered): boolean {
-  return VARIABLE.test(one.title) || (one.kind !== undefined && VARIABLE_KIND.test(one.kind));
+/** As much of `vscode.CodeAction` as the choice below depends on. */
+export interface Offered {
+  readonly title: string;
+  /** `vscode.CodeActionKind.value`; absent is legal and means "unclassified". */
+  readonly kind?: string;
 }
 
 /**
- * The refactorings a "… Variable" command should offer, best first.
+ * The actions a command should offer, best first.
  *
  * Two filters, and the second one is the point. The kind filter is what the
  * editor was already asked for, repeated here because a provider may answer
- * with more than it was asked for. The variable filter is what makes the
+ * with more than it was asked for. The meaning filter is what makes the
  * command's name true: `refactor.extract` also covers "Extract function" and
  * "Extract method", and a command called Extract Variable that silently
  * extracts a function is worse than one that does nothing.
- *
- * If nothing mentions a variable, everything of the right kind is returned
- * rather than nothing. A server whose wording this file has never seen should
- * cost the user a menu, not the feature.
  */
 export function refactorChoices<T extends Offered>(
   offered: readonly T[],
   want: Refactoring,
 ): T[] {
-  const kind = REFACTOR_KIND[want];
+  const wanted = REFACTORINGS[want];
   const ofKind = offered.filter(
     // Prefix, not equality: `refactor.extract.constant` is a `refactor.extract`
     // and the dot is what keeps `refactor.extractive` from being one.
-    (one) => one.kind === kind || (one.kind?.startsWith(`${kind}.`) ?? false),
+    (one) => one.kind === wanted.kind || (one.kind?.startsWith(`${wanted.kind}.`) ?? false),
   );
-  const variables = ofKind.filter(aboutAVariable);
-  return variables.length > 0 ? variables : ofKind;
+  const meant = ofKind.filter(
+    (one) => wanted.means.test(one.title) || (one.kind !== undefined && wanted.means.test(one.kind)),
+  );
+  return meant.length > 0 || !wanted.fallback ? meant : ofKind;
 }

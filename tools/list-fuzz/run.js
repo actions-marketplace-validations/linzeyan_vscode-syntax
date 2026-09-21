@@ -160,24 +160,23 @@ function main() {
   // already-formatted document, so if formatting were not a fixed point every
   // case would fail and the report would blame the wrong module.
   //
-  // It is not always a fixed point, and the first run of this file is how that
-  // was found. `1. a` / `   10. b` / `       - c` is one paragraph -- `10.`
-  // cannot interrupt a paragraph, so the second and third lines are lazy
-  // continuation text rather than a nested list -- and `poly fmt` moves the
-  // third line to column 3, where `-` *can* interrupt and a bullet list appears
-  // that the author did not write. Confirmed against a CommonMark renderer,
-  // 4 of 320 generated documents. Reported rather than worked around: the
-  // count is printed, a third pass has to settle, and a document that took two
-  // passes is still a fine document to press a key on.
+  // The first run of this file is what found the one document where it was
+  // not. `1. a` / `   10. b` / `       - c` is a single paragraph -- `10.`
+  // cannot interrupt one, and the third line's indentation puts it four columns
+  // past the item's content, where nothing starts a block either -- and
+  // dprint-plugin-markdown 0.22 rewrote that third line at the content column,
+  // where `-` *can* interrupt, so a bullet list appeared that the author never
+  // typed. 4 of 320 generated documents, and a changed document rather than a
+  // changed layout. The fix is upstream's, taken by moving the crate to 0.24,
+  // so the second pass below is the check it was meant to be and not a
+  // tolerance for a formatter that needed one more run.
   const once = formatted("normalize-1", DOCUMENTS);
   const normalized = formatted("normalize-2", once);
-  const late = once.map((_, index) => index).filter((index) => once[index] !== normalized[index]);
-  const settled = formatted("normalize-3", normalized);
-  const unstable = normalized.filter((text, index) => text !== settled[index]);
+  const unstable = once.filter((text, index) => text !== normalized[index]);
   if (unstable.length > 0) {
     throw new Error(
-      `poly fmt had not settled on ${unstable.length} of ${normalized.length} documents after `
-        + `two passes, so nothing below is about list.ts:\n${JSON.stringify(unstable[0])}`,
+      `poly fmt moved ${unstable.length} of ${once.length} documents on a second pass, `
+        + `so nothing below is about list.ts:\n${JSON.stringify(unstable[0])}`,
     );
   }
 
@@ -200,9 +199,6 @@ function main() {
     .filter((one) => structure(one.done.lines.join("\n").replaceAll(CURSOR, "x")) !== structure(one.formatted));
 
   console.log(`\n${usable.length} of ${DOCUMENTS.length} documents took a keystroke`);
-  if (late.length > 0) {
-    console.log(`  ${late.length} needed a second poly fmt before they stopped moving`);
-  }
   console.log(
     `  ${[...counts].sort().map(([kind, count]) => `${kind} ${count}`).join(", ")}`,
   );

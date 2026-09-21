@@ -14,10 +14,28 @@ const { writeFileSync } = require("node:fs");
 
 const vscode = require("vscode");
 
+const { observeProto } = require("./proto");
+const runnable = require("./runnable");
+
 /** Long enough for the TypeScript server to load the file, then give up. */
 const READY_MS = 60_000;
 
-async function lensesFor(uri) {
+/**
+ * The lenses on `uri`, once there are `atLeast` of them and the count holds.
+ *
+ * `atLeast` exists for the one caller that is testing a file which must carry
+ * no lens at all: an empty list is both "none" and "not published yet", so the
+ * default of one keeps the wait honest, and a caller that means zero has to
+ * say so.
+ *
+ * Zero settles after the count holds rather than after any proof the provider
+ * ran, which would be a real hole if poly's lenses could arrive late. They
+ * cannot: all three providers fire `onDidChangeCodeLenses` only when a `poly.*`
+ * setting changes, and no fixture changes one, so the first answer is the final
+ * one. The settle loop is here for TypeScript's lens, which waits for its
+ * project -- and the only TypeScript fixture asks for `atLeast` of one.
+ */
+async function lensesFor(uri, atLeast = 1) {
   const deadline = Date.now() + READY_MS;
   let lenses = [];
   let settled = 0;
@@ -28,14 +46,69 @@ async function lensesFor(uri) {
   while (Date.now() < deadline && settled < 6) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     const now = await vscode.commands.executeCommand("vscode.executeCodeLensProvider", uri, 50) ?? [];
-    settled = now.length > 0 && now.length === lenses.length ? settled + 1 : 0;
+    settled = now.length >= atLeast && now.length === lenses.length ? settled + 1 : 0;
     lenses = now;
   }
   return lenses;
 }
 
+/**
+ * A provider that answers in the older of the two symbol shapes.
+ *
+ * `SymbolInformation` is flat and carries a `location` where `DocumentSymbol`
+ * carries a `selectionRange`, and a server picks which -- bash-language-server
+ * answers in this one, gopls in the other. Every lens poly draws reads
+ * `selectionRange`, so the flat shape looks like it must be converted first.
+ *
+ * Measured 2026-09-21: it must not be. `executeDocumentSymbolProvider`
+ * normalises, and hands back objects carrying both, so poly needs no
+ * conversion -- and writing one is actively wrong, because the test that tells
+ * the shapes apart by `location` matches the normalised object too and throws
+ * every nested symbol away. That is what this check is here to keep saying.
+ *
+ * Registered against plaintext so it is the only provider in play: TypeScript's
+ * cannot be asked to answer in a shape it does not use, and the built-in would
+ * be merged with it anyway.
+ */
+function registerFlatProvider(uri) {
+  const selector = { scheme: "file", language: "plaintext" };
+  const at = (line) => new vscode.Location(uri, new vscode.Range(line, 0, line, 8));
+  return [
+    vscode.languages.registerDocumentSymbolProvider(selector, {
+      provideDocumentSymbols() {
+        return [
+          new vscode.SymbolInformation("deploy", vscode.SymbolKind.Function, "", at(0)),
+          new vscode.SymbolInformation("usage", vscode.SymbolKind.Function, "", at(2)),
+        ];
+      },
+    }),
+    vscode.languages.registerReferenceProvider(selector, {
+      provideReferences(_document, position) {
+        // The declaration and one use, so the count is `1 ref` and not `no
+        // refs` -- a provider that answers at all answers with the declaration.
+        return [
+          new vscode.Location(uri, new vscode.Range(position.line, 0, position.line, 8)),
+          new vscode.Location(uri, new vscode.Range(4, 0, 4, 8)),
+        ];
+      },
+    }),
+  ];
+}
+
 exports.run = async function run() {
   await vscode.extensions.getExtension("ricky.poly-editor").activate();
+
+  const flatUri = vscode.Uri.file(process.env.POLY_FLAT_FIXTURE);
+  const disposables = registerFlatProvider(flatUri);
+  const flatDocument = await vscode.workspace.openTextDocument(flatUri);
+  await vscode.window.showTextDocument(flatDocument);
+  const flat = (await lensesFor(flatUri)).map((lens) => ({
+    line: lens.range.start.line,
+    title: lens.command?.title ?? "(unresolved)",
+  }));
+  for (const disposable of disposables) {
+    disposable.dispose();
+  }
 
   const uri = vscode.Uri.file(process.env.POLY_LENS_FIXTURE);
   const document = await vscode.workspace.openTextDocument(uri);
@@ -76,9 +149,16 @@ exports.run = async function run() {
     ...byLine.get(line),
   }));
 
+  // The .proto half, whole in its own module: it brings its own servers.
+  const proto = await observeProto();
+
   writeFileSync(
     process.env.POLY_LENS_OUT,
-    `${JSON.stringify({ vscode: vscode.version, lenses: lines }, null, 2)}\n`,
+    `${JSON.stringify({ vscode: vscode.version, lenses: lines, flat, proto }, null, 2)}\n`,
   );
-  console.log(`ref-lens: ${lines.length} lines carry a lens`);
+  console.log(`ref-lens: ${lines.length} lines carry a lens, ${flat.length} on the flat shape`);
+
+  // Last, and with the TypeScript server already warm: it writes its own file
+  // and needs nothing from the report above.
+  await runnable.collect(lensesFor);
 };

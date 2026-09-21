@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/poly-cli", "crates/poly-core", "crates/poly-engines", "crates/poly-tools"]
 
 [workspace.package]
-version = "0.13.3"
+version = "0.15.0"
 edition = "2021"
 license = "MIT"
 
@@ -37,7 +37,19 @@ deno_ast = "0.53"
 deno_lint = "=0.84.1"
 dprint-plugin-dockerfile = "0.6"
 dprint-plugin-json = "0.23"
-dprint-plugin-markdown = "0.22"
+# 0.24, and the floor is load-bearing rather than housekeeping: 0.22 rewrites a
+# paragraph's continuation line at the column the paragraph starts at, which is
+# a column where markers interrupt. `1. a` / `   10. b` / `       - c` is one
+# paragraph -- `10.` cannot interrupt one, and the third line sits four columns
+# past the item's content, where nothing starts a block -- and 0.22 returns it
+# with a bullet list nobody wrote. Measured by calling the plugin directly:
+# across six shapes (the three bullets, an ordered marker that may interrupt, an
+# ATX heading, a setext underline) 0.22.1 changes the blocks a CommonMark parser
+# finds and 0.24.0 changes none of them. 0.23 is where the parser was replaced
+# with one that keeps the indentation a line was written with. Over 5,428
+# markdown files the bump fixes 36 whose meaning `poly fmt` was changing and
+# breaks none.
+dprint-plugin-markdown = "0.24"
 dprint-plugin-toml = "0.8"
 dprint-plugin-typescript = "0.96"
 # .editorconfig parsing. Worth a dependency rather than a hand-rolled INI
@@ -182,6 +194,14 @@ rumdl = { version = "=0.2.66", default-features = false }
 # provide, not to save space: `editorconfig` would give stylua a second reader
 # of a file poly parses itself and feeds in through FormatOptions, and `lsp` is
 # a whole second language server inside the one poly is running.
+#
+# It also drags in `atty` through clap 3, which is RUSTSEC-2021-0145 and the one
+# open advisory on this tree. Nothing here can close it: clap is not optional in
+# stylua, 2.5.2 is stylua's newest, and `atty` is unmaintained with no patched
+# version to move to. What is true is that the unaligned read is in TTY
+# detection for argument parsing, and poly links stylua as a library and never
+# reaches its CLI. It goes when stylua moves to clap 4; there is nothing to pin
+# around until then.
 selene-lib = { version = "=0.31.0", default-features = false, features = [
   "roblox",
 ] }

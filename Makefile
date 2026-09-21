@@ -34,7 +34,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
 	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff mermaid-diff engine-diff \
-	lsp-fmt-diff ref-lens toc-fuzz list-fuzz bump control clean
+	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz gutter-cache bump control clean
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -82,7 +82,7 @@ dogfood: build ## poly formats and lints its own repo
 	$(POLY) fmt --check .
 	$(POLY) check --strict .
 
-smoke: build ## LSP handshake and formatting over stdio
+smoke: build ## LSP handshake, formatting and a memory soak over stdio
 	python3 tools/lsp-smoke.py $(POLY)
 
 # Skips a language whose server is not installed and says so. CI installs five
@@ -130,14 +130,17 @@ editor: ## Typecheck, test, build and package poly-editor
 	python3 tools/vsix-check.py extensions/editor
 
 # A gate and not an audit, unlike the *-diff targets: it asserts about poly
-# alone, and the provider it asks -- TypeScript's -- ships inside the editor,
-# so there is nothing to download but VSCode itself, which `e2e` already has.
+# alone, and the only real provider it asks -- TypeScript's -- ships inside the
+# editor, so there is nothing to download but VSCode itself, which `e2e` already
+# has. The protobuf and shell sections have no offline server to ask, so they
+# supply providers shaped like what `make lens-probe` measured; that pins poly's
+# wiring, and `lens-probe` is what says the real servers still behave that way.
 #
 # It exists because `make editor`'s unit tests could not see the defect that
 # put a count over every parameter and local: they assert against a symbol tree
 # written by the same hand as the rule, and the rule was wrong about what a
-# real server reports.
-ref-lens: ## Where poly's reference lens lands, asked of a real language server
+# real server reports. Every lens added since is checked here for that reason.
+ref-lens: ## Where poly's code lenses land, in a real extension host
 	node tools/ref-lens-check/run.js
 
 # The table of contents command's anchors against the ones the preview writes,
@@ -162,6 +165,19 @@ toc-fuzz: ## Heading anchors against the ones VSCode's own preview writes
 # children behind, at a column that made them somebody else's.
 list-fuzz: build ## List keystrokes against the formatter that has to accept them
 	node tools/list-fuzz/run.js
+
+# The gutter thumbnail cache, counted rather than argued about. No editor here
+# either: `previewImages` is driven against a stub of the API it uses, which is
+# the only way to ask a question whose answer is a number after a thousand
+# repaints.
+#
+# It earned its place the way the two above did. The cache was keyed by image
+# path and never evicted, so a session that scrolled 400 images past a 20-line
+# window kept 400 decoration types and set every one of them on every repaint --
+# under a comment claiming it was "bounded because a file only has so many
+# visible lines".
+gutter-cache: ## The image gutter cache stays the size of what is on screen
+	node tools/gutter-cache-check.js
 
 # The offline half of ci.yml's grammars job. The other half re-fetches every
 # pinned grammar, which needs the network and a token; what stays here is
@@ -265,6 +281,23 @@ grammar-real: tokdeps ## grammar-diff over ordinary source files from GRAMMAR_TR
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 	node tools/editor-diff/run.js
 
+# The other half of ref-lens. What it holds down is the half of poly-editor
+# that is not poly's code -- five lenses and commands are wired to particular
+# code action kinds and to `textDocument/implementation` read backwards, and
+# each of those is a claim about gopls that was true when measured. ref-lens
+# cannot see any of it: what answers there is TypeScript's provider, which does
+# not answer the backwards question at all, and fixtures shaped like what gopls
+# and buf were measured to say -- which holds poly's wiring down and says
+# nothing about whether they still say it.
+#
+# It was an audit, on the grounds that CI has neither gopls nor buf. Both halves
+# of that were wrong: ci.yml installs a pinned gopls for `probe` in the same
+# job, and buf is poly's to download. So it is a gate that skips when the Go
+# toolchain is absent, and CI passes `--require` to say that skipping there is
+# a failure -- the same contract `probe` already has.
+lens-probe: build ## What gopls and buf still offer the lenses poly routes to
+	python3 tools/lens-probe.py $(POLY)
+
 # The one differential whose reference ships inside the editor rather than
 # beside it: from 1.135 VSCode draws mermaid fences itself, and poly's renderer
 # exists for the versions before that. It launches one extension host twice --
@@ -320,7 +353,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config smoke dogfood version probe go tf rust deadcode grammars e2e editor ref-lens toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config smoke dogfood version probe lens-probe go tf rust deadcode grammars e2e editor ref-lens gutter-cache toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0

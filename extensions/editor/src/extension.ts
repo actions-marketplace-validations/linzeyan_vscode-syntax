@@ -18,9 +18,12 @@ import {
 } from "./list";
 import { toc, TOC_END, TOC_START } from "./markdown";
 import { mermaidPlugin } from "./markdownIt";
+import { methodLabel, methodsOf } from "./methods";
 import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } from "./postfix";
-import { REFACTOR_KIND, refactorChoices, Refactoring } from "./refactors";
-import { countElsewhere, implLabel, lensTargets, refLabel } from "./references";
+import { generatedFiles, goLinksFor, goServerMethod, protoPackage } from "./protobuf";
+import { refactorChoices, Refactoring, REFACTORINGS } from "./refactors";
+import { Direction, elsewhere, implLabel, LensTarget, lensTargets, refLabel } from "./references";
+import { entryLine, entryPoints, findsEntryInText } from "./runnable";
 import { registerTodoTree } from "./todoTree";
 
 /**
@@ -528,15 +531,21 @@ function imageOnLine(document: vscode.TextDocument, text: string): string | unde
  * A thumbnail in the gutter for every visible line that names an image.
  *
  * `gutterIconPath` belongs to the decoration *type*, not to a range, so there
- * has to be one type per distinct image. They are cached across repaints and
- * disposed with the extension; the cache is bounded because a file only has so
- * many visible lines.
+ * has to be one type per distinct image. A type is kept while some editor is
+ * showing it and disposed once none is, which is what bounds the cache by what
+ * is on screen rather than by every image the session has scrolled past.
  */
 function previewImages(context: vscode.ExtensionContext): void {
   const types = new Map<string, vscode.TextEditorDecorationType>();
+  // Decorations are cleared per editor and only a repaint of that editor can
+  // clear them, so its last paint is the only record of what its gutter still
+  // holds -- and the only way to tell whether an image is still on screen.
+  const painted = new Map<vscode.TextEditor, Set<string>>();
   context.subscriptions.push({
     dispose: () => types.forEach((type) => type.dispose()),
   });
+
+  const onScreen = (file: string) => [...painted.values()].some((files) => files.has(file));
 
   const paint = (editor: vscode.TextEditor) => {
     const shown = new Map<string, vscode.Range[]>();
@@ -550,26 +559,40 @@ function previewImages(context: vscode.ExtensionContext): void {
           if (!file) {
             continue;
           }
-          if (!types.has(file)) {
-            types.set(
-              file,
-              vscode.window.createTextEditorDecorationType({
-                gutterIconPath: vscode.Uri.file(file),
-                gutterIconSize: "contain",
-              }),
-            );
-          }
           const ranges = shown.get(file) ?? [];
           ranges.push(new vscode.Range(line, 0, line, 0));
           shown.set(file, ranges);
         }
       }
     }
-    // Every known type is set on this editor, including to nothing: a type
-    // left alone keeps whatever it was showing the last time this editor
-    // scrolled past that line.
+    const before = painted.get(editor) ?? new Set<string>();
+    painted.set(editor, new Set(shown.keys()));
+    for (const [file, ranges] of shown) {
+      let type = types.get(file);
+      if (!type) {
+        type = vscode.window.createTextEditorDecorationType({
+          gutterIconPath: vscode.Uri.file(file),
+          gutterIconSize: "contain",
+        });
+        types.set(file, type);
+      }
+      editor.setDecorations(type, ranges);
+    }
+    // A type left alone keeps whatever it was showing the last time this
+    // editor scrolled past that line, so a line this editor has moved off has
+    // to be set to nothing by name -- unless no editor is showing that image
+    // at all, where disposing clears it everywhere and retires the type with
+    // the same call.
     for (const [file, type] of types) {
-      editor.setDecorations(type, shown.get(file) ?? []);
+      if (shown.has(file)) {
+        continue;
+      }
+      if (!onScreen(file)) {
+        type.dispose();
+        types.delete(file);
+      } else if (before.has(file)) {
+        editor.setDecorations(type, []);
+      }
     }
   };
 
@@ -578,7 +601,18 @@ function previewImages(context: vscode.ExtensionContext): void {
     clearTimeout(pending);
     // Slower than the indent repaint on purpose: this one stats files, and
     // nobody needs a thumbnail to keep up with typing.
-    pending = setTimeout(() => vscode.window.visibleTextEditors.forEach(paint), 250);
+    pending = setTimeout(() => {
+      // An editor that is gone is never painted again, so its last paint has
+      // to stop counting as something on screen or it pins those types for the
+      // rest of the session.
+      const open = new Set(vscode.window.visibleTextEditors);
+      for (const editor of painted.keys()) {
+        if (!open.has(editor)) {
+          painted.delete(editor);
+        }
+      }
+      vscode.window.visibleTextEditors.forEach(paint);
+    }, 250);
   };
   context.subscriptions.push({ dispose: () => clearTimeout(pending) });
 
@@ -612,11 +646,72 @@ function previewImages(context: vscode.ExtensionContext): void {
 class ReferenceLens extends vscode.CodeLens {
   constructor(
     readonly uri: vscode.Uri,
-    readonly counts: "refs" | "impls",
+    /** References, or which way the implementation question points. */
+    readonly counts: "refs" | Direction,
     range: vscode.Range,
   ) {
     super(range);
   }
+}
+
+/**
+ * Where a reference lens click lands.
+ *
+ * "N refs" is three gestures wearing one label, and until 2026-09-21 all three
+ * opened the same peek. Nothing refers to it: there is nowhere to go, and the
+ * lens stays text. One thing does: go there -- a list with a single entry in it
+ * is a widget's worth of ceremony around a jump the user has already decided
+ * on. More than one: the References tree, which is the only one of the two that
+ * survives being read, since a peek closes the moment the editor is touched.
+ *
+ * The tree belongs to `references-view`, a built-in extension, and its commands
+ * take no arguments: measured in the shipped `dist/extension.js`, they read
+ * `window.activeTextEditor`'s uri and cursor. So the cursor is put on the
+ * declaration first -- which is in the document the lens is drawn in, so this
+ * is a move within the open editor and not a file open.
+ */
+/**
+ * Where a `N methods` or a `go type` click lands.
+ *
+ * Same three-way rule as the reference lens, minus the empty case that never
+ * draws a lens at all: one target is a jump, several are a list. The list is a
+ * quick pick rather than the References tree because these are not references
+ * -- nothing here was found by a reference provider, so there is no result set
+ * for the tree to hold, only declarations already named.
+ */
+async function goToSymbol(
+  targets: readonly { name: string; uri: vscode.Uri; range: vscode.Range }[],
+  title: string,
+): Promise<void> {
+  const only = targets.length === 1
+    ? targets[0]
+    : await vscode.window.showQuickPick(
+      targets.map((target) => ({ label: target.name, target })),
+      { title: `Poly: ${title}`, placeHolder: "Go to" },
+    ).then((picked) => picked?.target);
+  if (only) {
+    await vscode.window.showTextDocument(only.uri, { selection: only.range });
+  }
+}
+
+async function showReferences(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  counts: "refs" | Direction,
+  locations: readonly vscode.Location[],
+): Promise<void> {
+  const only = locations.length === 1 ? locations[0] : undefined;
+  if (only) {
+    await vscode.window.showTextDocument(only.uri, { selection: only.range });
+    return;
+  }
+  const editor = await vscode.window.showTextDocument(uri);
+  editor.selection = new vscode.Selection(position, position);
+  await vscode.commands.executeCommand(
+    counts === "refs"
+      ? "references-view.findReferences"
+      : "references-view.findImplementations",
+  );
 }
 
 /**
@@ -628,6 +723,16 @@ class ReferenceLens extends vscode.CodeLens {
  * query per visible declaration rather than one per declaration in the file.
  */
 const MAX_LENSES = 300;
+
+/**
+ * How many copies of one generated file to consider.
+ *
+ * A workspace with two `greet.pb.go` in it is a monorepo with two modules
+ * generating from the same proto, and offering both is right. A workspace with
+ * twenty is a vendor directory, and a quick pick of twenty identical names is
+ * not a choice anyone can make.
+ */
+const MAX_GENERATED = 4;
 
 /**
  * How many declarations to ask about before deciding nothing can answer.
@@ -673,6 +778,64 @@ async function answersReferences(
 }
 
 /**
+ * Does this language's implementation provider answer in this direction?
+ *
+ * The question is not rhetorical in either direction, and the answer differs
+ * per server. Measured 2026-09-21: gopls asked at `type Circle struct` answers
+ * `Shape`, while TypeScript asked at `class Circle implements Shape` answers
+ * nothing at all -- it only reads the relation downward. `buf lsp serve` reads
+ * it neither way: it declares no implementation provider, and a `.proto` file
+ * carried a `no impls` over every service and every rpc in it.
+ *
+ * Drawing regardless is what made both of those noise. `no impls` over an
+ * interface nothing implements is worth a word; over an rpc, in a language
+ * where nothing can ever answer, it is a permanent grey lie.
+ *
+ * So each direction is earned per language rather than declared: the first file
+ * that proves a provider answers turns that direction on for that language id,
+ * and nothing ever turns it off. Only the yes is remembered, because a no is
+ * also what a file of unimplemented interfaces looks like, and caching that
+ * would keep the lens off a project that grows an implementation later.
+ */
+async function answersImplementations(
+  document: vscode.TextDocument,
+  targets: readonly LensTarget<vscode.DocumentSymbol>[],
+  direction: Direction,
+  known: Map<string, Set<Direction>>,
+): Promise<boolean> {
+  const seen = known.get(document.languageId);
+  if (seen?.has(direction)) {
+    return true;
+  }
+  const asking = targets.filter((target) => target.implementation === direction);
+  for (const target of asking.slice(0, REFERENCE_PROBES)) {
+    const start = target.symbol.selectionRange.start;
+    const found = await vscode.commands.executeCommand<
+      (vscode.Location | vscode.LocationLink)[]
+    >("vscode.executeImplementationProvider", document.uri, start);
+    // Not `length > 0`: a server that answers with the declaration itself has
+    // said nothing, and would otherwise switch the lens on for a whole language
+    // on the strength of an echo.
+    const others = elsewhere(
+      found ?? [],
+      { uri: document.uri.toString(), line: start.line },
+      (one) =>
+        "targetUri" in one
+          ? {
+            uri: one.targetUri.toString(),
+            line: (one.targetSelectionRange ?? one.targetRange).start.line,
+          }
+          : { uri: one.uri.toString(), line: one.range.start.line },
+    );
+    if (others.length > 0) {
+      known.set(document.languageId, (seen ?? new Set()).add(direction));
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * `N refs` over every declaration and `N impls` over every interface, in every
  * language whose provider can answer.
  *
@@ -690,6 +853,8 @@ async function answersReferences(
  */
 function countReferencesInGutter(context: vscode.ExtensionContext): void {
   const changed = new vscode.EventEmitter<void>();
+  /** Which implementation directions each language's provider has answered. */
+  const answered = new Map<string, Set<Direction>>();
   const provider: vscode.CodeLensProvider = {
     onDidChangeCodeLenses: changed.event,
 
@@ -698,6 +863,9 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       if (!config.get<boolean>("referencesCodeLens.enabled", true)) {
         return [];
       }
+      // A server may answer in either symbol shape and this reads only one of
+      // them -- see `registerFlatProvider` in tools/ref-lens-check for why that
+      // is safe, and for the check that says it stays safe.
       const symbols = await vscode.commands.executeCommand<
         vscode.DocumentSymbol[]
       >("vscode.executeDocumentSymbolProvider", document.uri);
@@ -714,11 +882,38 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       if (targets.length === 0 || !(await answersReferences(document.uri, targets))) {
         return [];
       }
+      const answers = {
+        down: await answersImplementations(document, targets, "down", answered),
+        up: await answersImplementations(document, targets, "up", answered),
+      };
       return targets.flatMap((target) => {
         const range = target.symbol.selectionRange;
-        const lenses = [new ReferenceLens(document.uri, "refs", range)];
-        if (target.implementable) {
-          lenses.push(new ReferenceLens(document.uri, "impls", range));
+        const lenses: vscode.CodeLens[] = [new ReferenceLens(document.uri, "refs", range)];
+        const direction = target.implementation;
+        if (direction && answers[direction]) {
+          lenses.push(new ReferenceLens(document.uri, direction, range));
+        }
+        // Already resolved, and the only lens here that is: the count is in the
+        // symbol tree that has already been fetched, so there is nothing to ask
+        // anybody and nothing to defer. No lens at all when there are none --
+        // see `methods.ts` for why zero is not worth a word here when it is
+        // over an interface nothing implements.
+        const methods = methodsOf(target.symbol.name, symbols);
+        if (methods.length > 0) {
+          lenses.push(
+            new vscode.CodeLens(range, {
+              title: methodLabel(methods.length),
+              command: "poly.goToSymbol",
+              arguments: [
+                methods.map((method) => ({
+                  name: method.name,
+                  uri: document.uri,
+                  range: method.selectionRange,
+                })),
+                "Methods",
+              ],
+            }),
+          );
         }
         return lenses;
       });
@@ -737,7 +932,7 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
         start,
       );
       // A reference provider answers in `Location`s, an implementation provider
-      // may answer in `LocationLink`s, and the command below only understands
+      // may answer in `LocationLink`s, and everything below only understands
       // the first.
       const locations = (found ?? []).map((one) =>
         "targetUri" in one
@@ -747,23 +942,21 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
           )
           : one
       );
-      const count = countElsewhere(
-        locations.map((location) => ({
+      const others = elsewhere(
+        locations,
+        { uri: at.toString(), line: start.line },
+        (location) => ({
           uri: location.uri.toString(),
           line: location.range.start.line,
-        })),
-        { uri: at.toString(), line: start.line },
+        }),
       );
       lens.command = {
-        title: counts === "refs" ? refLabel(count) : implLabel(count),
-        // The built-in references-view activates on this command and shows its
-        // tree instead of the peek when `references.preferredLocation` is
-        // "view", so the user's own setting decides which one opens rather than
-        // poly picking for them. It is the command VSCode's own TypeScript
-        // reference lens uses, and that setting exists to steer exactly this.
+        title: counts === "refs"
+          ? refLabel(others.length)
+          : implLabel(others.length, counts),
         // Nothing to open when nothing refers to it, so the lens is text.
-        command: count > 0 ? "editor.action.showReferences" : "",
-        arguments: [at, start, locations],
+        command: others.length > 0 ? "poly.showReferences" : "",
+        arguments: [at, start, counts, others],
       };
       return lens;
     },
@@ -771,12 +964,207 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     changed,
+    // Not in the command table below: that one is for commands a user invokes,
+    // and this is the lens's own click. It takes the lens's arguments, so it
+    // has nothing to offer the palette and is deliberately not contributed.
+    vscode.commands.registerCommand("poly.showReferences", showReferences),
     // Every file scheme, filtered by language inside: the setting is a list of
     // language ids, and a selector built from it at registration time would go
     // stale the moment it changed.
     vscode.languages.registerCodeLensProvider({ scheme: "file" }, provider),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("poly.referencesCodeLens")) {
+        changed.fire();
+      }
+    }),
+  );
+}
+
+/**
+ * `run | debug` over a program's entry point.
+ *
+ * The two halves are deliberately lopsided: poly decides where the button goes,
+ * and the editor's own Start Debugging decides what it runs. See `runnable.ts`
+ * for why that division is the whole feature and not a shortcut.
+ *
+ * `workbench.action.debug.run` and `.start` are F5 and ctrl+F5 -- so with a
+ * launch.json present this starts the configuration the user has selected,
+ * exactly as pressing F5 would, and without one it asks whichever debug
+ * extension is installed for a configuration for the active file. The second
+ * case is the one the lens is for, and it is the one where "the file I am
+ * looking at" and "what F5 would run" are the same thing.
+ */
+function runFromGutter(context: vscode.ExtensionContext): void {
+  const changed = new vscode.EventEmitter<void>();
+  const provider: vscode.CodeLensProvider = {
+    onDidChangeCodeLenses: changed.event,
+
+    async provideCodeLenses(document) {
+      const on = vscode.workspace
+        .getConfiguration("poly")
+        .get<boolean>("runCodeLens.enabled", true);
+      if (!on) {
+        return [];
+      }
+      const buttons = (range: vscode.Range) =>
+        [
+          { title: "run", command: "workbench.action.debug.run" },
+          { title: "debug", command: "workbench.action.debug.start" },
+        ].map(({ title, command }) => new vscode.CodeLens(range, { title, command, arguments: [] }));
+
+      // Python and shell have no declaration to sit on, and asking their
+      // symbol provider first would cost a request whose answer is discarded.
+      if (findsEntryInText(document.languageId)) {
+        const line = entryLine(document.languageId, document.getText());
+        return line === undefined ? [] : buttons(document.lineAt(line).range);
+      }
+      const symbols = await vscode.commands.executeCommand<
+        vscode.DocumentSymbol[]
+      >("vscode.executeDocumentSymbolProvider", document.uri);
+      return entryPoints(symbols ?? []).flatMap((symbol) => buttons(symbol.selectionRange));
+    },
+  };
+
+  context.subscriptions.push(
+    changed,
+    vscode.languages.registerCodeLensProvider({ scheme: "file" }, provider),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("poly.runCodeLens")) {
+        changed.fire();
+      }
+    }),
+  );
+}
+
+/**
+ * An rpc's `N impls`, which are Go's and not the .proto's.
+ *
+ * It carries where the question has to be asked rather than where the answer
+ * is drawn: the lens sits on the rpc, and the implementation query runs at the
+ * generated `GreeterServer.SayHello` that gopls knows about.
+ */
+class ProtoImplLens extends vscode.CodeLens {
+  constructor(readonly generated: vscode.Location, range: vscode.Range) {
+    super(range);
+  }
+}
+
+/**
+ * `go type`, `go server`, `go client` over a .proto declaration.
+ *
+ * The generated file is found by name and read once, and every lens in the
+ * file is matched against that one symbol list -- not one workspace query per
+ * message, which on a .proto with thirty of them would be thirty fuzzy
+ * searches of the whole workspace for an answer that is always in the same two
+ * files. See `protobuf.ts` for why the names are predictable at all.
+ *
+ * A declaration with nothing generated for it gets no lens rather than a dead
+ * one: the symbols are in hand before any lens is made, so "not generated yet"
+ * and "generated elsewhere" both come out as silence instead of a word that
+ * does nothing when pressed.
+ */
+function linkGeneratedGo(context: vscode.ExtensionContext): void {
+  const changed = new vscode.EventEmitter<void>();
+  const provider: vscode.CodeLensProvider = {
+    onDidChangeCodeLenses: changed.event,
+
+    async provideCodeLenses(document) {
+      const on = vscode.workspace
+        .getConfiguration("poly")
+        .get<boolean>("protobufCodeLens.enabled", true);
+      if (!on) {
+        return [];
+      }
+      const files = (await Promise.all(
+        generatedFiles(document.uri.path).map((name) =>
+          vscode.workspace.findFiles(`**/${name}`, "**/node_modules/**", MAX_GENERATED)
+        ),
+      )).flat();
+      if (files.length === 0) {
+        return [];
+      }
+      // One symbol list per generated file, keyed by name. A workspace with two
+      // `greet.pb.go` in it keeps both, and the click asks which. Interface
+      // members are keyed `GreeterServer.SayHello`, because an rpc's answer is
+      // a method inside a generated interface rather than a top-level type.
+      const generated = new Map<string, vscode.Location[]>();
+      for (const file of files) {
+        const symbols = await vscode.commands.executeCommand<
+          vscode.DocumentSymbol[]
+        >("vscode.executeDocumentSymbolProvider", file);
+        const keep = (key: string, range: vscode.Range) => {
+          const at = new vscode.Location(file, range);
+          generated.set(key, [...(generated.get(key) ?? []), at]);
+        };
+        for (const symbol of symbols ?? []) {
+          keep(symbol.name, symbol.selectionRange);
+          for (const member of symbol.children ?? []) {
+            keep(`${symbol.name}.${member.name}`, member.selectionRange);
+          }
+        }
+      }
+
+      const symbols = await vscode.commands.executeCommand<
+        vscode.DocumentSymbol[]
+      >("vscode.executeDocumentSymbolProvider", document.uri);
+      const pkg = protoPackage(document.getText());
+      return (symbols ?? []).flatMap((symbol) => {
+        const links = goLinksFor(symbol.name, symbol.kind, pkg).flatMap((link) => {
+          const found = generated.get(link.name);
+          return found
+            ? [
+              new vscode.CodeLens(symbol.selectionRange, {
+                title: link.label,
+                command: "poly.goToSymbol",
+                arguments: [
+                  found.map((at) => ({ name: link.name, uri: at.uri, range: at.range })),
+                  link.label,
+                ],
+              }),
+            ]
+            : [];
+        });
+        // The rpc's own lens, and the one thing on a .proto that has to stay
+        // lazy: the count is an implementation query against the generated
+        // interface method, not something already in hand.
+        const method = goServerMethod(symbol.name, pkg);
+        const at = method ? generated.get(method)?.[0] : undefined;
+        return at
+          ? [...links, new ProtoImplLens(at, symbol.selectionRange)]
+          : links;
+      });
+    },
+
+    async resolveCodeLens(lens) {
+      const { generated } = lens as ProtoImplLens;
+      const found = await vscode.commands.executeCommand<
+        (vscode.Location | vscode.LocationLink)[]
+      >("vscode.executeImplementationProvider", generated.uri, generated.range.start);
+      const locations = (found ?? []).map((one) =>
+        "targetUri" in one
+          ? new vscode.Location(one.targetUri, one.targetSelectionRange ?? one.targetRange)
+          : one
+      );
+      // The generated interface declares the method; it does not implement it.
+      const others = elsewhere(
+        locations,
+        { uri: generated.uri.toString(), line: generated.range.start.line },
+        (one) => ({ uri: one.uri.toString(), line: one.range.start.line }),
+      );
+      lens.command = {
+        title: implLabel(others.length, "down"),
+        command: others.length > 0 ? "poly.showReferences" : "",
+        arguments: [generated.uri, generated.range.start, "down", others],
+      };
+      return lens;
+    },
+  };
+
+  context.subscriptions.push(
+    changed,
+    vscode.languages.registerCodeLensProvider({ language: "protobuf" }, provider),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("poly.protobufCodeLens")) {
         changed.fire();
       }
     }),
@@ -968,8 +1356,8 @@ const MAX_RESOLVED = 32;
 async function runRefactor(
   editor: vscode.TextEditor,
   want: Refactoring,
-  what: string,
 ): Promise<void> {
+  const wanted = REFACTORINGS[want];
   // An empty selection is the common case for inline (the cursor is on the
   // binding) and a mistake for extract, but the word under the cursor is a
   // legal expression to extract and is what `editor.action.refactor` would
@@ -984,7 +1372,7 @@ async function runRefactor(
     "vscode.executeCodeActionProvider",
     editor.document.uri,
     range,
-    REFACTOR_KIND[want],
+    wanted.kind,
     MAX_RESOLVED,
   );
   const choices = refactorChoices(
@@ -997,10 +1385,10 @@ async function runRefactor(
   );
   if (choices.length === 0) {
     // Named rather than generic: "nothing here" and "this language server does
-    // not do this" look identical from the outside, and the selection is the
+    // not do this" look identical from the outside, and the position is the
     // half the user can change.
     vscode.window.showWarningMessage(
-      `Poly: no ${what} offered at this selection — select an expression, or this language's server has none.`,
+      `Poly: nothing to ${wanted.title.toLowerCase()} here — ${wanted.hint}, or this language's server has none.`,
     );
     return;
   }
@@ -1008,7 +1396,7 @@ async function runRefactor(
     ? choices[0]
     : await vscode.window.showQuickPick(
       choices.map((one) => ({ label: one.action.title, one })),
-      { title: `Poly: ${what}`, placeHolder: "More than one applies here" },
+      { title: `Poly: ${wanted.title}`, placeHolder: "More than one applies here" },
     ).then((picked) => picked?.one);
   if (!chosen) {
     return;
@@ -1061,7 +1449,16 @@ const extendMarkdownIt = mermaidPlugin(rendersMermaid);
 export function activate(context: vscode.ExtensionContext) {
   tintIndentation(context);
   previewImages(context);
+  // Two providers draw lenses that navigate to a declaration by name, so the
+  // command they share is registered here rather than inside either of them --
+  // registering it twice throws, and registering it in one means the other
+  // silently depends on that one having been set up first.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("poly.goToSymbol", goToSymbol),
+  );
   countReferencesInGutter(context);
+  runFromGutter(context);
+  linkGeneratedGo(context);
   completePostfixes(context);
   registerTodoTree(context);
 
@@ -1097,20 +1494,14 @@ export function activate(context: vscode.ExtensionContext) {
       "poly.toggleItalic",
       withEditor("Toggle Italic", (editor) => toggleEmphasis(editor, "_")),
     ],
-    [
-      "poly.extractVariable",
-      withEditor(
-        "Extract Variable",
-        (editor) => runRefactor(editor, "extract", "extract-variable refactoring"),
-      ),
-    ],
-    [
-      "poly.inlineVariable",
-      withEditor(
-        "Inline Variable",
-        (editor) => runRefactor(editor, "inline", "inline-variable refactoring"),
-      ),
-    ],
+    // One entry per refactoring, so the command id and the table cannot drift:
+    // `poly.changeSignature` is `REFACTORINGS.changeSignature` by construction.
+    ...(Object.keys(REFACTORINGS) as Refactoring[]).map(
+      (want): [string, () => Promise<void>] => [
+        `poly.${want}`,
+        withEditor(REFACTORINGS[want].title, (editor) => runRefactor(editor, want)),
+      ],
+    ),
     [
       "poly.continueList",
       async () => {

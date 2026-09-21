@@ -1268,17 +1268,15 @@ dependencies = [
 
 [[package]]
 name = "dprint-plugin-markdown"
-version = "0.22.1"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a049a298ecf0d4579d1cc8875bd5c5861633006e0106c99a7c366b12c331b3d0"
+checksum = "13bd5c410ba8bc62ad8e94278b931a06b1fb163dc2ec9e1e12df3d4843534dce"
 dependencies = [
- "anyhow",
- "dprint-core 0.67.4",
+ "dprint-core 0.69.1",
  "dprint-core-macros",
- "pulldown-cmark 0.11.3",
- "regex",
  "serde",
- "unicode-width 0.1.14",
+ "thiserror 2.0.20",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -3249,7 +3247,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "poly-cli"
-version = "0.13.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "lsp-server",
@@ -3265,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "poly-core"
-version = "0.13.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ec4rs",
@@ -3278,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "poly-engines"
-version = "0.13.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "apollo-parser",
@@ -3310,6 +3308,7 @@ dependencies = [
  "pretty_yaml",
  "prost-types",
  "protox-parse",
+ "pulldown-cmark",
  "rowan",
  "ruff_db",
  "ruff_diagnostics",
@@ -3338,7 +3337,7 @@ dependencies = [
 
 [[package]]
 name = "poly-tools"
-version = "0.13.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3560,22 +3559,12 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "679341d22c78c6c649893cbd6c3278dcbe9fc4faa62fea3a9296ae2b50c14625"
-dependencies = [
- "bitflags 2.13.1",
- "memchr",
- "unicase",
-]
-
-[[package]]
-name = "pulldown-cmark"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
 dependencies = [
  "bitflags 2.13.1",
+ "getopts",
  "memchr",
  "pulldown-cmark-escape",
  "unicase",
@@ -4425,7 +4414,7 @@ dependencies = [
  "log",
  "mimalloc",
  "percent-encoding",
- "pulldown-cmark 0.13.4",
+ "pulldown-cmark",
  "regex",
  "schemars",
  "serde",
