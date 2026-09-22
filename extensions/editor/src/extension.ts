@@ -441,7 +441,7 @@ function tintIndentation(context: vscode.ExtensionContext): void {
     const odd: vscode.Range[] = [];
     const on = vscode.workspace
       .getConfiguration("poly")
-      .get<boolean>("indentTint.enabled", true);
+      .get<boolean>("indentTint.enabled", false);
     if (on) {
       // `editor.options.tabSize` is what the editor resolved -- from the
       // language, the file, or `editor.detectIndentation` -- so this follows
@@ -551,7 +551,7 @@ function previewImages(context: vscode.ExtensionContext): void {
     const shown = new Map<string, vscode.Range[]>();
     const on = vscode.workspace
       .getConfiguration("poly")
-      .get<boolean>("imagePreview.enabled", true);
+      .get<boolean>("imagePreview.enabled", false);
     if (on && editor.document.uri.scheme === "file") {
       for (const visible of editor.visibleRanges) {
         for (let line = visible.start.line; line <= visible.end.line; line++) {
@@ -860,7 +860,7 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
 
     async provideCodeLenses(document) {
       const config = vscode.workspace.getConfiguration("poly");
-      if (!config.get<boolean>("referencesCodeLens.enabled", true)) {
+      if (!config.get<boolean>("referencesCodeLens.enabled", false)) {
         return [];
       }
       // A server may answer in either symbol shape and this reads only one of
@@ -1002,7 +1002,7 @@ function runFromGutter(context: vscode.ExtensionContext): void {
     async provideCodeLenses(document) {
       const on = vscode.workspace
         .getConfiguration("poly")
-        .get<boolean>("runCodeLens.enabled", true);
+        .get<boolean>("runCodeLens.enabled", false);
       if (!on) {
         return [];
       }
@@ -1071,7 +1071,7 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
     async provideCodeLenses(document) {
       const on = vscode.workspace
         .getConfiguration("poly")
-        .get<boolean>("protobufCodeLens.enabled", true);
+        .get<boolean>("protobufCodeLens.enabled", false);
       if (!on) {
         return [];
       }
@@ -1201,7 +1201,7 @@ function completePostfixes(context: vscode.ExtensionContext): void {
     provideCompletionItems(document, position) {
       const on = vscode.workspace
         .getConfiguration("poly")
-        .get<boolean>("postfixCompletion.enabled", true);
+        .get<boolean>("postfixCompletion.enabled", false);
       const postfixes = on ? postfixesFor(document.languageId) : undefined;
       if (!postfixes) {
         return undefined;
@@ -1434,7 +1434,7 @@ const BUILT_IN_MERMAID = "vscode.mermaid-markdown-features";
 function rendersMermaid(): boolean {
   return vscode.workspace
     .getConfiguration("poly")
-    .get<boolean>("markdownMermaid.enabled", true)
+    .get<boolean>("markdownMermaid.enabled", false)
     && vscode.extensions.getExtension(BUILT_IN_MERMAID) === undefined;
 }
 
