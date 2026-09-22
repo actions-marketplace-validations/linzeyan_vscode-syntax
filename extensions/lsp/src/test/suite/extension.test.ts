@@ -17,6 +17,7 @@ const COMMANDS = [
   "poly.formatGitChanged",
   "poly.lintPath",
   "poly.analyzeDeadCode",
+  "poly.minifyJson",
   "poly.checkForUpdates",
   "poly.showOutput",
   "poly.createGoWork",
@@ -114,6 +115,26 @@ suite("poly-lsp in a real editor", () => {
     const registered = await vscode.commands.getCommands(true);
     const missing = COMMANDS.filter((id) => !registered.includes(id));
     assert.deepStrictEqual(missing, [], "declared but never registered");
+  });
+
+  // A command with a title is in the palette; a command with a keybinding is
+  // also in the Keyboard Shortcuts editor, which is the only place a user
+  // discovers the shortcut without reading the README. Minify had the first
+  // and not the second, so it was reachable and unfindable.
+  //
+  // Read off the manifest rather than by pressing the keys: what a keystroke
+  // resolves to depends on the user's own keybindings.json, which the test
+  // host has none of and a real machine may have anything in.
+  test("every command is in the palette, and minify has a shortcut", () => {
+    const pkg = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON;
+    const hidden = (pkg.contributes.menus?.commandPalette ?? [])
+      .filter((entry: { when?: string }) => entry.when === "false")
+      .map((entry: { command: string }) => entry.command);
+    assert.deepStrictEqual(hidden, [], "declared but kept out of the palette");
+
+    const keys = (pkg.contributes.keybindings as { command: string; key: string }[])
+      .filter((binding) => binding.command === "poly.minifyJson");
+    assert.strictEqual(keys.length, 1, "minify has no keybinding to show");
   });
 
   // VSCode ships no formatter for either language, so any edit at all can only

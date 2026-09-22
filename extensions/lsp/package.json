@@ -129,6 +129,14 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "poly.minifyJson",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m",
+        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(json|jsonc)$/"
+      }
+    ],
     "configuration": {
       "title": "Poly",
       "properties": {
