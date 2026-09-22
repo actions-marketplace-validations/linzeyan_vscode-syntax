@@ -57,5 +57,11 @@ grammars/sources.lock.json.
   files: dune-project.tmLanguage.json, dune.tmLanguage.json, ocaml-interface.tmLanguage.json, ocaml-markdown.tmLanguage.json, ocaml.tmLanguage.json, opam.tmLanguage.json
 - https://github.com/samuelcolvin/jinjahtml-vscode (MIT) @ d8daf5fd4394
   files: jinja-dockerfile.tmLanguage.json, jinja-html.tmLanguage.json, jinja-json.tmLanguage.json, jinja-nginx.tmLanguage.json, jinja-py.tmLanguage.json, jinja-shell.tmLanguage.json, jinja-sql.tmLanguage.json, jinja-toml.tmLanguage.json, jinja-yaml.tmLanguage.json, jinja.tmLanguage.json
+- https://github.com/juanfranblanco/vscode-solidity (MIT) @ 3757fdb6e9bd
+  files: solidity.tmLanguage.json
+- https://github.com/software-mansion/vscode-cairo (Apache-2.0) @ 70b12b2e624a
+  files: cairo.tmLanguage.json
+- https://github.com/vyperlang/vscode-vyper (MIT) @ 8cb5090a7ce5
+  files: vyper.tmLanguage.json
 
 Generated locally, no upstream: csv, ssh_config, tsv.

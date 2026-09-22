@@ -20,10 +20,11 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 
 ### poly-syntax-highlight — highlighting
 
-- **151 個文法**：接管 49 個 VSCode 內建語言，另加 44 個內建沒有的語言
+- **153 個文法**：接管 49 個 VSCode 內建語言，另加 47 個內建沒有的語言
   （HCL／Terraform、nginx、zig、dotenv、protobuf、mermaid、caddyfile、systemd
-  unit、jsonnet、just、nix、cabal、dune、ssh_config、CSV/TSV rainbow…）。
-- 來源共 93 條、27 個 pinned 上游 repo；只有 CSV／TSV／ssh_config 三個是自產的
+  unit、jsonnet、just、nix、cabal、dune、ssh_config、Solidity／Cairo／Vyper、
+  CSV/TSV rainbow…）。
+- 來源共 96 條、30 個 pinned 上游 repo；只有 CSV／TSV／ssh_config 三個是自產的
   （上游要嘛不存在，要嘛沒有授權檔）。
 - 輸出標準 TextMate scope，**任何現有 color theme 直接生效**，不自帶配色。
 - 部分語言改採比內建更好的社群文法（如 rust 用 dustypomerleau/rust-syntax）。

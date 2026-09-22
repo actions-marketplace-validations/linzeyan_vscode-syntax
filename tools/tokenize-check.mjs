@@ -417,6 +417,37 @@ const CASES = {
   // future yaml grammar stops claiming the whole document this starts failing,
   // which is the signal to add the jinja requirements back.
   "sample.yaml.j2": ["text.yaml.jinja", ["entity.name.tag.yaml", "meta.mapping.yaml"]],
+  "sample.sol": [
+    "source.solidity",
+    [
+      "entity.name.type.contract",
+      "storage.type.function.modifier",
+      "variable.language.transaction",
+      "comment.block.documentation",
+    ],
+  ],
+  "sample.cairo": [
+    "source.cairo",
+    [
+      "entity.name.type.trait.cairo",
+      "meta.attribute.cairo",
+      "keyword.other.fn.cairo",
+      "string.quoted.single.cairo",
+    ],
+  ],
+  // Every requirement here ends in `.vyper` on purpose. The grammar is
+  // Python's with Vyper's declarations layered over it, so the Python scopes
+  // would all still be there if the layer stopped matching -- and a fixture
+  // that accepted them would pass on a file with no Vyper in it at all.
+  "sample.vy": [
+    "source.vyper",
+    [
+      "support.type.basetype.vyper",
+      "variable.language.special.msg.vyper",
+      "entity.name.function.constructor.vyper",
+      "support.function.builtin.lowlevel.vyper",
+    ],
+  ],
 };
 
 let failed = 0;
