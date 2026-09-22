@@ -145,6 +145,26 @@ poly-editor 的 `N refs`／`N impls` 是另一回事，兩者會一起顯示。
 rust-analyzer、clangd、lua-language-server、terraform-ls、buf 預設就有。Swift 也有，只是
 sourcekit-lsp 是等編輯器表示看得懂之後才自己註冊的，時機比其他 server 晚一點。
 
+**`.proto` 的 enum 顏色只有這一層給得出來。** 實測 2026-09-22，同一份檔案兩邊分別問：
+
+| 元素                 | 文法（zxh0 的 proto3，poly 逐字沿用） | buf 的語意 token           |
+| -------------------- | ------------------------------------- | -------------------------- |
+| `enum JobState`      | `entity.name.class.proto`             | `enum`                     |
+| `JOB_STATE_RUNNING`  | `variable.other.proto`                | `enumMember`               |
+| `message Job`        | `entity.name.class.message.proto`     | `struct`                   |
+| `service JobService` | `entity.name.class.message.proto`     | `interface`                |
+| 欄位名 `name`        | `variable.other.proto`                | `property`                 |
+| `rpc GetJob`         | `entity.name.function`                | `method`                   |
+| `int64`              | `storage.type.proto`                  | `type`（`defaultLibrary`） |
+
+左欄有兩個地方是**同一個 scope 兼差兩件事**：enum 的成員跟 message 的欄位都是
+`variable.other.proto`，message 跟 service 都是 `entity.name.class.message.proto`，
+所以在任何主題下它們一定同色。這不是 poly 改壞的——那份文法是每個 proto extension
+都在用的同一份，`grammar-sync.py --check` 保證它跟上游逐字一致。要讓 enum 成員跟欄位
+分色，唯一的辦法是讓 buf 的語意 token 疊上去，也就是把 `poly.languageServers` 打開。
+這條路現在有 gate：`tools/lsp-proxy-probe.py` 的 protobuf fixture 裡有一個 enum，
+並斷言 buf 回的 token 裡真的有 `enumMember`。
+
 ### 一個 window 開多個 Go 專案：`Poly: Create go.work for the Open Go Modules`
 
 **跨 module 的引用只有在有 `go.work` 時才找得到。** 實測 gopls 1.26，兩個 module

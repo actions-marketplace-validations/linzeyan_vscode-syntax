@@ -136,6 +136,14 @@ message Greeting {
 message Response {
   Greeting greeting = 1;
 }
+
+// Appended rather than inserted: the line numbers above are what the
+// definition, call and hover probes point at. The enum is here for the
+// semantic token assertion -- see the buf case for what it is measuring.
+enum GreetingKind {
+  GREETING_KIND_UNSPECIFIED = 0;
+  GREETING_KIND_FORMAL = 1;
+}
 """
 
 # buf.yaml is what makes this a module. Without one buf falls back to the
@@ -535,6 +543,14 @@ CASES = [
         | LENS
         | SYMBOL
         | SEMTOK,
+        # The one colour on a .proto that no TextMate grammar can get right.
+        # Measured 2026-09-22: zxh0's grammar -- which poly ships verbatim and
+        # every other proto extension ships too -- scopes an enum member
+        # `variable.other.proto`, the same scope it gives a message field, so
+        # the two are one colour in every theme. buf says `enumMember`, and
+        # that is the whole of the difference somebody notices as "the enum
+        # colour is wrong". It is only there while this route works.
+        semantic_tokens="enumMember",
     ),
     # The second server poly pins, and pinned for buf's reason: an R script has
     # no build behind it either. `arity lsp`, so it needs its subcommand too.
