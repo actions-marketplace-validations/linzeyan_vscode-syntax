@@ -207,12 +207,30 @@ code action kind——真正做事的是該語言的 server，poly 只負責挑�
 Python 的 `if __name__ == "__main__"`、shell script 的 shebang。
 `poly.runCodeLens.enabled` 可關。
 
-**poly 沒有 debugger，也不啟動任何行程。** 那兩個字按下去就是編輯器自己的
-Start Debugging／Start Without Debugging（F5／`ctrl+F5`），跑的是你已經裝的 debug
-extension——Go 就是 `golang.go` 的 delve。`contributes.debuggers` 一個都沒有，DAP 一行都
-沒有：poly 決定的只是那顆按鈕放哪裡。有 `launch.json` 時它等於按 F5（跑你選中的那個
-設定），沒有時由該語言的 debug extension 給 active file 一份動態設定——後者正是這條 lens
-存在的理由，也是「我在看的這個檔」跟「F5 會跑什麼」剛好是同一件事的情況。
+**`run` 就是跑起來，不經過 debugger。** 存檔，然後在一個叫 `Poly Run` 的整合終端機裡、
+以該檔所在目錄為工作目錄下一行命令：
+
+| 語言        | 命令                                                                               |
+| ----------- | ---------------------------------------------------------------------------------- |
+| go          | `go run .`                                                                         |
+| rust        | `cargo run`                                                                        |
+| python      | `python3 "<檔名>"`（Windows 是 `python`——那裡的 `python3` 是會打開 Store 的 stub） |
+| shellscript | `<shebang 指定的直譯器> "<檔名>"`                                                  |
+
+Go 與 Rust 吃的是目錄不是檔案，因為 main package 很少只有一個檔，`go run main.go` 會在
+隔壁檔案定義的第一個符號上就失敗。shell 照 shebang 挑直譯器而不是一律 bash：zsh 腳本在
+bash 下是另一種語言，而它們的差異（陣列從 1 開始、word splitting、`setopt`）恰好都是安靜
+壞掉而不是大聲報錯的那種。終端機只有一個、重複使用，而且**不搶焦點**——要看的是輸出，
+游標每按一次就跳出編輯器是要用手搬回來的。
+
+**要先編譯的語言只有 `debug`**：C、C++、Java、C# 的進入點 poly 找得到，但要跑起來得先編，
+而編譯的旗標、輸出路徑與 toolchain 是 poly 不該有意見的東西。知道怎麼建置它們的是那個
+extension，按鈕就該給它。
+
+**`debug` 一律交給你裝的 debug extension**，Go 就是 `golang.go` 的 delve。
+`contributes.debuggers` 一個都沒有，DAP 一行都沒有。有 `launch.json` 時它等於按 F5，
+沒有時由該語言的 debug extension 給 active file 一份動態設定——後者正是這條 lens 存在的
+理由，也是「我在看的這個檔」跟「F5 會跑什麼」剛好是同一件事的情況。
 
 **Python 與 shell 的進入點不是宣告**，所以它們兩個不走符號走文字：Python 找
 `if __name__ == "__main__"`（一個敘述句，沒有任何 symbol provider 會把它報成宣告），

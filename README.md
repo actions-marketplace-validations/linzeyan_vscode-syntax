@@ -125,8 +125,10 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   而別人的樹加不了欄位。全部的數字都來自該語言已註冊的 provider，poly 只數與畫。
   `poly.referencesCodeLens.enabled` 可關。
 - **`run | debug` CodeLens**：程式進入點（Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`、
-  Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。poly 沒有 debugger——
-  按下去是編輯器自己的 Start Debugging，跑你已經裝的 debug extension。
+  Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。`run` 存檔後在一個
+  叫 `Poly Run` 的終端機裡下命令（`go run .`／`cargo run`／`python3 檔名`／shebang 指定的
+  直譯器），不經過 debugger；要先編譯的 C／C++／Java／C# 只有 `debug`。poly 沒有
+  debugger，`debug` 是交給你已經裝的 debug extension。
   `poly.runCodeLens.enabled` 可關。
 - **protobuf → 生成的 Go**：`.proto` 的 `message`／`enum` 上方 `go type`，`service` 上方
   `go server`／`go client`，跳到 protoc 生出來的宣告；`rpc` 上方 `N impls`，跳到寫在 Go 裡的
@@ -297,9 +299,9 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 選檔案 → 重新載入視窗。或用命令列：
 
 ```sh
-code --install-extension poly-syntax-highlight-0.16.0.vsix
-code --install-extension poly-lsp-darwin-arm64-0.16.0.vsix
-code --install-extension poly-editor-0.16.0.vsix
+code --install-extension poly-syntax-highlight-0.17.0.vsix
+code --install-extension poly-lsp-darwin-arm64-0.17.0.vsix
+code --install-extension poly-editor-0.17.0.vsix
 ```
 
 之後的版本由 poly-lsp 自己提示更新，不必再手動抓——它只更新你已經裝了的那幾個。
@@ -313,7 +315,7 @@ extension，只能手動裝。
 0.5.0 的更新提示還是會跳，但按下 Install 一定失敗，而且訊息會騙你：
 
 > Poly: automatic install failed (Error: release has no asset
-> poly-syntax-0.16.0.vsix). The VSIX files were downloaded — install them
+> poly-syntax-0.17.0.vsix). The VSIX files were downloaded — install them
 > manually via "Extensions: Install from VSIX".
 
 其實一個檔都沒下載（它在第一個找不到的 asset 就放棄了），所以「Show Files」按下
@@ -347,7 +349,7 @@ irm https://raw.githubusercontent.com/linzeyan/vscode-syntax/main/install.ps1 | 
 版本就設環境變數——`irm | iex` 沒辦法傳參數，所以兩邊都認得：
 
 ```sh
-POLY_VERSION=0.16.0 POLY_INSTALL_DIR=~/bin sh install.sh
+POLY_VERSION=0.17.0 POLY_INSTALL_DIR=~/bin sh install.sh
 ```
 
 Windows on ARM 上會裝 arm64 版，即使腳本本身跑在 x64 模擬層裡（從 ssh 或某些
@@ -373,7 +375,7 @@ SmartScreen 擋，處理方式見
 - run: poly check --strict .
 ```
 
-`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.16.0" }`——poly
+`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.17.0" }`——poly
 會改寫檔案，所以新版本自己跑進來有可能把綠的分支變紅。
 
 Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、放進 PATH。順便
@@ -386,7 +388,7 @@ Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、
 docker run --rm -v "$PWD:/work" ghcr.io/linzeyan/poly check --strict .
 ```
 
-`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.16.0`、`0.16`；pre-release
+`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.17.0`、`0.17`；pre-release
 不會動到 `latest`。image 裡的 binary 就是 release 附的那一支，不是另外編的。
 
 image **不含任何語言 toolchain**，只含 poly 自己會下載的那些 linter。所以 Rust
