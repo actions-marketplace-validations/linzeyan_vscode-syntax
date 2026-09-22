@@ -74,7 +74,13 @@ def main() -> int:
         # an empty bundle is the same outage as a missing one.
         sizes = {info.filename: info.file_size for info in archive.infolist()}
 
+    # The translations, which no manifest key names: VSCode finds them by
+    # filename next to package.json. That makes them the one kind of required
+    # file `manifest_paths` cannot see, and the kind `.vscodeignore` drops
+    # without anything going red -- a missing package.nls.zh-tw.json renders
+    # the English string, which reads like a translation nobody wrote yet.
     paths = manifest_paths(manifest)
+    paths += [f"./{one.name}" for one in sorted(root.glob("package.nls*.json"))]
     problems = []
     for path in paths:
         entry = PREFIX + path.removeprefix("./")
@@ -84,13 +90,13 @@ def main() -> int:
             problems.append(f"{path} is in the package and empty")
 
     print(
-        f"{package.name}: {len(paths)} manifest path(s), {len(sizes)} file(s) packaged"
+        f"{package.name}: {len(paths)} required path(s), {len(sizes)} file(s) packaged"
     )
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     if problems:
         return 1
-    print("  every path the manifest names is packaged and not empty")
+    print("  every path the manifest needs is packaged and not empty")
     return 0
 
 

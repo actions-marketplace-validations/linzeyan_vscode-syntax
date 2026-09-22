@@ -201,6 +201,13 @@ grammars: tokdeps ## Generated syntax files match sources.json; grammars tokeniz
 	python3 tools/grammar-sync.py --check
 	node tools/tokenize-check.mjs /tmp/poly-tokdeps/node_modules
 
+# Cheap and static, so it runs with the other drift gates rather than behind an
+# editor. Neither failure it catches is visible without reading the settings UI
+# in two locales: an unresolved %key% renders as itself, and a missing
+# translation falls back to English.
+nls: ## Every %key% in a manifest resolves, in every locale
+	python3 tools/nls-check.py
+
 # The guard asks for the files the check imports, not for the directory that
 # holds them, and repairs by starting over. macOS prunes /tmp by age and leaves
 # the tree behind: a `test -d` on the package saw two empty `release/`
@@ -353,7 +360,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config smoke dogfood version probe lens-probe go tf rust deadcode grammars e2e editor ref-lens gutter-cache toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config nls smoke dogfood version probe lens-probe go tf rust deadcode grammars e2e editor ref-lens gutter-cache toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0

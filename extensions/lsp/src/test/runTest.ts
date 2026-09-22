@@ -70,6 +70,11 @@ async function main(): Promise<void> {
         // proxy is exactly the part no protocol test can prove -- whether
         // VSCode acts on a capability registered after initialize.
         "poly.languageServers": true,
+        // Same: every poly feature that is not formatting or linting now ships
+        // off, so a suite that exercises one has to say so. Inheriting the
+        // default would turn the dead-code lens tests into a 45-second wait
+        // for a lens nobody asked for, reported as a timeout.
+        "poly.deadCodeCodeLens.enabled": true,
       },
       null,
       2,

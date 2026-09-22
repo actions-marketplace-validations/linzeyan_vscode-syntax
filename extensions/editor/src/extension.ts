@@ -24,7 +24,44 @@ import { generatedFiles, goLinksFor, goServerMethod, protoPackage } from "./prot
 import { refactorChoices, Refactoring, REFACTORINGS } from "./refactors";
 import { Direction, elsewhere, implLabel, LensTarget, lensTargets, refLabel } from "./references";
 import { entryLine, entryPoints, findsEntryInText } from "./runnable";
+import { offerMessage, serverToOffer } from "./servers";
 import { registerTodoTree } from "./todoTree";
+
+/** Languages already offered a server this session — see `offerServer`. */
+const offered = new Set<string>();
+
+/**
+ * Say why a lens that is switched on is drawing nothing, once.
+ *
+ * Called only where a provider has already been asked and come back empty, so
+ * this never fires for someone whose official extension is answering happily.
+ * Silent unless poly-lsp is installed and `poly.languageServers` is off: it is
+ * the only setting this can offer, and offering to change one that is already
+ * on would be advice that does nothing.
+ */
+async function offerServer(what: string, languageId: string): Promise<void> {
+  const server = serverToOffer(languageId, offered);
+  if (!server || !vscode.extensions.getExtension("ricky.poly-lsp")) {
+    return;
+  }
+  const config = vscode.workspace.getConfiguration("poly");
+  if (config.get<boolean>("languageServers", false)) {
+    return;
+  }
+  offered.add(languageId);
+  const pick = await vscode.window.showInformationMessage(
+    offerMessage(what, languageId, server),
+    "Enable and Reload",
+    "Not now",
+  );
+  if (pick === "Enable and Reload") {
+    // The daemon reads this when it spawns, so a running one keeps the answer
+    // it started with -- which is why the offer says "and reload" rather than
+    // leaving the user to discover that it changed nothing.
+    await config.update("languageServers", true, vscode.ConfigurationTarget.Global);
+    await vscode.commands.executeCommand("workbench.action.reloadWindow");
+  }
+}
 
 /**
  * A `path:line` reference, in the shape poly's diagnostics already print.
@@ -441,7 +478,7 @@ function tintIndentation(context: vscode.ExtensionContext): void {
     const odd: vscode.Range[] = [];
     const on = vscode.workspace
       .getConfiguration("poly")
-      .get<boolean>("indentTint.enabled", true);
+      .get<boolean>("indentTint.enabled", false);
     if (on) {
       // `editor.options.tabSize` is what the editor resolved -- from the
       // language, the file, or `editor.detectIndentation` -- so this follows
@@ -551,7 +588,7 @@ function previewImages(context: vscode.ExtensionContext): void {
     const shown = new Map<string, vscode.Range[]>();
     const on = vscode.workspace
       .getConfiguration("poly")
-      .get<boolean>("imagePreview.enabled", true);
+      .get<boolean>("imagePreview.enabled", false);
     if (on && editor.document.uri.scheme === "file") {
       for (const visible of editor.visibleRanges) {
         for (let line = visible.start.line; line <= visible.end.line; line++) {
@@ -860,7 +897,7 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
 
     async provideCodeLenses(document) {
       const config = vscode.workspace.getConfiguration("poly");
-      if (!config.get<boolean>("referencesCodeLens.enabled", true)) {
+      if (!config.get<boolean>("referencesCodeLens.enabled", false)) {
         return [];
       }
       // A server may answer in either symbol shape and this reads only one of
@@ -872,6 +909,7 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       // No symbol provider, or one that has not finished loading the project.
       // Either way there is nothing to hang a count on yet.
       if (!symbols) {
+        void offerServer("the outline", document.languageId);
         return [];
       }
       const targets = lensTargets(symbols, MAX_LENSES);
@@ -879,7 +917,14 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       // language nothing can answer for is worse than no lens: it reads as an
       // answer. JSON and markdown never reach here (their symbols are not the
       // kinds this counts); CSS and YAML do, and this is what decides them.
-      if (targets.length === 0 || !(await answersReferences(document.uri, targets))) {
+      if (targets.length === 0) {
+        return [];
+      }
+      if (!(await answersReferences(document.uri, targets))) {
+        // There are declarations and nothing will say who uses them. For a
+        // shell function that is the whole feature missing, and it was
+        // reported as one.
+        void offerServer("references", document.languageId);
         return [];
       }
       const answers = {
@@ -1002,7 +1047,7 @@ function runFromGutter(context: vscode.ExtensionContext): void {
     async provideCodeLenses(document) {
       const on = vscode.workspace
         .getConfiguration("poly")
-        .get<boolean>("runCodeLens.enabled", true);
+        .get<boolean>("runCodeLens.enabled", false);
       if (!on) {
         return [];
       }
@@ -1071,7 +1116,7 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
     async provideCodeLenses(document) {
       const on = vscode.workspace
         .getConfiguration("poly")
-        .get<boolean>("protobufCodeLens.enabled", true);
+        .get<boolean>("protobufCodeLens.enabled", false);
       if (!on) {
         return [];
       }
@@ -1107,8 +1152,16 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
       const symbols = await vscode.commands.executeCommand<
         vscode.DocumentSymbol[]
       >("vscode.executeDocumentSymbolProvider", document.uri);
+      // The generated Go is right there and the .proto side is blank, which
+      // means nothing is reading the .proto. This is the one place that can
+      // tell the difference between "not generated yet" -- handled above, by
+      // returning early -- and "generated, but poly is not running buf".
+      if (!symbols || symbols.length === 0) {
+        void offerServer("the .proto outline", document.languageId);
+        return [];
+      }
       const pkg = protoPackage(document.getText());
-      return (symbols ?? []).flatMap((symbol) => {
+      return symbols.flatMap((symbol) => {
         const links = goLinksFor(symbol.name, symbol.kind, pkg).flatMap((link) => {
           const found = generated.get(link.name);
           return found
@@ -1201,7 +1254,7 @@ function completePostfixes(context: vscode.ExtensionContext): void {
     provideCompletionItems(document, position) {
       const on = vscode.workspace
         .getConfiguration("poly")
-        .get<boolean>("postfixCompletion.enabled", true);
+        .get<boolean>("postfixCompletion.enabled", false);
       const postfixes = on ? postfixesFor(document.languageId) : undefined;
       if (!postfixes) {
         return undefined;
@@ -1434,7 +1487,7 @@ const BUILT_IN_MERMAID = "vscode.mermaid-markdown-features";
 function rendersMermaid(): boolean {
   return vscode.workspace
     .getConfiguration("poly")
-    .get<boolean>("markdownMermaid.enabled", true)
+    .get<boolean>("markdownMermaid.enabled", false)
     && vscode.extensions.getExtension(BUILT_IN_MERMAID) === undefined;
 }
 

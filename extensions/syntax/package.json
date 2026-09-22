@@ -1,8 +1,8 @@
 {
   "name": "poly-syntax-highlight",
-  "displayName": "Poly Syntax Highlight",
-  "description": "Unified syntax highlighting pack: every VSCode built-in grammar plus additions, synced from pinned upstreams.",
-  "version": "0.15.1",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.16.0",
   "publisher": "ricky",
   "license": "MIT",
   "engines": {

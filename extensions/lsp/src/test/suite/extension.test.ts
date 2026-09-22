@@ -17,6 +17,8 @@ const COMMANDS = [
   "poly.formatGitChanged",
   "poly.lintPath",
   "poly.analyzeDeadCode",
+  "poly.minifyJson",
+  "poly.toggleFormat",
   "poly.checkForUpdates",
   "poly.showOutput",
   "poly.createGoWork",
@@ -114,6 +116,26 @@ suite("poly-lsp in a real editor", () => {
     const registered = await vscode.commands.getCommands(true);
     const missing = COMMANDS.filter((id) => !registered.includes(id));
     assert.deepStrictEqual(missing, [], "declared but never registered");
+  });
+
+  // A command with a title is in the palette; a command with a keybinding is
+  // also in the Keyboard Shortcuts editor, which is the only place a user
+  // discovers the shortcut without reading the README. Minify had the first
+  // and not the second, so it was reachable and unfindable.
+  //
+  // Read off the manifest rather than by pressing the keys: what a keystroke
+  // resolves to depends on the user's own keybindings.json, which the test
+  // host has none of and a real machine may have anything in.
+  test("every command is in the palette, and minify has a shortcut", () => {
+    const pkg = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON;
+    const hidden = (pkg.contributes.menus?.commandPalette ?? [])
+      .filter((entry: { when?: string }) => entry.when === "false")
+      .map((entry: { command: string }) => entry.command);
+    assert.deepStrictEqual(hidden, [], "declared but kept out of the palette");
+
+    const keys = (pkg.contributes.keybindings as { command: string; key: string }[])
+      .filter((binding) => binding.command === "poly.minifyJson");
+    assert.strictEqual(keys.length, 1, "minify has no keybinding to show");
   });
 
   // VSCode ships no formatter for either language, so any edit at all can only
@@ -224,6 +246,49 @@ suite("poly-lsp in a real editor", () => {
       writeFile("messy.py", "def  f( a,b ):\n    return a+b\n"),
     );
     assert.strictEqual(text, "def f(a, b):\n    return a + b\n");
+  });
+
+  // The suspend switch lives in the client's middleware, so nothing in the
+  // protocol tests can see it: the daemon is asked the same question and gives
+  // the same answer, and the whole feature is the client deciding not to ask.
+  //
+  // Two files, not one. Formatting the control leaves it formatted, so a
+  // second pass over the same document returns no edits whether the switch is
+  // on or off -- which is exactly the shape of a test that passes against a
+  // broken switch.
+  test("suspending formatting stops poly rewriting a file", async () => {
+    const messy = "select a,b from t\n";
+    const config = vscode.workspace.getConfiguration("poly");
+    assert.strictEqual(await formatted(writeFile("resumed.sql", messy)), "select a, b from t\n");
+
+    await config.update("format.enabled", false, vscode.ConfigurationTarget.Workspace);
+    try {
+      const uri = writeFile("suspended.sql", messy);
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+      const edits = await vscode.commands.executeCommand<vscode.TextEdit[]>(
+        "vscode.executeFormatDocumentProvider",
+        uri,
+        { tabSize: 2, insertSpaces: true },
+      );
+      assert.deepStrictEqual(edits ?? [], [], "poly formatted a file while suspended");
+    } finally {
+      await config.update("format.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  test("the toggle command flips the switch both ways", async () => {
+    const value = () => vscode.workspace.getConfiguration("poly").get<boolean>("format.enabled");
+    assert.strictEqual(value(), true, "the switch did not start on");
+    try {
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(value(), false);
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(value(), true);
+    } finally {
+      await vscode.workspace
+        .getConfiguration("poly")
+        .update("format.enabled", undefined, vscode.ConfigurationTarget.Global);
+    }
   });
 
   test("publishes sqruff diagnostics into the Problems panel", async () => {
@@ -407,70 +472,30 @@ func main() {
     assert.strictEqual(readFileSync(file, "utf8"), "{ \"b\": 1, \"a\": 2 }\n");
   });
 
-  // Format-on-save used to need a notification the user had to catch: the
-  // "already asked" flag was written before the toast was even shown, so one
-  // that faded out unanswered left the feature off forever with nothing in the
-  // UI able to turn it on. Found on the Win11 VM, where settings.json had no
-  // language section at all. It is now declared in configurationDefaults, which
-  // needs no click and touches no user file -- but only the real editor can say
-  // whether VSCode honours it.
+  // poly claims the formatter slot and stops there. It used to also declare
+  // `editor.formatOnSave: true` for all 39 activated languages, which outranks
+  // the user's own global setting -- so a user who had deliberately turned
+  // format-on-save off got it back on for most of the files they open, by
+  // installing a formatter. Deciding *who* formats is poly's business;
+  // deciding *when* is the user's, and poly.format.enabled is the switch for
+  // suspending it without touching either.
   //
-  // This reads a user setting when there is one, so it only proves anything on
-  // a clean profile. The old prompt did write one, and .vscode-test/user-data
-  // survives between runs: a stale copy naming the pre-rename extension id sat
-  // there passing this test for the wrong reason. Delete that directory if this
-  // ever disagrees with package.json.
-  test("format-on-save is on for a poly language out of the box", () => {
+  // Asserted against the manifest as well as against the editor: the editor
+  // half reads a user setting when there is one, so on a profile that already
+  // turned format-on-save on it would pass no matter what poly declares.
+  test("poly claims the formatter slot without switching format-on-save on", () => {
     const uri = writeFile("defaults.py", "x = 1\n");
     const editor = vscode.workspace.getConfiguration("editor", {
       uri,
       languageId: "python",
     });
-    assert.strictEqual(editor.get<boolean>("formatOnSave"), true);
     assert.strictEqual(editor.get<string>("defaultFormatter"), EXTENSION_ID);
-  });
 
-  // The test above runs on a profile that never turned format-on-save off, so
-  // it cannot see the case A8 actually has to survive: a user with
-  // `"editor.formatOnSave": false` globally. That is not hypothetical -- the
-  // machine this was written on has exactly that, plus ~25 language blocks
-  // switching it back on one at a time, and whether those blocks are load
-  // bearing or redundant is the same question. Nothing in the manifest answers
-  // it; only the editor does.
-  //
-  // Set at workspace scope, which outranks user scope: if a declared default
-  // survives this, it survives the weaker case too. Restored in `finally`
-  // because everything after it in this file formats on save.
-  test("a declared language default outranks a global formatOnSave: false", async () => {
-    const uri = writeFile("global-off.py", "x = 1\n");
-    const config = vscode.workspace.getConfiguration();
-    await config.update(
-      "editor.formatOnSave",
-      false,
-      vscode.ConfigurationTarget.Workspace,
-    );
-    try {
-      assert.strictEqual(
-        vscode.workspace
-          .getConfiguration("editor", { uri, languageId: "python" })
-          .get<boolean>("formatOnSave"),
-        true,
-      );
-      // The control: with no language in scope the user's false is what stands,
-      // or this would pass just as well against a setting that never applied.
-      assert.strictEqual(
-        vscode.workspace.getConfiguration("editor", uri).get<boolean>(
-          "formatOnSave",
-        ),
-        false,
-      );
-    } finally {
-      await config.update(
-        "editor.formatOnSave",
-        undefined,
-        vscode.ConfigurationTarget.Workspace,
-      );
-    }
+    const pkg = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON;
+    const forced = Object.entries(
+      pkg.contributes.configurationDefaults as Record<string, Record<string, unknown>>,
+    ).filter(([, declared]) => "editor.formatOnSave" in declared);
+    assert.deepStrictEqual(forced.map(([language]) => language), []);
   });
 
   // The toolchain languages were held back on the theory that rust-analyzer,
@@ -478,7 +503,7 @@ func main() {
   // by calling the same binary those servers call, so the output is identical,
   // and holding them back meant a .rs file in an editor with no rust-analyzer
   // never formatted at all -- which is how this was reported.
-  test("format-on-save covers the toolchain languages too", () => {
+  test("poly is the formatter for the toolchain languages too", () => {
     for (const languageId of ["rust", "go", "c", "cpp", "swift", "terraform"]) {
       const editor = vscode.workspace.getConfiguration("editor", {
         uri: vscode.Uri.file(join(workspaceRoot(), `x.${languageId}`)),
@@ -489,7 +514,6 @@ func main() {
         EXTENSION_ID,
         `${languageId} should format with poly`,
       );
-      assert.strictEqual(editor.get<boolean>("formatOnSave"), true, languageId);
     }
   });
 
@@ -541,7 +565,7 @@ func main() {
   // Two lists in package.json describe the same set of languages, and nothing
   // else notices when one grows without the other: a language added to
   // activationEvents but not to configurationDefaults activates poly and then
-  // silently never formats on save.
+  // leaves Format Document pointing at whatever else is installed.
   test("configurationDefaults covers every activated language", () => {
     const pkg = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON;
     const activated = (pkg.activationEvents as string[])
@@ -552,12 +576,12 @@ func main() {
     assert.deepStrictEqual(
       activated.filter((language) => !declared.includes(language)),
       [],
-      "activated but never gets format-on-save",
+      "activated but poly never claims the formatter slot",
     );
     assert.deepStrictEqual(
       declared.filter((language) => !activated.includes(language)),
       [],
-      "given format-on-save but never activates poly",
+      "claims the formatter slot but never activates poly",
     );
   });
 });

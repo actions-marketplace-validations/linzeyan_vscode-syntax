@@ -217,7 +217,13 @@ const vscode = {
   },
   workspace: {
     workspaceFolders: [{ uri: Uri.file(WORKSPACE), name: "workspace", index: 0 }],
-    getConfiguration: () => ({ get: (_setting, fallback) => fallback }),
+    // The image gutter ships off, and this check is about what it does while
+    // on. Naming the setting rather than returning the code's own fallback:
+    // that fallback is `false` now, and a stub that inherited it would measure
+    // a feature doing nothing and report a flawless cache.
+    getConfiguration: () => ({
+      get: (setting, fallback) => (setting === "imagePreview.enabled" ? true : fallback),
+    }),
     getWorkspaceFolder: () => ({ uri: Uri.file(WORKSPACE), name: "workspace", index: 0 }),
     asRelativePath: (uri) => String(uri.fsPath ?? uri),
     findFiles: () => Promise.resolve([]),

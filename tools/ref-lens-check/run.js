@@ -143,6 +143,14 @@ async function main() {
         {
           "typescript.referencesCodeLens.enabled": true,
           "typescript.referencesCodeLens.showOnAllFunctions": true,
+          // poly's three lenses ship off. This check is about where they land,
+          // so it turns on exactly the ones it reads -- a fixture that relied
+          // on the shipped default would go from checking placement to
+          // checking that nothing appears, and still pass its "no forbidden
+          // lens" half.
+          "poly.referencesCodeLens.enabled": true,
+          "poly.runCodeLens.enabled": true,
+          "poly.protobufCodeLens.enabled": true,
         },
         null,
         2,
