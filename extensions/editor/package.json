@@ -1,7 +1,7 @@
 {
   "name": "poly-editor",
-  "displayName": "Poly Editor",
-  "description": "Editor-side conveniences with no CI counterpart: copy path:line references in the same shape poly's diagnostics print.",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
   "version": "0.15.1",
   "publisher": "ricky",
   "license": "MIT",
@@ -21,47 +21,47 @@
       "./dist/preview.js"
     ],
     "configuration": {
-      "title": "Poly Editor",
+      "title": "%configuration.title%",
       "properties": {
         "poly.indentTint.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Tint each level of leading whitespace, and mark whitespace that does not fill a level -- a mixed tab/space line shows up as a partial band rather than as nothing. Costs one set of decorations per visible line; nothing is scanned outside the viewport. Colours are the poly.indentLevel1-4 and poly.indentPartial theme colours, each overridable in workbench.colorCustomizations."
+          "description": "%config.indentTint.enabled.description%"
         },
         "poly.imagePreview.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Show a thumbnail in the gutter for lines that name an image file which exists. Only lines on screen are resolved, and only paths that resolve to a real file in the workspace; a URL or a missing file draws nothing. Costs one file read per distinct image."
+          "description": "%config.imagePreview.enabled.description%"
         },
         "poly.referencesCodeLens.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Show a reference count above each declaration, an implementation count above each type and method -- `N impls` over an interface (who satisfies it) and `N interfaces` over a concrete type (what it satisfies) -- and `N methods` over a type whose methods are declared outside it, as Go's are. Every count comes from whatever reference provider the language already has; poly analyses nothing, so a language with no provider gets no lens. Costs one reference query per declaration scrolled into view. Clicking a count of one goes straight there; clicking a larger one opens the references list."
+          "description": "%config.referencesCodeLens.enabled.description%"
         },
         "poly.protobufCodeLens.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Link a .proto declaration to the Go protoc generated for it: `go type` over a message or enum, `go server` and `go client` over a service, and an implementation count over each rpc. The lens is drawn only when the generated file is already in the workspace and holds the declaration, so nothing points at a file that has not been generated yet. Requires poly.languageServers, because the .proto outline comes from `buf lsp serve`. Covers protoc-gen-go and protoc-gen-go-grpc; connect-go and other generators name their output in ways the proto does not predict and are left alone."
+          "description": "%config.protobufCodeLens.enabled.description%"
         },
         "poly.runCodeLens.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Show `run | debug` above a program's entry point -- `main` in Go, Rust, C, C++ and Java, `Main` in C#, `if __name__ == \"__main__\"` in Python, and the shebang of a shell script. `run` executes the file in an integrated terminal; `debug` hands over to whichever debug extension is installed for the language, exactly as F5 would. poly ships no debugger."
+          "description": "%config.runCodeLens.enabled.description%"
         },
         "poly.markdownMermaid.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Render ```mermaid fences as diagrams in the markdown preview. Ignored on VSCode 1.135 and later, which ships the same renderer as a built-in (mermaid-markdown-features): poly stands down rather than draw a second diagram over the first."
+          "description": "%config.markdownMermaid.enabled.description%"
         },
         "poly.postfixCompletion.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Offer postfix templates after a dot: `err.if` expands to `if err != nil { }` in Go, `if (err) { }` in TypeScript, `if err:` in Python. Covers go, rust, swift, typescript, javascript (and their react variants), python, lua, c and cpp. These are text templates, not analysis -- poly reads the characters left of the dot and rearranges them -- and they sort after whatever the language server offered, so they never displace a real completion."
+          "description": "%config.postfixCompletion.enabled.description%"
         },
         "poly.todo.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Show the TODOs view in the Explorer. The view scans the workspace for the markers in poly.todo.tags, and only while it is on screen -- a closed view costs nothing. Capped at 4000 files and 512KB per file, and it says so when it stops early."
+          "description": "%config.todo.enabled.description%"
         },
         "poly.todo.tags": {
           "type": "array",
@@ -75,14 +75,14 @@
             "XXX",
             "BUG"
           ],
-          "description": "Markers the TODOs view lists. Matched as whole words, case-sensitively; entries that are not plain words are ignored."
+          "description": "%config.todo.tags.description%"
         }
       }
     },
     "colors": [
       {
         "id": "poly.indentLevel1",
-        "description": "Background of the first indent level.",
+        "description": "%color.indentLevel1.description%",
         "defaults": {
           "dark": "#FFFF4012",
           "light": "#FFFF4012",
@@ -91,7 +91,7 @@
       },
       {
         "id": "poly.indentLevel2",
-        "description": "Background of the second indent level.",
+        "description": "%color.indentLevel2.description%",
         "defaults": {
           "dark": "#7FFF7F12",
           "light": "#7FFF7F12",
@@ -100,7 +100,7 @@
       },
       {
         "id": "poly.indentLevel3",
-        "description": "Background of the third indent level.",
+        "description": "%color.indentLevel3.description%",
         "defaults": {
           "dark": "#FF7FFF12",
           "light": "#FF7FFF12",
@@ -109,7 +109,7 @@
       },
       {
         "id": "poly.indentLevel4",
-        "description": "Background of the fourth indent level; levels beyond it cycle.",
+        "description": "%color.indentLevel4.description%",
         "defaults": {
           "dark": "#4FECEC12",
           "light": "#4FECEC12",
@@ -118,7 +118,7 @@
       },
       {
         "id": "poly.indentPartial",
-        "description": "Background of leading whitespace that does not fill an indent level.",
+        "description": "%color.indentPartial.description%",
         "defaults": {
           "dark": "#80202099",
           "light": "#80202066",
@@ -129,91 +129,91 @@
     "commands": [
       {
         "command": "poly.copyPathWithLine",
-        "title": "Copy Path with Line Numbers",
-        "category": "Poly"
+        "title": "%command.copyPathWithLine.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.insertTableOfContents",
-        "title": "Insert Table of Contents",
-        "category": "Poly"
+        "title": "%command.insertTableOfContents.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.toggleBold",
-        "title": "Toggle Bold",
-        "category": "Poly"
+        "title": "%command.toggleBold.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.toggleItalic",
-        "title": "Toggle Italic",
-        "category": "Poly"
+        "title": "%command.toggleItalic.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.refreshTodos",
-        "title": "Refresh TODOs",
-        "category": "Poly",
+        "title": "%command.refreshTodos.title%",
+        "category": "%command.category%",
         "icon": "$(refresh)"
       },
       {
         "command": "poly.extractVariable",
-        "title": "Extract Variable",
-        "category": "Poly"
+        "title": "%command.extractVariable.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.inlineVariable",
-        "title": "Inline Variable",
-        "category": "Poly"
+        "title": "%command.inlineVariable.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.moveToNewFile",
-        "title": "Move to New File",
-        "category": "Poly"
+        "title": "%command.moveToNewFile.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.changeSignature",
-        "title": "Change Signature",
-        "category": "Poly"
+        "title": "%command.changeSignature.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.implementInterface",
-        "title": "Implement Interface",
-        "category": "Poly"
+        "title": "%command.implementInterface.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.nextChangedFile",
-        "title": "Go to Next Changed File",
-        "category": "Poly"
+        "title": "%command.nextChangedFile.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.previousChangedFile",
-        "title": "Go to Previous Changed File",
-        "category": "Poly"
+        "title": "%command.previousChangedFile.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.revertAndSave",
-        "title": "Revert Selected Changes and Save",
-        "category": "Poly"
+        "title": "%command.revertAndSave.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.continueList",
-        "title": "Continue List",
-        "category": "Poly"
+        "title": "%command.continueList.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.indentListItem",
-        "title": "Indent List Item",
-        "category": "Poly"
+        "title": "%command.indentListItem.title%",
+        "category": "%command.category%"
       },
       {
         "command": "poly.outdentListItem",
-        "title": "Outdent List Item",
-        "category": "Poly"
+        "title": "%command.outdentListItem.title%",
+        "category": "%command.category%"
       }
     ],
     "views": {
       "explorer": [
         {
           "id": "polyTodos",
-          "name": "TODOs",
+          "name": "%view.polyTodos.name%",
           "when": "config.poly.todo.enabled"
         }
       ]

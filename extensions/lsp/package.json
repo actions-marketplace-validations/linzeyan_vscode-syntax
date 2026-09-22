@@ -1,7 +1,7 @@
 {
   "name": "poly-lsp",
-  "displayName": "Poly LSP",
-  "description": "Unified lint/format via the poly daemon: format-on-save, lint-on-save diagnostics, batch commands.",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
   "version": "0.15.1",
   "publisher": "ricky",
   "license": "MIT",
@@ -74,51 +74,51 @@
     "commands": [
       {
         "command": "poly.formatFile",
-        "title": "Poly: Format File"
+        "title": "%command.formatFile.title%"
       },
       {
         "command": "poly.formatPath",
-        "title": "Poly: Format Folder"
+        "title": "%command.formatPath.title%"
       },
       {
         "command": "poly.formatWorkspace",
-        "title": "Poly: Format Workspace"
+        "title": "%command.formatWorkspace.title%"
       },
       {
         "command": "poly.formatGitRepo",
-        "title": "Poly: Format Git Repo"
+        "title": "%command.formatGitRepo.title%"
       },
       {
         "command": "poly.formatGitChanged",
-        "title": "Poly: Format Git Changed Files"
+        "title": "%command.formatGitChanged.title%"
       },
       {
         "command": "poly.lintPath",
-        "title": "Poly: Lint (poly check)"
+        "title": "%command.lintPath.title%"
       },
       {
         "command": "poly.analyzeDeadCode",
-        "title": "Poly: Analyze Dead Code"
+        "title": "%command.analyzeDeadCode.title%"
       },
       {
         "command": "poly.minifyJson",
-        "title": "Poly: Minify JSON"
+        "title": "%command.minifyJson.title%"
       },
       {
         "command": "poly.toggleFormat",
-        "title": "Poly: Toggle Formatting"
+        "title": "%command.toggleFormat.title%"
       },
       {
         "command": "poly.checkForUpdates",
-        "title": "Poly: Check for Updates"
+        "title": "%command.checkForUpdates.title%"
       },
       {
         "command": "poly.showOutput",
-        "title": "Poly: Show Log"
+        "title": "%command.showOutput.title%"
       },
       {
         "command": "poly.createGoWork",
-        "title": "Poly: Create go.work for the Open Go Modules"
+        "title": "%command.createGoWork.title%"
       }
     ],
     "menus": {
@@ -142,48 +142,48 @@
       }
     ],
     "configuration": {
-      "title": "Poly",
+      "title": "%configuration.title%",
       "properties": {
         "poly.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the poly binary. Relative paths resolve against the first workspace folder; empty uses the bundled binary, then `poly` from PATH."
+          "description": "%config.serverPath.description%"
         },
         "poly.lintOnSave": {
           "type": "boolean",
           "default": true,
-          "description": "Publish lint diagnostics when a supported file is opened or saved."
+          "description": "%config.lintOnSave.description%"
         },
         "poly.format.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Let poly rewrite files: Format Document, format-on-save, Format Selection, and the trailing-whitespace and final-newline fixes .editorconfig asks for on save. Turning it off suspends all of them at once -- the point being to stop formatting for a while without disabling the extension or hunting through per-language settings. Linting is unaffected: not wanting a file rewritten is not the same as not wanting to know what is wrong with it. There is a status bar switch for this next to the Poly item, and `Poly: Toggle Formatting` in the command palette."
+          "description": "%config.format.enabled.description%"
         },
         "poly.deadCodeCodeLens.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Show an `analyze dead code` link on the first line of code in every file poly can answer about: Go (golang.org/x/tools/cmd/deadcode), TypeScript and JavaScript (knip), Python (vulture). Clicking it runs `poly deadcode` in a terminal over that file's whole project — the go.work build list, the npm project, the Python project. Nothing runs until it is clicked: whole-program reachability costs a build, so it is asked rather than watched."
+          "description": "%config.deadCodeCodeLens.enabled.description%"
         },
         "poly.languageServers": {
           "type": "boolean",
           "default": false,
-          "description": "Run the language server a project's own toolchain provides and route hover, go-to-definition, declaration, type definition, implementation, references, outline, completion, signature help, symbol highlight, folding, expand selection, rename and code actions to it. Nine are known: gopls (Go), rust-analyzer (Rust), clangd (C/C++), sourcekit-lsp (Swift), terraform-ls (Terraform), lua-language-server (Lua), bash-language-server (Shell), buf (Protobuf), arity (R). Code actions arrive as lightbulb actions only — the `source.*` kinds `editor.codeActionsOnSave` runs are left out, because VSCode runs those before the formatter and they would rewrite the same lines poly is about to format. Poly's own lint findings stay: the server's diagnostics are merged with them rather than replacing them, so selene and swiftlint keep reporting. Off by default: it overlaps with the official extension for that language, so remove that extension before turning this on. Poly never installs these servers — they come from PATH, and which features work is whatever the server itself declares."
+          "description": "%config.languageServers.description%"
         },
         "poly.languageServerLogs": {
           "type": "boolean",
           "default": true,
-          "description": "Forward a downstream language server's own stderr to the Poly output channel. On by default. clangd and terraform-ls write a line per request; gopls, rust-analyzer, sourcekit-lsp and lua-language-server are quiet unless something is wrong. Turning this off discards that output entirely rather than asking each server to be quieter — not all of them can be. Poly's own reports, including a server that is missing or failed to start, are unaffected."
+          "description": "%config.languageServerLogs.description%"
         },
         "poly.updateCheck.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Periodically check GitHub Releases for new Poly versions (also covers poly-syntax-highlight)."
+          "description": "%config.updateCheck.enabled.description%"
         },
         "poly.updateCheck.intervalDays": {
           "type": "number",
           "default": 7,
           "minimum": 0,
-          "description": "Days between automatic update checks; 0 checks on every startup."
+          "description": "%config.updateCheck.intervalDays.description%"
         }
       }
     },

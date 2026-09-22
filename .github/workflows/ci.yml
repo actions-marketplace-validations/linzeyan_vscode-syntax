@@ -274,6 +274,13 @@ jobs:
       - name: Versions agree, in manifests and in prose
         run: python3 tools/bump.py --check cli/target/release/poly
 
+      # Needs no binary and no editor, so it sits with the other drift gates.
+      # What it catches is invisible to everything else here: a %key% with no
+      # entry renders as the key, and a key missing from a locale falls back to
+      # English -- two silent failures in a settings panel nobody screenshots.
+      - name: Manifest strings resolve in every locale
+        run: python3 tools/nls-check.py
+
   # The acceptance suites, which is everything that needs somebody else's
   # toolchain present. Split out of the cli job rather than handed its binary
   # through an artifact: the cli job is one serial chain, so a `needs:` would
