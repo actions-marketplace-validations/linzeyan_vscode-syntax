@@ -1,18 +1,23 @@
 /**
  * Which declaration is a program's entry point, and what poly does about it.
  *
- * poly ships no debugger and starts no process. 01 D6 rules that out and the
- * reasoning still holds: a debugger is a second protocol (DAP) on top of an
- * architecture that routes LSP, Go's is already `golang.go`'s delve, and
- * writing another would not let anyone uninstall anything. What D6 does not
- * cover is the gesture. Running the file you are looking at is two keystrokes
- * and a guess about which launch configuration is selected, and the one place
- * it is obvious what you meant -- the cursor on `func main` -- has no button.
+ * poly ships no debugger. 01 D6 rules that out and the reasoning still holds:
+ * a debugger is a second protocol (DAP) on top of an architecture that routes
+ * LSP, Go's is already `golang.go`'s delve, and writing another would not let
+ * anyone uninstall anything. `debug` therefore hands over to whatever debug
+ * extension is installed, exactly as F5 does.
  *
- * So this is a lens and a hand-off: poly decides *where* the button goes and
- * the editor's own Start Debugging decides *what* it runs, out of whatever
- * debug extension the user installed. Nothing here knows how to launch a Go
- * program, or that Go exists.
+ * `run` used to hand over too, to `workbench.action.debug.run` -- "Start
+ * Without Debugging", which still goes through a debug adapter, still wants a
+ * launch configuration, and still puts the debug toolbar on screen. Two
+ * buttons, one behaviour, and the one labelled `run` was the one lying. So D6
+ * is narrowed rather than kept: poly starts one process, the one the user just
+ * pressed a button labelled `run` on, in a visible terminal they can read and
+ * kill. It does not attach to it, supervise it, or keep anything alive.
+ *
+ * That costs poly a small amount of knowledge it did not have before -- how
+ * four languages are run from a shell. `RUN_LINES` is all of it, and the lens
+ * only offers `run` where there is an entry in it.
  */
 
 /** As much of `vscode.DocumentSymbol` as the choice below depends on. */
@@ -74,6 +79,61 @@ const TEXT_ENTRY: ReadonlyMap<string, RegExp> = new Map([
 /** Is this a language whose entry point is found in the text? */
 export function findsEntryInText(languageId: string): boolean {
   return TEXT_ENTRY.has(languageId);
+}
+
+/**
+ * The interpreter a script asked for, by name.
+ *
+ * Taken from the shebang rather than assumed to be bash. A `#!/bin/zsh` script
+ * run under bash is a different language with similar syntax, and the ways it
+ * differs -- arrays indexed from one, word splitting, `setopt` -- are exactly
+ * the ways a script breaks quietly rather than loudly.
+ */
+export function interpreterOf(text: string): string | undefined {
+  return /^#!.*?\b(bash|dash|ksh|zsh|sh)\b/.exec(text)?.[1];
+}
+
+/**
+ * How to run a file from a shell, per language, run from the file's directory.
+ *
+ * Four, and the list is short on purpose. C, C++, Java and C# have entry
+ * points this file already finds, and running one means compiling first --
+ * with flags, an output path and a toolchain poly would have to have opinions
+ * about. They get `debug` only, which is the honest answer: the extension that
+ * knows how to build them is the one that should.
+ *
+ * `go run .` and `cargo run` take the directory rather than the file, because
+ * a main package is rarely one file and `go run main.go` fails on the first
+ * symbol defined next door. cargo searches upward for the manifest, so the
+ * file's own directory is enough for both.
+ */
+type RunLine = (file: string, text: string, windows: boolean) => string;
+
+const RUN_LINES: ReadonlyMap<string, RunLine> = new Map<string, RunLine>([
+  ["go", () => "go run ."],
+  ["rust", () => "cargo run"],
+  // python3 is the name that means python 3 everywhere except Windows,
+  // where the installer writes `python` and `python3` is a Store stub that
+  // opens the Store.
+  ["python", (file, _text, windows) => `${windows ? "python" : "python3"} "${file}"`],
+  ["shellscript", (file, text) => `${interpreterOf(text) ?? "sh"} "${file}"`],
+]);
+
+/**
+ * The command line for running `fileName`, or nothing if poly does not know.
+ *
+ * `fileName` is the base name, not the path: the caller runs this in the
+ * file's own directory, which keeps the line short enough to read in a
+ * terminal and sidesteps most of what quoting a full path would involve. It is
+ * still quoted, because a base name can contain a space.
+ */
+export function runLine(
+  languageId: string,
+  fileName: string,
+  text: string,
+  windows: boolean,
+): string | undefined {
+  return RUN_LINES.get(languageId)?.(fileName, text, windows);
 }
 
 /**

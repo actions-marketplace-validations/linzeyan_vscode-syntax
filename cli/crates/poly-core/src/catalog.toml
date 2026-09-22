@@ -54,6 +54,17 @@ broken-reference = [
   "rumdl/MD057",
 ]
 
+# A character is not the one it renders as, so the text does not say what it
+# looks like it says. The one category that is about bytes rather than about a
+# language, which is why it is the one whose rules apply to every file.
+confusable-character = [
+  "poly/unicode-bidi",
+  "poly/unicode-invisible",
+  "poly/unicode-lookalike",
+  "poly/unicode-mixed-script",
+  "poly/unicode-space",
+]
+
 # A credential ends up somewhere it persists after the thing that needed it.
 credential-exposure = ["poly/docker-secret-in-env"]
 

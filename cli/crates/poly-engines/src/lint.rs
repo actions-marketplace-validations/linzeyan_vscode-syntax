@@ -88,12 +88,13 @@ pub fn rule_doc(source: &str, code: &str) -> Option<&'static str> {
             .get(code)
             .copied()
         }
-        // One namespace for every rule poly wrote, four tables behind it: the
+        // One namespace for every rule poly wrote, five tables behind it: the
         // codes are already prefixed by what they lint (`docker-`, `actions-`,
-        // `proto-`), so a fourth engine adds a table here rather than a second
-        // source name the reader has to learn. `INLINE_RULES` is poly-core's
-        // because the rule is poly-core's -- a suppression comment is not a
-        // language's.
+        // `proto-`, `unicode-`), so a further engine adds a table here rather
+        // than a second source name the reader has to learn. `INLINE_RULES` is
+        // poly-core's because the rule is poly-core's -- a suppression comment
+        // is not a language's, and `unicode-` is here rather than there for the
+        // opposite reason: it is not a language's either, but it is a linter.
         "poly" => poly_rule(code).map(|(_, _, doc)| *doc),
         _ => None,
     }
@@ -108,7 +109,7 @@ pub fn rule_doc(source: &str, code: &str) -> Option<&'static str> {
 /// chosen at whichever of the 63 emit sites happens to construct it.
 ///
 /// A code with no row falls back to warning and cannot happen: the
-/// both-directions tests over the four tables hold them to the codes the
+/// both-directions tests over the five tables hold them to the codes the
 /// linters emit, so an unlisted rule fails a test rather than arriving here.
 pub fn rule_severity(code: &str) -> Severity {
     poly_rule(code).map_or(Severity::Warning, |(_, severity, _)| *severity)
@@ -119,6 +120,7 @@ fn poly_rule(code: &str) -> Option<&'static (&'static str, Severity, &'static st
         .iter()
         .chain(crate::workflow::RULES)
         .chain(crate::proto::RULES)
+        .chain(crate::unicode::RULES)
         .chain(poly_core::INLINE_RULES)
         .find(|(rule, _, _)| *rule == code)
 }
@@ -3338,6 +3340,36 @@ pub fn spell(path: &Path) -> Result<Vec<Issue>> {
     Ok(found)
 }
 
+/// Report the characters in one file that are not what they look like.
+///
+/// The third entry point that takes a path and no language, for the reason
+/// `spell` is the second: a no-break space is a no-break space in a LICENSE, a
+/// Dockerfile and a `.py` alike, and routing it through `lint(lang, ..)` would
+/// mean naming every language poly knows and still missing every file poly
+/// knows no language for.
+///
+/// Separate from `spell` rather than folded into it, although both read every
+/// file: they answer to different configuration. typos has its own exclusions,
+/// its own per-file-type policy and its own idea of which files are worth
+/// reading, and none of that has anything to say about a bidirectional
+/// override. What they do share is the reading, which is why this borrows
+/// `read_for_spelling` -- including its binary check, without which poly would
+/// report zero-width spaces inside a PNG.
+pub fn unicode(path: &Path) -> Result<Vec<Issue>> {
+    let (buffer, binary) = read_for_spelling(path)?;
+    if binary {
+        return Ok(Vec::new());
+    }
+    // `read_for_spelling` decodes UTF-16 to UTF-8 and rejects what it cannot
+    // decode, so anything invalid here is a file it called UTF-8 and was wrong
+    // about. Nothing to report rather than an error: a run that failed on one
+    // such file would take every other finding in the repository down with it.
+    let Ok(text) = std::str::from_utf8(&buffer) else {
+        return Ok(Vec::new());
+    };
+    Ok(crate::unicode::check(text))
+}
+
 /// One typo, worded and positioned the way `typos --format json` worded and
 /// positioned it -- this is a port, so the record has to be the same record.
 ///
@@ -4577,6 +4609,7 @@ mod tests {
             .iter()
             .chain(crate::workflow::RULES)
             .chain(crate::proto::RULES)
+            .chain(crate::unicode::RULES)
             .chain(poly_core::INLINE_RULES)
             .map(|(code, _, _)| *code)
             .collect();

@@ -2,7 +2,7 @@
   "name": "poly-syntax-highlight",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.16.0",
+  "version": "0.18.0",
   "publisher": "ricky",
   "license": "MIT",
   "engines": {
@@ -631,6 +631,37 @@
           "jinja-nginx"
         ],
         "configuration": "./language-configuration/jinja.json"
+      },
+      {
+        "id": "solidity",
+        "extensions": [
+          ".sol"
+        ],
+        "aliases": [
+          "Solidity"
+        ],
+        "configuration": "./language-configuration/solidity.json"
+      },
+      {
+        "id": "cairo",
+        "extensions": [
+          ".cairo"
+        ],
+        "aliases": [
+          "Cairo"
+        ],
+        "configuration": "./language-configuration/cairo.json"
+      },
+      {
+        "id": "vyper",
+        "extensions": [
+          ".vy",
+          ".vyi"
+        ],
+        "aliases": [
+          "Vyper"
+        ],
+        "configuration": "./language-configuration/vyper.json"
       }
     ],
     "grammars": [
@@ -1798,6 +1829,21 @@
         "language": "jinja-nginx",
         "scopeName": "source.nginx.jinja",
         "path": "./syntaxes/jinja-nginx.tmLanguage.json"
+      },
+      {
+        "language": "solidity",
+        "scopeName": "source.solidity",
+        "path": "./syntaxes/solidity.tmLanguage.json"
+      },
+      {
+        "language": "cairo",
+        "scopeName": "source.cairo",
+        "path": "./syntaxes/cairo.tmLanguage.json"
+      },
+      {
+        "language": "vyper",
+        "scopeName": "source.vyper",
+        "path": "./syntaxes/vyper.tmLanguage.json"
       }
     ]
   }

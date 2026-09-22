@@ -7,13 +7,26 @@ Exits non-zero on any failed expectation.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "cli/target/release/poly"
 
-proc = subprocess.Popen([BIN, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+# The daemon's own log, kept rather than inherited: `poly.memoryLog` writes one
+# line per open and close saying what poly is holding, and the soak at the
+# bottom reads them. Everything else poly reports goes here too, which is why
+# the path is printed on the way out -- a failure worth reading is usually
+# explained by a line above it.
+LOG_PATH = os.path.join(tempfile.mkdtemp(prefix="poly-smoke-log-"), "daemon.log")
+# Not a context manager: the daemon writes to this fd until it exits, which is
+# the last thing this script does. A `with` would have to wrap the file.
+log_file = open(LOG_PATH, "w")  # poly: ignore ruff/SIM115
+
+proc = subprocess.Popen(
+    [BIN, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log_file
+)
 
 
 def send(msg):
@@ -72,7 +85,14 @@ send(
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
-        "params": {"processId": None, "rootUri": None, "capabilities": {}},
+        "params": {
+            "processId": None,
+            "rootUri": None,
+            "capabilities": {},
+            # On for the whole run, because the soak needs the per-close lines
+            # and there is nothing to be gained by turning it on halfway.
+            "initializationOptions": {"memoryLog": True},
+        },
     }
 )
 init = recv_response(1)
@@ -195,38 +215,73 @@ with open(batch_file) as f:
 # Minify via executeCommand: the editor command that replaces a JSON Tools
 # install. Edits rather than a file write, because the buffer it acts on may
 # never have been saved -- so this asserts on what comes back, not on disk.
-MINIFY_URI = "file:///tmp/smoke-minify.json"
-send(
-    {
-        "jsonrpc": "2.0",
-        "method": "textDocument/didOpen",
-        "params": {
-            "textDocument": {
-                "uri": MINIFY_URI,
-                "languageId": "json",
-                "version": 1,
-                # Key order and the spaces inside the string are the two things
-                # a round-trip through a JSON map type would quietly destroy.
-                "text": '{\n  "b": 1,\n  "a": "two  spaces"\n}\n',
-            }
-        },
-    }
-)
-send(
-    {
-        "jsonrpc": "2.0",
-        "id": 11,
-        "method": "workspace/executeCommand",
-        "params": {
-            "command": "poly.minifyJsonEdits",
-            "arguments": [{"uri": MINIFY_URI}],
-        },
-    }
-)
-resp = recv_response(11)
-edits = resp.get("result")
-assert edits, f"expected minify edits: {resp}"
-assert edits[0]["newText"] == '{"b":1,"a":"two  spaces"}', edits[0]["newText"]
+#
+# Three languages and not one, because the daemon's dispatch is the thing under
+# test here rather than the engines: `run_minify` looks the language up with
+# poly's own detection and hands it to one entry point, and a unit test of that
+# entry point cannot tell that the daemon reached it. The expected strings are
+# the same ones `poly-engines` asserts, so a difference here is the daemon
+# taking a different route to the same function -- the failure that made this
+# file exist.
+MINIFY_CASES = [
+    (
+        11,
+        "file:///tmp/smoke-minify.json",
+        "json",
+        # Key order and the spaces inside the string are the two things a
+        # round-trip through a JSON map type would quietly destroy.
+        '{\n  "b": 1,\n  "a": "two  spaces"\n}\n',
+        '{"b":1,"a":"two  spaces"}',
+    ),
+    (
+        15,
+        "file:///tmp/smoke-minify.css",
+        "css",
+        "/* gone */\n.a .b {\n  color: red;\n}\n",
+        ".a .b{color:red}",
+    ),
+    (
+        16,
+        "file:///tmp/smoke-minify.js",
+        "javascript",
+        (
+            "// gone\nexport function go(aLongParameterName) {\n"
+            "  return aLongParameterName;\n}\n"
+        ),
+        # The name survives: this is a printer, not a minifier that mangles.
+        "export function go(aLongParameterName){return aLongParameterName;}",
+    ),
+]
+for request_id, uri, language_id, text, expected in MINIFY_CASES:
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language_id,
+                    "version": 1,
+                    "text": text,
+                }
+            },
+        }
+    )
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "workspace/executeCommand",
+            "params": {
+                "command": "poly.minifyEdits",
+                "arguments": [{"uri": uri}],
+            },
+        }
+    )
+    resp = recv_response(request_id)
+    edits = resp.get("result")
+    assert edits, f"expected {language_id} minify edits: {resp}"
+    assert edits[0]["newText"] == expected, (language_id, edits[0]["newText"])
 
 # .editorconfig, resolved by the daemon so the extension does not need a second
 # parser. Asked about a path that was never opened and in a language poly does
@@ -552,6 +607,47 @@ somewhere is going to have an opinion about, followed by a list:
         f" {drift_mb:+.1f} MB, series {[round(kb / 1024) for kb in marks]}"
     )
 
+    # The half of the question RSS cannot answer.
+    #
+    # `ps` reports one number for a process that keeps documents, lint hashes,
+    # package scopes and four kinds of finding, so a drift within budget is
+    # consistent with one of those maps never letting go of an entry -- the
+    # allocator hides small leaks behind blocks it already had. `poly.memoryLog`
+    # is the daemon saying what it holds, and these counts are exact rather than
+    # sampled: every round opens four documents and closes all four, so the line
+    # written by the last close of round 120 has to read the same as the line
+    # written by the last close of round 1. Anything that grows by one per round
+    # is a map with no `remove` behind it, and it names itself.
+    #
+    # Proved red 2026-09-22 by taking `lint_hashes.remove` out of didClose: RSS
+    # drifted +0.2MB and passed its budget, while this printed hashes 12 -> 488.
+    # That is the whole case for the assertion -- a Url and a u64 per closed
+    # file is a leak the allocator hides and `ps` will never show.
+    log_file.flush()
+    HELD = re.compile(
+        r"memory after didClose: .*?(?P<documents>\d+) documents .*?"
+        r"(?P<hashes>\d+) lint hashes; (?P<scopes>\d+) package scopes; "
+        r"findings lint (?P<lint>\d+) package (?P<package>\d+) over (?P<files>\d+) files, "
+        r"format (?P<format>\d+), downstream (?P<downstream>\d+)"
+    )
+    with open(LOG_PATH) as f:
+        held = [m.groupdict() for m in (HELD.search(line) for line in f) if m]
+    assert len(held) >= SOAK_ROUNDS, (
+        f"poly.memoryLog wrote {len(held)} usable close lines for {SOAK_ROUNDS}"
+        f" rounds of four documents -- the log is in {LOG_PATH}"
+    )
+    # One line per closed document, four per round, so a round's last close is
+    # the one that has handed everything back.
+    first, last = held[len(SOAK_DOCS) - 1], held[-1]
+    print("daemon held, first soak round -> last:")
+    for key in first:
+        print(f"  {key:11} {first[key]} -> {last[key]}")
+    grew = [key for key in first if int(last[key]) > int(first[key])]
+    assert not grew, (
+        f"poly kept more after {SOAK_ROUNDS} rounds of open/close than after one,"
+        f" in {', '.join(grew)}: {first} -> {last}"
+    )
+
 send({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": None})
 recv_response(3)
 send({"jsonrpc": "2.0", "method": "exit", "params": None})
@@ -561,8 +657,11 @@ except subprocess.TimeoutExpired:
     proc.kill()
     raise SystemExit("FAIL: server did not exit after `exit` notification")
 assert proc.returncode == 0, f"server exit code {proc.returncode}"
+log_file.close()
+print(f"daemon log: {LOG_PATH}")
 print(
     "LSP SMOKE PASS: formatting, Format Selection, diagnostics, spelling,"
     " lint excludes, rule hover, batch executeCommand, minify, .editorconfig,"
-    " unhandled methods declined, RSS settles under a soak, clean shutdown"
+    " unhandled methods declined, RSS settles under a soak, poly hands back"
+    " everything it held, clean shutdown"
 )

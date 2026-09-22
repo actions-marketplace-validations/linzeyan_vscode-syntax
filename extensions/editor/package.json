@@ -2,7 +2,7 @@
   "name": "poly-editor",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.16.0",
+  "version": "0.18.0",
   "publisher": "ricky",
   "license": "MIT",
   "engines": {
@@ -154,6 +154,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "poly.runFile",
+        "title": "%command.runFile.title%",
+        "category": "%command.category%"
+      },
+      {
         "command": "poly.extractVariable",
         "title": "%command.extractVariable.title%",
         "category": "%command.category%"
@@ -189,6 +194,11 @@
         "category": "%command.category%"
       },
       {
+        "command": "poly.syntaxColors",
+        "title": "%command.syntaxColors.title%",
+        "category": "%command.category%"
+      },
+      {
         "command": "poly.revertAndSave",
         "title": "%command.revertAndSave.title%",
         "category": "%command.category%"
@@ -215,6 +225,11 @@
           "id": "polyTodos",
           "name": "%view.polyTodos.name%",
           "when": "config.poly.todo.enabled"
+        },
+        {
+          "id": "polyReferences",
+          "name": "%view.polyReferences.name%",
+          "when": "poly.hasReferences"
         }
       ]
     },

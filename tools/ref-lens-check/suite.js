@@ -106,6 +106,19 @@ exports.run = async function run() {
     line: lens.range.start.line,
     title: lens.command?.title ?? "(unresolved)",
   }));
+  // The other half of the flat-shape claim, and the one the References view
+  // depends on. `referenceTree.outlineOf` reads `range` off every symbol with
+  // no conversion, on the strength of `executeDocumentSymbolProvider`
+  // normalising both shapes before handing them back. This is the provider that
+  // really answers in the old one, so if the normalisation ever stops, the
+  // field is missing here.
+  const flatSymbols = (await vscode.commands.executeCommand(
+    "vscode.executeDocumentSymbolProvider",
+    flatUri,
+  ) ?? []).map((symbol) => ({
+    name: symbol.name,
+    hasRange: Boolean(symbol.range),
+  }));
   for (const disposable of disposables) {
     disposable.dispose();
   }
@@ -134,13 +147,28 @@ exports.run = async function run() {
   // it there is on the record -- an enum member reported as `Constant` and one
   // reported as `EnumMember` are two different bugs, or none.
   const kinds = new Map();
-  const collect = (symbols) => {
+  // ...and the shape of the tree they came in, which is what the References
+  // view's kind column is computed from. `referenceRows.enclosing` finds the
+  // innermost symbol whose `range` contains a line; its unit tests walk an
+  // outline this repo wrote, so this is the only place that says a real server
+  // nests at all and that a container's range covers its body rather than its
+  // name. Both were assumptions until this recorded them.
+  const outline = [];
+  const collect = (symbols, depth) => {
     for (const symbol of symbols ?? []) {
       kinds.set(symbol.selectionRange.start.line, vscode.SymbolKind[symbol.kind]);
-      collect(symbol.children);
+      outline.push({
+        name: symbol.name,
+        kind: vscode.SymbolKind[symbol.kind],
+        depth,
+        nameLine: symbol.selectionRange.start.line,
+        startLine: symbol.range.start.line,
+        endLine: symbol.range.end.line,
+      });
+      collect(symbol.children, depth + 1);
     }
   };
-  collect(await vscode.commands.executeCommand("vscode.executeDocumentSymbolProvider", uri));
+  collect(await vscode.commands.executeCommand("vscode.executeDocumentSymbolProvider", uri), 1);
 
   const lines = [...byLine.keys()].sort((a, b) => a - b).map((line) => ({
     line,
@@ -154,7 +182,13 @@ exports.run = async function run() {
 
   writeFileSync(
     process.env.POLY_LENS_OUT,
-    `${JSON.stringify({ vscode: vscode.version, lenses: lines, flat, proto }, null, 2)}\n`,
+    `${
+      JSON.stringify(
+        { vscode: vscode.version, lenses: lines, flat, flatSymbols, outline, proto },
+        null,
+        2,
+      )
+    }\n`,
   );
   console.log(`ref-lens: ${lines.length} lines carry a lens, ${flat.length} on the flat shape`);
 

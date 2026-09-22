@@ -227,6 +227,41 @@ async function main() {
     }
   }
 
+  // What the References view's kind column is built on, asked of the same two
+  // providers. Three claims, and poly reads every one of them as a fact:
+  //
+  //  1. `executeDocumentSymbolProvider` normalises the flat shape, so
+  //     `outlineOf` can read `range` with no conversion. A conversion branch
+  //     would be unreachable code, which is why there is none.
+  //  2. A real server nests, so `enclosing` has something to descend into. The
+  //     unit tests walk an outline this repo wrote and cannot say this.
+  //  3. A container's `range` covers its body rather than just its name, which
+  //     is the difference between "in method Handle" on every line of it and on
+  //     exactly one.
+  const flatMissing = (report.flatSymbols ?? []).filter((one) => !one.hasRange);
+  if ((report.flatSymbols ?? []).length === 0) {
+    problems.push("the flat provider reported no symbols, so nothing checked its shape");
+  } else if (flatMissing.length > 0) {
+    problems.push(
+      `executeDocumentSymbolProvider stopped normalising: ${
+        flatMissing.map((one) => one.name).join(", ")
+      } arrived without a range, so the References view has no outline to read`,
+    );
+  }
+  const outline = report.outline ?? [];
+  if (!outline.some((one) => one.depth > 1)) {
+    problems.push(
+      "no symbol in the fixture is nested, so `enclosing` was never asked to descend",
+    );
+  }
+  const bodyless = outline.filter((one) => one.depth > 1 && one.endLine === one.startLine);
+  if (bodyless.length === outline.filter((one) => one.depth > 1).length) {
+    problems.push(
+      "every nested symbol's range is one line, so a reference inside one would resolve "
+        + "to its container instead",
+    );
+  }
+
   problems.push(...proto.checkProto(report.proto));
 
   console.log(

@@ -6,6 +6,7 @@
   "command.toggleBold.title": "Toggle Bold",
   "command.toggleItalic.title": "Toggle Italic",
   "command.refreshTodos.title": "Refresh TODOs",
+  "command.runFile.title": "Run File",
   "command.extractVariable.title": "Extract Variable",
   "command.inlineVariable.title": "Inline Variable",
   "command.moveToNewFile.title": "Move to New File",
@@ -13,6 +14,7 @@
   "command.implementInterface.title": "Implement Interface",
   "command.nextChangedFile.title": "Go to Next Changed File",
   "command.previousChangedFile.title": "Go to Previous Changed File",
+  "command.syntaxColors.title": "Syntax Colors for This Language",
   "command.revertAndSave.title": "Revert Selected Changes and Save",
   "command.continueList.title": "Continue List",
   "command.indentListItem.title": "Indent List Item",
@@ -33,5 +35,6 @@
   "color.indentLevel4.description": "Background of the fourth indent level; levels beyond it cycle.",
   "color.indentPartial.description": "Background of leading whitespace that does not fill an indent level.",
   "view.polyTodos.name": "TODOs",
+  "view.polyReferences.name": "References",
   "command.category": "Poly"
 }

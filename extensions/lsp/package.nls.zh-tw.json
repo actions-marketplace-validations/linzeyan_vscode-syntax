@@ -8,7 +8,7 @@
   "command.formatGitChanged.title": "Poly：格式化 Git 有變更的檔案",
   "command.lintPath.title": "Poly：檢查（poly check）",
   "command.analyzeDeadCode.title": "Poly：分析未使用的程式碼",
-  "command.minifyJson.title": "Poly：壓縮 JSON",
+  "command.minify.title": "Poly：壓縮檔案",
   "command.toggleFormat.title": "Poly：切換格式化開關",
   "command.checkForUpdates.title": "Poly：檢查更新",
   "command.showOutput.title": "Poly：顯示記錄",
@@ -20,6 +20,7 @@
   "config.deadCodeCodeLens.enabled.description": "在每個 poly 能分析的檔案第一行程式碼上方顯示 `analyze dead code` 連結：Go（golang.org/x/tools/cmd/deadcode）、TypeScript 與 JavaScript（knip）、Python（vulture）。點下去會在終端機對該檔案所屬的整個專案執行 `poly deadcode`——go.work 的 build list、npm 專案、Python 專案。不點就不會執行：全程式可達性分析的代價是一次建置，所以採取詢問而非持續監看。",
   "config.languageServers.description": "執行專案自身工具鏈提供的 language server，並把 hover、跳到定義、宣告、型別定義、實作、參考、大綱、自動完成、簽章提示、符號高亮、折疊、擴展選取、重新命名與 code action 轉送給它。已知九種：gopls（Go）、rust-analyzer（Rust）、clangd（C/C++）、sourcekit-lsp（Swift）、terraform-ls（Terraform）、lua-language-server（Lua）、bash-language-server（Shell）、buf（Protobuf）、arity（R）。Code action 只會以燈泡形式出現——`editor.codeActionsOnSave` 會執行的 `source.*` 類別刻意排除，因為 VSCode 會在格式化之前跑它們，而它們改的正是 poly 接著要格式化的那幾行。poly 自己的 lint 結果會保留：server 的診斷是與之合併而非取代，所以 selene 與 swiftlint 照常回報。預設關閉：它與該語言的官方 extension 功能重疊，開啟前請先移除那個 extension。poly 不會安裝這些 server——它們來自 PATH，而哪些功能可用取決於 server 自己宣告了什麼。",
   "config.languageServerLogs.description": "把下游 language server 自己的 stderr 轉送到 Poly 輸出頻道。預設開啟。clangd 與 terraform-ls 每個請求都會寫一行；gopls、rust-analyzer、sourcekit-lsp 與 lua-language-server 則除非出錯否則安靜。關掉是直接丟棄那些輸出，而不是要求各 server 安靜一點——不是每個都做得到。poly 自己的回報不受影響，包含 server 找不到或啟動失敗。",
+  "config.memoryLog.description": "每開一個檔、關一個檔，就在 Poly 輸出頻道寫一行，說明 daemon 現在握著什麼：常駐記憶體、幾份文件與多少位元組的內容、lint 與整包快取、各來源留著幾筆診斷，以及哪些 language server 正在跑。預設關閉——這是「一個檔一行」，而你同時也在那份日誌裡找「為什麼 lint 沒跑」。poly 的記憶體看起來不對勁時再打開：這一行存在的意義，是讓漲上去的數字能歸到某一個快取頭上，而不是停在「daemon 變大了」。啟動時讀一次，所以改完要重新載入視窗。",
   "config.updateCheck.enabled.description": "定期檢查 GitHub Releases 上的新版 Poly（也涵蓋 poly-syntax-highlight）。",
   "config.updateCheck.intervalDays.description": "自動檢查更新的間隔天數；設為 0 表示每次啟動都檢查。"
 }

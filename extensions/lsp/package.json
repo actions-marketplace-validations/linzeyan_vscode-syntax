@@ -2,7 +2,7 @@
   "name": "poly-lsp",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.16.0",
+  "version": "0.18.0",
   "publisher": "ricky",
   "license": "MIT",
   "engines": {
@@ -101,8 +101,8 @@
         "title": "%command.analyzeDeadCode.title%"
       },
       {
-        "command": "poly.minifyJson",
-        "title": "%command.minifyJson.title%"
+        "command": "poly.minify",
+        "title": "%command.minify.title%"
       },
       {
         "command": "poly.toggleFormat",
@@ -135,10 +135,10 @@
     },
     "keybindings": [
       {
-        "command": "poly.minifyJson",
+        "command": "poly.minify",
         "key": "ctrl+alt+m",
         "mac": "cmd+alt+m",
-        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(json|jsonc)$/"
+        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(json|jsonc|css|html|xml|javascript|javascriptreact|typescript|typescriptreact)$/"
       }
     ],
     "configuration": {
@@ -173,6 +173,11 @@
           "type": "boolean",
           "default": true,
           "description": "%config.languageServerLogs.description%"
+        },
+        "poly.memoryLog": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.memoryLog.description%"
         },
         "poly.updateCheck.enabled": {
           "type": "boolean",

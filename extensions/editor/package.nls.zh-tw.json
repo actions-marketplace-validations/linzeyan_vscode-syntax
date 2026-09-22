@@ -6,6 +6,7 @@
   "command.toggleBold.title": "切換粗體",
   "command.toggleItalic.title": "切換斜體",
   "command.refreshTodos.title": "重新整理 TODO 清單",
+  "command.runFile.title": "執行目前檔案",
   "command.extractVariable.title": "擷取為變數",
   "command.inlineVariable.title": "內聯變數",
   "command.moveToNewFile.title": "移到新檔案",
@@ -13,6 +14,7 @@
   "command.implementInterface.title": "實作介面",
   "command.nextChangedFile.title": "跳到下一個有變更的檔案",
   "command.previousChangedFile.title": "跳到上一個有變更的檔案",
+  "command.syntaxColors.title": "這個語言的語法配色",
   "command.revertAndSave.title": "還原選取的變更並存檔",
   "command.continueList.title": "接續清單項目",
   "command.indentListItem.title": "清單項目縮排",
@@ -33,5 +35,6 @@
   "color.indentLevel4.description": "第四層縮排的背景色；更深的層級循環使用這四色。",
   "color.indentPartial.description": "湊不滿一層縮排的行首空白的背景色。",
   "view.polyTodos.name": "TODO",
+  "view.polyReferences.name": "參考",
   "command.category": "Poly"
 }

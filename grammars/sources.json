@@ -1032,6 +1032,39 @@
       "files": [
         { "src": "syntaxes/jinja-nginx.tmLanguage.json", "out": "jinja-nginx.tmLanguage.json", "scopeName": "source.nginx.jinja", "language": "jinja-nginx" }
       ]
+    },
+    {
+      "id": "solidity",
+      "override": false,
+      "rationale": "The grammar behind juanfranblanco.solidity, which is where Solidity highlighting comes from for most people; NomicFoundation/hardhat-vscode ships the same file. Upstream's second grammar, solidity-markdown-injection, is deliberately not shipped: no other added language here injects into markdown, and a ```solidity fence going dark is the same thing that already happens to zig and toml.",
+      "repo": "juanfranblanco/vscode-solidity",
+      "license": "MIT",
+      "language": { "extensions": [".sol"], "aliases": ["Solidity"], "configuration": "solidity.json" },
+      "files": [
+        { "src": "syntaxes/solidity.json", "out": "solidity.tmLanguage.json", "scopeName": "source.solidity", "language": "solidity" }
+      ]
+    },
+    {
+      "id": "cairo",
+      "override": false,
+      "rationale": "Software Mansion's extension is the one StarkWare's own docs point at for Cairo 1, and it is the grammar that tracks the language as it moves.",
+      "repo": "software-mansion/vscode-cairo",
+      "license": "Apache-2.0",
+      "language": { "extensions": [".cairo"], "aliases": ["Cairo"], "configuration": "cairo.json" },
+      "files": [
+        { "src": "syntaxes/cairo.tmLanguage.json", "out": "cairo.tmLanguage.json", "scopeName": "source.cairo", "language": "cairo" }
+      ]
+    },
+    {
+      "id": "vyper",
+      "override": false,
+      "rationale": "The vyperlang org's own extension. tintinweb/vscode-vyper carries the same grammar and is where it came from, but the language's own org is the one that will still be updating it.",
+      "repo": "vyperlang/vscode-vyper",
+      "license": "MIT",
+      "language": { "extensions": [".vy", ".vyi"], "aliases": ["Vyper"], "configuration": "vyper.json" },
+      "files": [
+        { "src": "syntaxes/vyper.tmLanguage.json", "out": "vyper.tmLanguage.json", "scopeName": "source.vyper", "language": "vyper" }
+      ]
     }
   ]
 }
