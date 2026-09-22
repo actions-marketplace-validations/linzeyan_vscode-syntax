@@ -163,6 +163,23 @@ service Greeter {
 
 BUF_YAML = "version: v2\nmodules:\n  - path: .\n"
 
+# A shell function, defined once and called twice. The reference lens over a
+# `.sh` was reported missing, and it was: poly counts an answer somebody else
+# produced, and with poly.languageServers off nothing answers for shellscript
+# at all. What this fixture pins down is the other half -- that once
+# bash-language-server is running there is something to count, in a shape poly
+# counts. Two calls rather than one, because `elsewhere` drops the declaration
+# from the list and a single call would leave a count of one either way.
+SHELL = """#!/usr/bin/env bash
+
+greet() {
+  echo "hello $1"
+}
+
+greet world
+greet again
+"""
+
 
 class Client:
     """One language server, spoken to over stdio."""
@@ -532,6 +549,100 @@ def probe_buf(check, buf):
     client.proc.kill()
 
 
+def probe_bash(check):
+    """The `.sh` half: does anything answer, and in a shape poly's lens counts?
+
+    "bash function still has no ref" was reported twice. The cause was never
+    here -- poly.languageServers ships off, so nothing answers for shellscript
+    and a lens that counts other people's answers correctly draws nothing. But
+    nothing measured the other half either, so "the feature is off" and "the
+    feature does not work" looked identical from outside. These three facts are
+    the whole of what the lens needs once the server is running.
+    """
+    root = tempfile.mkdtemp(prefix="poly-shell-lens-")
+    with open(os.path.join(root, "deploy.sh"), "w") as handle:
+        handle.write(SHELL)
+    target = "file://" + os.path.join(root, "deploy.sh")
+
+    client = Client(
+        root,
+        os.path.join(root, "bash.log"),
+        ("bash-language-server", "start"),
+    )
+    ready = client.request(
+        "initialize",
+        {
+            "processId": os.getpid(),
+            "rootUri": "file://" + root,
+            "capabilities": {
+                "textDocument": {
+                    "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                    "references": {},
+                },
+                "workspace": {"workspaceFolders": True},
+            },
+            "workspaceFolders": [{"uri": "file://" + root, "name": "probe"}],
+        },
+        timeout=READY_S,
+    )
+    client.notify("initialized", {})
+    client.notify(
+        "textDocument/didOpen",
+        {
+            "textDocument": {
+                "uri": target,
+                "languageId": "shellscript",
+                "version": 1,
+                "text": SHELL,
+            }
+        },
+    )
+
+    caps = ready.get("capabilities", {}) if isinstance(ready, dict) else {}
+    check(
+        bool(caps.get("referencesProvider")),
+        "bash-language-server answers references, which is the whole lens",
+        caps.get("referencesProvider", "(absent)"),
+    )
+
+    tree = client.request(
+        "textDocument/documentSymbol", {"textDocument": {"uri": target}}, 20
+    )
+    flat = flatten(tree if isinstance(tree, list) else [])
+    kinds = {name: kind for _, kind, name in flat}
+    # `Function` and not `Variable` or `Method`: references.ts counts a fixed
+    # set of SymbolKinds, and a shell function arriving as something outside it
+    # would be a lens that is off for one language and on for the rest -- the
+    # hardest kind of missing feature to notice.
+    check(
+        kinds.get("greet") == "Function",
+        "a shell function is a Function, one of the kinds poly counts",
+        kinds or "(no symbols)",
+    )
+
+    found = client.request(
+        "textDocument/references",
+        {
+            "textDocument": {"uri": target},
+            "position": {
+                "line": SHELL.split("\n").index("greet() {"),
+                "character": 0,
+            },
+            "context": {"includeDeclaration": True},
+        },
+    )
+    # Three: the definition and the two calls. poly drops the declaration, so
+    # what the lens would say is `2 refs` -- and a server answering with only
+    # the declaration would make it say `no refs` over a function used twice.
+    count = len(found) if isinstance(found, list) else 0
+    check(
+        count >= 3,
+        "the definition and both calls come back, so the lens reads `2 refs`",
+        f"{count} location(s)",
+    )
+    client.proc.kill()
+
+
 def main():
     argv = sys.argv[1:]
     required = "--require" in argv
@@ -711,6 +822,22 @@ def main():
 
     print("\n`buf lsp serve` — the .proto lenses")
     probe_buf(check, buf)
+
+    # Its own skip rather than a line in the one above: go and gopls gate most
+    # of this file, and a machine without bash-language-server should still run
+    # all of that. `--require` is CI, where it is installed and a skip would
+    # mean the shell lens went back to being the thing nobody measures.
+    print("\n`bash-language-server` — the reference lens on a shell function")
+    if shutil.which("bash-language-server") is None:
+        if required:
+            print(
+                "  FAIL  bash-language-server not on PATH, and --require says that is a failure"
+            )
+            problems.append("bash-language-server not on PATH")
+        else:
+            print("  SKIPPED: bash-language-server not on PATH")
+    else:
+        probe_bash(check)
 
     print(f"\ngopls {version}, buf {os.path.basename(os.path.dirname(buf))}")
     if problems:
