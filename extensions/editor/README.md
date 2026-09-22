@@ -113,9 +113,19 @@ TypeScript 有這個 lens，其他語言都沒有。
 - 數字**不含宣告自己**。`executeReferenceProvider` 是帶 `includeDeclaration: true` 問的，
   不扣掉的話沒人用的東西會顯示成 `1 ref`——而那正是這個計數最該讓人看見的一種。
 - **點下去分三種，因為 `N refs` 其實是三個手勢。** 沒人引用就沒地方去，那條 lens 是純文字；
-  **只有一個就直接跳過去**，為了一筆結果開一個清單是多按一次；兩個以上開 References 樹狀
-  面板——peek 一碰編輯器就關掉，清單要讀就該留著。`references-view` 的命令不吃參數（它讀
-  active editor 的游標），所以 poly 先把游標移到宣告上再叫它。
+  **只有一個就直接跳過去**，為了一筆結果開一個清單是多按一次；兩個以上開檔案總管裡的
+  **References** 面板——peek 一碰編輯器就關掉，清單要讀就該留著。
+- **那個面板是 poly 自己的，為的是兩個欄位。** 內建的 `references-view` 每列只印一行原始碼，
+  檔名在上面那層；要回答「這四十筆裡哪一筆是介面上的那個」或「這是呼叫還是宣告」，需要的是
+  **行號**與**它落在哪個符號裡**，而那兩樣都不在畫面上。`TreeDataProvider` 的列是它自己的，
+  沒有「幫別人的樹加一欄」這種 contribution point，所以 poly 只能自己有一棵。
+  - 列的格式是 `<行號>  <該行原始碼>`，右側淡色再標 `method Handle`／`func main`／
+    `var config` 這類**最內層**的符號。最內層而不是最外層：某個檔案裡每一列都在同一個 class
+    裡面，標 class 等於什麼都沒說。
+  - 落在任何符號之外（import 區塊、頂層敘述、沒有 symbol provider 的語言）就留白，不會硬
+    標一個 `file`——那是在發明一個 outline 裡根本沒有的層級。
+  - 面板平常不在，有結果才出現。
+  - 每個檔案問一次 outline，上限 60 個檔案；超過的列仍然有行號，少的只是符號那一欄。
 - **`N impl` 掛在 interface 與它的成員上，`N interfaces` 掛在具體型別與方法上。** 一顆 lens
   只掛一個命令，所以 `1 ref | 1 impl` 其實是兩顆共用同一行的 lens。同一個
   `textDocument/implementation` 兩個方向讀，只有字不一樣——「2 impls」掛在 struct 上會變成

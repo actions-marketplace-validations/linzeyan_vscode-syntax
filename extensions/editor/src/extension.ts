@@ -23,6 +23,7 @@ import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } f
 import { generatedFiles, goLinksFor, goServerMethod, protoPackage } from "./protobuf";
 import { refactorChoices, Refactoring, REFACTORINGS } from "./refactors";
 import { Direction, elsewhere, implLabel, LensTarget, lensTargets, refLabel } from "./references";
+import { ReferenceTree, registerReferenceTree } from "./referenceTree";
 import { entryLine, entryPoints, findsEntryInText, runLine } from "./runnable";
 import { offerMessage, serverToOffer } from "./servers";
 import { registerTodoTree } from "./todoTree";
@@ -692,22 +693,6 @@ class ReferenceLens extends vscode.CodeLens {
 }
 
 /**
- * Where a reference lens click lands.
- *
- * "N refs" is three gestures wearing one label, and until 2026-09-21 all three
- * opened the same peek. Nothing refers to it: there is nowhere to go, and the
- * lens stays text. One thing does: go there -- a list with a single entry in it
- * is a widget's worth of ceremony around a jump the user has already decided
- * on. More than one: the References tree, which is the only one of the two that
- * survives being read, since a peek closes the moment the editor is touched.
- *
- * The tree belongs to `references-view`, a built-in extension, and its commands
- * take no arguments: measured in the shipped `dist/extension.js`, they read
- * `window.activeTextEditor`'s uri and cursor. So the cursor is put on the
- * declaration first -- which is in the document the lens is drawn in, so this
- * is a move within the open editor and not a file open.
- */
-/**
  * Where a `N methods` or a `go type` click lands.
  *
  * Same three-way rule as the reference lens, minus the empty case that never
@@ -731,6 +716,38 @@ async function goToSymbol(
   }
 }
 
+/**
+ * The tree the lens fills in, once `activate` has made it.
+ *
+ * Module state rather than a parameter because `showReferences` is registered
+ * as a command and the editor decides its arguments.
+ */
+let referenceTree: ReferenceTree | undefined;
+
+/**
+ * What each lens calls its result set, in the view's title.
+ *
+ * Three different questions whose answers look identical once they are rows in
+ * a tree, so the title is the only thing left saying which one was asked. The
+ * two directions are `implLabel`'s two readings of one provider: `down` is who
+ * satisfies this declaration, `up` is what this one satisfies.
+ */
+const ASKED: Readonly<Record<"refs" | Direction, string>> = {
+  refs: "References",
+  down: "Implementations",
+  up: "Interfaces",
+};
+
+/**
+ * Where a reference lens click lands.
+ *
+ * "N refs" is three gestures wearing one label, and until 2026-09-21 all three
+ * opened the same peek. Nothing refers to it: there is nowhere to go, and the
+ * lens stays text. One thing does: go there -- a list with a single entry in it
+ * is a widget's worth of ceremony around a jump the user has already decided
+ * on. More than one: a tree, which is the only one of the two that survives
+ * being read, since a peek closes the moment the editor is touched.
+ */
 async function showReferences(
   uri: vscode.Uri,
   position: vscode.Position,
@@ -742,13 +759,17 @@ async function showReferences(
     await vscode.window.showTextDocument(only.uri, { selection: only.range });
     return;
   }
+  // poly's own tree rather than `references-view`'s, and the whole difference
+  // is two columns: the line number and the symbol each hit sits inside. That
+  // cannot be added to the built-in one -- a TreeDataProvider owns its rows --
+  // so the list is built here instead of handing the cursor over.
+  //
+  // The cursor still moves, because a result set is about a position and the
+  // declaration should be on screen behind the list.
   const editor = await vscode.window.showTextDocument(uri);
   editor.selection = new vscode.Selection(position, position);
-  await vscode.commands.executeCommand(
-    counts === "refs"
-      ? "references-view.findReferences"
-      : "references-view.findImplementations",
-  );
+  await referenceTree?.show(ASKED[counts], locations);
+  await vscode.commands.executeCommand("polyReferences.focus");
 }
 
 /**
@@ -1590,6 +1611,7 @@ export function activate(context: vscode.ExtensionContext) {
   linkGeneratedGo(context);
   completePostfixes(context);
   registerTodoTree(context);
+  referenceTree = registerReferenceTree(context);
 
   // The fence rule reads the setting on every render, so turning the diagrams
   // off only has to reach previews that are already open. Same command the

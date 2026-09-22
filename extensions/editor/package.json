@@ -220,6 +220,11 @@
           "id": "polyTodos",
           "name": "%view.polyTodos.name%",
           "when": "config.poly.todo.enabled"
+        },
+        {
+          "id": "polyReferences",
+          "name": "%view.polyReferences.name%",
+          "when": "poly.hasReferences"
         }
       ]
     },

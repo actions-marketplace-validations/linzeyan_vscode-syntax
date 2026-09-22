@@ -120,7 +120,9 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   server 是對著診斷提供那條修正的。
 - **引用與實作 CodeLens**：每個宣告一行 `11 refs`；interface 多一顆 `3 impls`，具體型別多一顆
   `1 interface`，方法寫在型別外面的語言（Go）再多一顆 `4 methods`。只有一筆就直接跳過去，多筆
-  開 References 面板。全部的數字都來自該語言已註冊的 provider，poly 只數與畫。
+  開檔案總管裡的 **References** 面板——那是 poly 自己的樹，每一列除了原始碼還帶**行號**與
+  **它落在哪個符號裡**（`method Handle`、`func main`），內建的 `references-view` 兩欄都沒有，
+  而別人的樹加不了欄位。全部的數字都來自該語言已註冊的 provider，poly 只數與畫。
   `poly.referencesCodeLens.enabled` 可關。
 - **`run | debug` CodeLens**：程式進入點（Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`、
   Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。poly 沒有 debugger——
@@ -738,8 +740,9 @@ poly **不寫使用者的 `settings.json`**（A8），所以下面這些必須�
       "rangeVariableTypes": true
     }
   },
-  // 編輯器自己的 Find All References 開 peek 還是開 References 面板。預設 "peek"；
-  // 設成 "view" 會和 poly 的 `N refs` CodeLens 一致（那顆一律開面板）。
+  // 編輯器自己的 Find All References 開 peek 還是開內建的 References 面板。預設 "peek"；
+  // 設成 "view" 會和 poly 的 `N refs` CodeLens 一樣留著清單不跑掉——但兩邊是不同的樹，
+  // 帶行號與符號欄位的是 poly 那棵。
   "references.preferredLocation": "view"
 }
 ```

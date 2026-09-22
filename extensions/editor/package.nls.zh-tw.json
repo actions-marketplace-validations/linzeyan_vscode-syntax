@@ -34,5 +34,6 @@
   "color.indentLevel4.description": "第四層縮排的背景色；更深的層級循環使用這四色。",
   "color.indentPartial.description": "湊不滿一層縮排的行首空白的背景色。",
   "view.polyTodos.name": "TODO",
+  "view.polyReferences.name": "參考",
   "command.category": "Poly"
 }

@@ -34,5 +34,6 @@
   "color.indentLevel4.description": "Background of the fourth indent level; levels beyond it cycle.",
   "color.indentPartial.description": "Background of leading whitespace that does not fill an indent level.",
   "view.polyTodos.name": "TODOs",
+  "view.polyReferences.name": "References",
   "command.category": "Poly"
 }
