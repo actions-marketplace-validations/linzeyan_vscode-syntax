@@ -733,6 +733,7 @@ fn cmd_check(inv: &Invocation) -> Result<i32> {
             .par_iter()
             .map(|(path, config)| {
                 let mut found = poly_engines::lint::spell(path)?;
+                found.extend(poly_engines::lint::unicode(path)?);
                 if let Some(lang) = config.language(path) {
                     let linted = lint_engine(&lang, path).is_some();
                     let embeds = embedded_shellcheck.is_some()

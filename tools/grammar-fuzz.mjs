@@ -201,10 +201,10 @@ const ALPHABET = [
   ..."abZ019",
   "\u0000",
   " ",
-  "​",
+  "​", // poly: ignore confusable-character
   "😀",
   "́",
-  "‮",
+  "‮", // poly: ignore confusable-character
 ];
 
 /** Single lines that have a reason to be here, rather than random ones. */
@@ -245,7 +245,7 @@ function pathological() {
     many("a.b(c).d(e).", 1000),
     // Whitespace that is not a space, which several grammars match on.
     many(" ", 2000),
-    many("​", 2000),
+    many("​", 2000), // poly: ignore confusable-character
   ];
 }
 

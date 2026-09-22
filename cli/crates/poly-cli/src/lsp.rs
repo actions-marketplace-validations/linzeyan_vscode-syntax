@@ -2000,8 +2000,25 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
     if config.excluded(path, poly_core::Scope::Lint) {
         return Vec::new();
     }
+    // Above the language gate, and above `lint_engine` below it, because this
+    // is the one rule with no language: CSS has no linter here and a zero-width
+    // space in a `.css` is exactly as broken as one in a `.py`. Run any lower
+    // and it would cover the languages poly happens to have a linter for and no
+    // others, which is a minority of the files an editor opens.
+    //
+    // From the buffer rather than from disk, unlike spelling: there is no
+    // per-file configuration keyed off the name, and the value of the rule is
+    // that the character is underlined as it is pasted rather than after a
+    // save. `poly check` calls the same function with what it read from disk.
+    let unicode = poly_engines::unicode::check(text);
     let Some(lang) = config.language(path) else {
-        return Vec::new();
+        // Rare from this client -- its document selector only sends languages
+        // poly names -- and reachable from any other, plus from a file whose
+        // extension poly does not map. No language means no comment syntax and
+        // so no inline suppression, but `[lint] ignore` in poly.toml still
+        // applies and so does a severity override, which is why it goes through
+        // the same tail as everything else.
+        return finish(unicode, path, &config, &poly_core::InlineIgnores::empty());
     };
     // Asked before linting rather than dispatching straight into the engines,
     // because for JavaScript and TypeScript the answer is "eslint has this
@@ -2027,6 +2044,7 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
         Ok(found) => issues.extend(found),
         Err(e) => eprintln!("[poly] spell error {}: {e:#}", path.display()),
     }
+    issues.extend(unicode);
     match external_lint(&lang, path, text, &config) {
         Ok(more) => issues.extend(more),
         Err(e) => eprintln!("[poly] external lint error {}: {e:#}", path.display()),
@@ -2039,7 +2057,22 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
     // typing is the one that should apply, and a squiggle that only clears on
     // save is a suppression that looks broken.
     let inline = poly_core::InlineIgnores::scan(Some(&lang), text);
-    issues.extend(inline.syntax_issues(crate::hadolint_is_off(&config)));
+    finish(issues, path, &config, &inline)
+}
+
+/// What every finding goes through on its way to Problems, whichever path it
+/// arrived by: the project's suppressions, then the project's severities.
+///
+/// Its own function because `lint_document` now has two exits -- a file with no
+/// language still has findings -- and a second copy of this is how one of them
+/// would end up honouring a `[lint] ignore` the other did not.
+fn finish(
+    mut issues: Vec<poly_core::diag::Issue>,
+    path: &Path,
+    config: &poly_core::Config,
+    inline: &poly_core::InlineIgnores,
+) -> Vec<lsp_types::Diagnostic> {
+    issues.extend(inline.syntax_issues(crate::hadolint_is_off(config)));
     issues.retain(|i| {
         !config.lint_ignored(path, i.source, &i.code)
             && !inline.suppresses(i.line, i.source, &i.code)

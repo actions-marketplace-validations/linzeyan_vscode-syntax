@@ -157,11 +157,11 @@ ignore = []
 # same thing whether it was Go's deadcode, TypeScript's knip or Python's
 # vulture that found it, and it keeps meaning it when a language is added.
 #
-#   broken-reference, credential-exposure, excess-privilege,
-#   implicit-default, implicit-location, invalid, naming-convention,
-#   not-checked, redundant, silently-discarded, spelling, supply-chain,
-#   suppression, unintended-effect, unpinned-dependency, unrecognized-value,
-#   unused-code, wasted-bytes
+#   broken-reference, confusable-character, credential-exposure,
+#   excess-privilege, implicit-default, implicit-location, invalid,
+#   naming-convention, not-checked, redundant, silently-discarded, spelling,
+#   supply-chain, suppression, unintended-effect, unpinned-dependency,
+#   unrecognized-value, unused-code, wasted-bytes
 #
 # Most upstream rules have none -- ruff and clippy have hundreds each and a
 # project chooses which run, so poly names them by `tool/rule` rather than

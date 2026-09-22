@@ -39,7 +39,7 @@ const STATED = [
   "Closed ###",
   "中文標題",
   "中文，標點",
-  "日本語　全角スペース",
+  "日本語　全角スペース", // poly: ignore confusable-character
   "한국어 제목",
   "emoji 😀 heading",
   "combining é and é",
@@ -56,14 +56,18 @@ const STATED = [
   "&amp; entity",
   "&lt;not a tag&gt;",
   "tab\tseparated",
-  "non breaking",
-  "zero​width",
-  "rtl ‮mark",
+  // The lines below carry the character each one is named after, which is the
+  // whole point: a TOC generator has to survive them in a heading. poly reports
+  // them under `confusable-character` and is right to, so each is excused where
+  // it sits rather than by dropping the file from the linter.
+  "non breaking", // poly: ignore confusable-character
+  "zero​width", // poly: ignore confusable-character
+  "rtl ‮mark", // poly: ignore confusable-character
   "math $x^2$",
   "em — dash",
-  "en – dash",
-  "quote “curly”",
-  "apostrophe ’s",
+  "en – dash", // poly: ignore confusable-character
+  "quote “curly”", // poly: ignore confusable-character
+  "apostrophe ’s", // poly: ignore confusable-character
   "Ｆｕｌｌｗｉｄｔｈ",
   "half width ｶﾀｶﾅ",
   "ÅÄÖ åäö",
@@ -83,12 +87,12 @@ const STATED = [
  */
 const ALPHABET = [
   ..."[]!/'\"#$%&()*+,.:;<=>?@\\^{|}~`",
-  ..."。，、；：？！…—·ˉ¨‘’“”々～‖∶＂＇｀｜〃〔〕〈〉《》「」『』．〖〗【】（）［］｛｝",
+  ..."。，、；：？！…—·ˉ¨‘’“”々～‖∶＂＇｀｜〃〔〕〈〉《》「」『』．〖〗【】（）［］｛｝", // poly: ignore confusable-character
   ..."-_ \t",
   ..."abZ09",
-  " ",
-  "​",
-  "‮",
+  " ", // poly: ignore confusable-character
+  "​", // poly: ignore confusable-character
+  "‮", // poly: ignore confusable-character
   "😀",
   "́",
   "中",

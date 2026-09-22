@@ -302,7 +302,7 @@ suite("poly-lsp in a real editor", () => {
   // and quietly dropped them would pass any test that only read the response.
   test("minify collapses a buffer in every language poly claims", async () => {
     const cases = [
-      ["min.json", '{\n  "b": 1,\n  "a": 2\n}\n', '{"b":1,"a":2}'],
+      ["min.json", "{\n  \"b\": 1,\n  \"a\": 2\n}\n", "{\"b\":1,\"a\":2}"],
       ["min.css", "/* gone */\n.a .b {\n  color: red;\n}\n", ".a .b{color:red}"],
       // The spaces around <em> are the claim: they are whitespace the renderer
       // draws, and an HTML minifier that collapsed them would change the page.
@@ -329,6 +329,34 @@ suite("poly-lsp in a real editor", () => {
     await vscode.window.showTextDocument(document);
     await vscode.commands.executeCommand("poly.minify");
     assert.strictEqual(document.getText(), text, "minify rewrote a YAML file");
+  });
+
+  // CSS on purpose: poly formats it and has no linter for it, so `lint_engine`
+  // answers None and a squiggle here cannot have come from an engine. That is
+  // the claim -- the unicode pass runs beside the per-language ones rather than
+  // inside them, and a version that dispatched it through the engine table
+  // would leave this file silent.
+  //
+  // Written with an escape rather than the character, so this file does not
+  // itself contain a zero-width space. `make dogfood` lints this repository
+  // with this very rule, and a fixture that trips it is a fixture that has to
+  // be excused on every run.
+  test("underlines a zero-width space in a language with no linter", async () => {
+    const uri = writeFile("gremlin.css", ".a\u200bb { color: red; }\n");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+    const diagnostics = await eventually("unicode diagnostics", () => {
+      const found = vscode.languages
+        .getDiagnostics(uri)
+        .filter((d) => d.source === "poly" && String(d.code).startsWith("unicode-"));
+      return found.length > 0 ? found : undefined;
+    });
+    assert.strictEqual(diagnostics.length, 1, "more than the zero-width space");
+    assert.strictEqual(diagnostics[0].code, "unicode-invisible");
+    // The position is load-bearing: the daemon reads this one from the buffer
+    // rather than from disk, and a version that read the file would still find
+    // a zero-width space -- just not necessarily this one.
+    assert.strictEqual(diagnostics[0].range.start.line, 0);
+    assert.strictEqual(diagnostics[0].range.start.character, 2);
   });
 
   test("publishes sqruff diagnostics into the Problems panel", async () => {

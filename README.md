@@ -222,6 +222,18 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   poly 的 parser 還不支援 `edition = "2023"`，遇到讀不了的檔案會報
   `poly/proto-unreadable`——那是「poly 沒檢查這個檔案」，不是「這個檔案有問題」。
   格式化不受影響，`.proto` 一律格式化。
+- **看起來不是本人的字元**（code 長 `poly/unicode-*`，類別 `confusable-character`，
+  等級一律 warning）。不分語言，每個檔案都檢查——這是取代 gremlins 那類編輯器裝飾的部分，
+  差別在於它同樣會在 CLI 與 CI 裡紅。五條規則：`-bidi`（雙向控制字元，也就是
+  Trojan Source）、`-invisible`（零寬字元、軟連字號；檔首的 BOM 不算）、`-space`
+  （不斷行空格、全形空格這類「看起來是空白但不是」）、`-lookalike`（EN DASH 之於 `-`、
+  彎引號之於 `'`／`"`）、`-mixed-script`（同一個字裡混了西里爾或希臘字母）。
+  界線是**「會被誤認成某個 ASCII 字元」而不是「非 ASCII」**，而且是量出來的：
+  這個 repo 有 1504 個 EM DASH、1124 個全形逗號冒號分號，全都是正確的中文排版，
+  一併報就是 1162 筆噪音；只報真正會混淆的則是 22 筆。所以 em dash、全形標點、
+  法文引號都不在規則裡。編輯器要把看不見的字元畫出來，VSCode 內建
+  `editor.unicodeHighlight.invisibleCharacters`／`.ambiguousCharacters` 就是那個功能，
+  poly 不再畫第二次。
 - **GraphQL 的 lint 只有語法檢查**（code 是 `graphql/syntax`，等級 error），與 TOML、
   TypeScript 一樣是「這個檔案不是它副檔名說的那個語言」。用的是格式化時的同一支 parser
   （apollo-parser，October 2021 版規格），所以編輯器與 CI 指的是同一個字元。
@@ -852,7 +864,7 @@ per-file-ignores 一條路。註釋裡寫了 poly 讀不懂的代碼會以 `poly
 其他語言，`rust-analyzer = "/opt/rust-glancer"` 換成別的實作。版本號不是這裡的合法值
 ——這些跟著專案 toolchain 走，poly 不下載。
 
-`[format.<lang>]` 只認 `line-width`（1–1000）／`indent-width`（1–16）／`use-tabs`
+`[format.<lang>]` 只認 `line-width`（1-1000）／`indent-width`（1-16）／`use-tabs`
 三個鍵，拼錯或超出範圍都會直接讓解析失敗而不是靜默忽略；只作用於內嵌引擎，走外部
 工具的語言請用該工具自己的設定檔。VSCode settings 只放個人偏好
 （`poly.serverPath`、`poly.lintOnSave`、`poly.updateCheck.*`）。

@@ -6,6 +6,7 @@
 pub mod lint;
 mod proto;
 pub mod shell;
+pub mod unicode;
 mod workflow;
 
 use std::path::Path;
