@@ -6,6 +6,7 @@
   "command.toggleBold.title": "切換粗體",
   "command.toggleItalic.title": "切換斜體",
   "command.refreshTodos.title": "重新整理 TODO 清單",
+  "command.runFile.title": "執行目前檔案",
   "command.extractVariable.title": "擷取為變數",
   "command.inlineVariable.title": "內聯變數",
   "command.moveToNewFile.title": "移到新檔案",

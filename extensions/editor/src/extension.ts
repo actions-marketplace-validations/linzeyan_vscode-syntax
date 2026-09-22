@@ -23,7 +23,7 @@ import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } f
 import { generatedFiles, goLinksFor, goServerMethod, protoPackage } from "./protobuf";
 import { refactorChoices, Refactoring, REFACTORINGS } from "./refactors";
 import { Direction, elsewhere, implLabel, LensTarget, lensTargets, refLabel } from "./references";
-import { entryLine, entryPoints, findsEntryInText } from "./runnable";
+import { entryLine, entryPoints, findsEntryInText, runLine } from "./runnable";
 import { offerMessage, serverToOffer } from "./servers";
 import { registerTodoTree } from "./todoTree";
 
@@ -1028,17 +1028,81 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
 /**
  * `run | debug` over a program's entry point.
  *
- * The two halves are deliberately lopsided: poly decides where the button goes,
- * and the editor's own Start Debugging decides what it runs. See `runnable.ts`
- * for why that division is the whole feature and not a shortcut.
+ * The two do different things, which they did not until now: `run` executes
+ * the file in a terminal and `debug` is `workbench.action.debug.start`, the
+ * editor's own F5. Both used to be debug commands -- `workbench.action.debug
+ * .run` is "Start Without Debugging", which still wants a launch configuration
+ * and still raises the debug toolbar -- so the pair was one behaviour wearing
+ * two labels. See `runnable.ts` for what poly had to learn to fix that.
  *
- * `workbench.action.debug.run` and `.start` are F5 and ctrl+F5 -- so with a
- * launch.json present this starts the configuration the user has selected,
- * exactly as pressing F5 would, and without one it asks whichever debug
- * extension is installed for a configuration for the active file. The second
- * case is the one the lens is for, and it is the one where "the file I am
- * looking at" and "what F5 would run" are the same thing.
+ * `run` appears only where poly knows the command. Go, Rust, Python and shell
+ * have one; C, C++, Java and C# have an entry point and no one-line way to
+ * run it, so they get `debug` alone rather than a button that opens a terminal
+ * and prints an error.
  */
+/**
+ * The terminal `run` uses, and the directory it was opened in.
+ *
+ * Both, because the command lines are relative -- `go run .` means the
+ * directory the shell is in. Reusing a terminal opened somewhere else would
+ * run a different program and say nothing about it.
+ */
+let runTerminal: { terminal: vscode.Terminal; cwd: string } | undefined;
+
+/**
+ * Run one file, in a terminal the user can read, scroll and kill.
+ *
+ * A terminal rather than a task or a child process: a task needs a
+ * tasks.json-shaped problem matcher to be worth anything and hides its output
+ * behind a panel switch, and a child process would put the program's stdout in
+ * an output channel with no stdin and no ^C. The point of the button is "show
+ * me this running", and a terminal is the thing that does that.
+ *
+ * One terminal, reused. The alternative is a new tab per press, and the press
+ * people repeat most is the one after an edit.
+ */
+async function runFile(uri?: vscode.Uri, line?: string): Promise<void> {
+  // The lens passes both; the command palette passes neither, and means the
+  // file being looked at. Worth supporting rather than hiding the command,
+  // because a keyboard route to "run this" is the half a lens cannot give.
+  const document = uri
+    ? vscode.workspace.textDocuments.find((open) => open.uri.toString() === uri.toString())
+    : vscode.window.activeTextEditor?.document;
+  if (!document || document.uri.scheme !== "file") {
+    return;
+  }
+  const command = line
+    ?? runLine(
+      document.languageId,
+      path.basename(document.uri.fsPath),
+      document.getText(),
+      process.platform === "win32",
+    );
+  if (!command) {
+    vscode.window.showWarningMessage(
+      `Poly: no way to run a ${document.languageId} file from a shell`,
+    );
+    return;
+  }
+  // Saved first, or the run is of the last version the user happened to save
+  // -- which looks exactly like a change that did not work.
+  if (document.isDirty) {
+    await document.save();
+  }
+  const cwd = path.dirname(document.uri.fsPath);
+  if (runTerminal && (runTerminal.terminal.exitStatus !== undefined || runTerminal.cwd !== cwd)) {
+    runTerminal.terminal.dispose();
+    runTerminal = undefined;
+  }
+  if (!runTerminal) {
+    runTerminal = { terminal: vscode.window.createTerminal({ name: "Poly Run", cwd }), cwd };
+  }
+  // Not stealing focus: the useful thing is watching the output, and a cursor
+  // that jumps out of the editor after every run is a cursor put back by hand.
+  runTerminal.terminal.show(true);
+  runTerminal.terminal.sendText(command);
+}
+
 function runFromGutter(context: vscode.ExtensionContext): void {
   const changed = new vscode.EventEmitter<void>();
   const provider: vscode.CodeLensProvider = {
@@ -1051,11 +1115,19 @@ function runFromGutter(context: vscode.ExtensionContext): void {
       if (!on) {
         return [];
       }
+      const runs = runLine(
+        document.languageId,
+        path.basename(document.uri.fsPath),
+        document.getText(),
+        process.platform === "win32",
+      );
       const buttons = (range: vscode.Range) =>
         [
-          { title: "run", command: "workbench.action.debug.run" },
-          { title: "debug", command: "workbench.action.debug.start" },
-        ].map(({ title, command }) => new vscode.CodeLens(range, { title, command, arguments: [] }));
+          ...(runs
+            ? [{ title: "run", command: "poly.runFile", arguments: [document.uri, runs] }]
+            : []),
+          { title: "debug", command: "workbench.action.debug.start", arguments: [] },
+        ].map((command) => new vscode.CodeLens(range, command));
 
       // Python and shell have no declaration to sit on, and asking their
       // symbol provider first would cost a request whose answer is discarded.
@@ -1073,6 +1145,10 @@ function runFromGutter(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     changed,
     vscode.languages.registerCodeLensProvider({ scheme: "file" }, provider),
+    vscode.commands.registerCommand("poly.runFile", runFile),
+    // The terminal outlives the lens that opened it, so it is disposed with
+    // the extension rather than left behind on reload.
+    { dispose: () => runTerminal?.terminal.dispose() },
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("poly.runCodeLens")) {
         changed.fire();

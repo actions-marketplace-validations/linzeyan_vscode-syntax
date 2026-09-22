@@ -154,6 +154,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "poly.runFile",
+        "title": "%command.runFile.title%",
+        "category": "%command.category%"
+      },
+      {
         "command": "poly.extractVariable",
         "title": "%command.extractVariable.title%",
         "category": "%command.category%"

@@ -46,11 +46,15 @@ const OUT = join(SCRATCH, "runnable.json");
  * What each button has to invoke, spelled out here rather than imported.
  *
  * Importing them from `extension.ts` would make this check agree with whatever
- * that file says, which is not a check. These are the editor's own commands --
- * F5 and ctrl+F5 -- and poly contributes no debugger, so this pair is the whole
- * of what the feature does.
+ * that file says, which is not a check.
+ *
+ * The pair used to be `workbench.action.debug.run` and `.start` -- ctrl+F5 and
+ * F5. Both are debug commands, so both wanted a launch configuration and both
+ * raised the debug toolbar, and the button labelled `run` was describing
+ * something it did not do. `run` is now poly's own command, which opens a
+ * terminal; `debug` still hands over, because poly ships no debugger.
  */
-const RUNS = { run: "workbench.action.debug.run", debug: "workbench.action.debug.start" };
+const RUNS = { run: "poly.runFile", debug: "workbench.action.debug.start" };
 
 /**
  * One file per claim, and `entry` is the line that must carry the pair.
@@ -68,6 +72,11 @@ const FIXTURES = [
     // server reports, which is the mistake the unit tests already make.
     file: "entry.ts",
     entry: "export function main(): void {",
+    // `debug` alone. TypeScript has an entry point poly finds and no one-line
+    // way to run it from a shell -- `node entry.ts` is not it -- so there is
+    // no `run` to offer. The asymmetry is the check: a run button that opened
+    // a terminal and printed a parse error would be worse than no button.
+    buttons: ["debug"],
     text: `export function main(): void {
   console.log("poly");
 }
@@ -79,6 +88,7 @@ const FIXTURES = [
     // routes would draw a second pair on it.
     file: "guarded.py",
     entry: `if __name__ == "__main__":`,
+    buttons: ["debug", "run"],
     text: `def main() -> None:
     print("poly")
 
@@ -99,6 +109,7 @@ if __name__ == "__main__":
   {
     file: "entry.sh",
     entry: "#!/usr/bin/env bash",
+    buttons: ["debug", "run"],
     text: `#!/usr/bin/env bash
 set -euo pipefail
 
@@ -227,10 +238,11 @@ exports.check = function check() {
       continue;
     }
     // Every part of this is load-bearing: one line, because a Python file that
-    // got a pair from the text rule and another from the symbol tree would
-    // otherwise pass; both titles, because the lens is a pair and half of one
-    // is a bug; and the line's own text, because the pair being *somewhere* is
-    // the claim the unit tests already make.
+    // got buttons from the text rule and another set from the symbol tree
+    // would otherwise pass; the exact titles, because which buttons a language
+    // gets is now a claim rather than a constant; and the line's own text,
+    // because the buttons being *somewhere* is the claim the unit tests
+    // already make.
     if (lines.length !== 1) {
       problems.push(
         `${fixture.file} should carry one pair of buttons, on ${JSON.stringify(fixture.entry)}, `
@@ -241,8 +253,10 @@ exports.check = function check() {
       continue;
     }
     const said = buttons.map((lens) => lens.title).sort();
-    if (said.join() !== ["debug", "run"].join()) {
-      problems.push(`${fixture.file} carries ${JSON.stringify(said)} and not one run and one debug`);
+    if (said.join() !== fixture.buttons.join()) {
+      problems.push(
+        `${fixture.file} carries ${JSON.stringify(said)} and not ${JSON.stringify(fixture.buttons)}`,
+      );
     }
     if (buttons[0].text !== fixture.entry) {
       problems.push(

@@ -6,6 +6,7 @@
   "command.toggleBold.title": "Toggle Bold",
   "command.toggleItalic.title": "Toggle Italic",
   "command.refreshTodos.title": "Refresh TODOs",
+  "command.runFile.title": "Run File",
   "command.extractVariable.title": "Extract Variable",
   "command.inlineVariable.title": "Inline Variable",
   "command.moveToNewFile.title": "Move to New File",
