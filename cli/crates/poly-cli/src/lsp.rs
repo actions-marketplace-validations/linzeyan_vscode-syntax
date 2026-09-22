@@ -177,6 +177,10 @@ struct Server {
     /// messages about a server that is missing or died are unaffected, since
     /// those are poly's to write.
     language_server_logs: bool,
+    /// Whether every document opened and closed writes a line saying what poly
+    /// is holding. Off by default: it is a line per file in a log people read
+    /// to find out why a lint did not run.
+    memory_log: bool,
     /// The editor's own InitializeParams, replayed to each downstream server.
     init_params: serde_json::Value,
     /// Running servers, keyed by binary name rather than language: clangd
@@ -496,6 +500,7 @@ fn serve(connection: Connection) -> Result<()> {
     let lint_on_save = option("lintOnSave", true);
     let language_servers = option("languageServers", false);
     let language_server_logs = option("languageServerLogs", true);
+    let memory_log = option("memoryLog", false);
 
     let mut server = Server {
         connection,
@@ -503,6 +508,7 @@ fn serve(connection: Connection) -> Result<()> {
         lint_on_save,
         language_servers,
         language_server_logs,
+        memory_log,
         init_params,
         downstream: HashMap::new(),
         last_completion: None,
@@ -1154,6 +1160,7 @@ impl Server {
                     self.publish_lint(&uri)?;
                     self.queue_package_lint(&uri, false);
                 }
+                self.log_memory("didOpen");
             }
             "textDocument/didChange" => {
                 let params: DidChangeTextDocumentParams =
@@ -1187,6 +1194,7 @@ impl Server {
                 self.lock().forget(&uri);
                 // Clear diagnostics so closed files don't linger in Problems.
                 self.publish(&uri, Vec::new())?;
+                self.log_memory("didClose");
             }
             _ => {}
         }
@@ -1295,6 +1303,60 @@ impl Server {
         self.publish_all(uri)
     }
 
+    /// Say what poly is holding, so a growing RSS can be blamed on something.
+    ///
+    /// The soak in `tools/lsp-smoke.py` has always been able to see the daemon
+    /// get bigger and never able to say what got bigger -- `ps` reports one
+    /// number and poly has six places to keep something. These are those six,
+    /// and RSS is printed beside them so a line stands on its own.
+    ///
+    /// Written on open and close rather than on a timer. Those are the two
+    /// events that change what poly holds by a whole document, a timer would
+    /// repeat the same numbers at an idle daemon forever, and neither one needs
+    /// a thread that can see `Server`.
+    ///
+    /// Diagnostics are counted, not weighed: knowing that the package map holds
+    /// 4,000 findings is what points at golangci-lint, and a byte count of the
+    /// same thing would need every one of them serialized to produce it.
+    fn log_memory(&self, event: &str) {
+        if !self.memory_log {
+            return;
+        }
+        let text: usize = self.documents.values().map(String::len).sum();
+        let diagnostics = self.lock();
+        let package: usize = diagnostics.package.values().map(HashMap::len).sum();
+        let package_found: usize = diagnostics
+            .package
+            .values()
+            .flat_map(HashMap::values)
+            .map(Vec::len)
+            .sum();
+        let lint: usize = diagnostics.lint.values().map(Vec::len).sum();
+        let downstream_found: usize = diagnostics.downstream.values().map(Vec::len).sum();
+        let servers: Vec<&str> = self
+            .downstream
+            .iter()
+            .filter(|(_, running)| running.is_some())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        eprintln!(
+            "[poly] memory after {event}: rss {}; {} documents {}; {} lint hashes; \
+             {} package scopes; findings lint {lint} package {package_found} over {package} files, \
+             format {}, downstream {downstream_found}; servers {}",
+            rss_kb().map_or_else(|| "?".to_string(), human_kb),
+            self.documents.len(),
+            human_kb(text as u64 / 1024),
+            self.lint_hashes.len(),
+            self.package_roots.len(),
+            diagnostics.format.len(),
+            if servers.is_empty() {
+                "none".to_string()
+            } else {
+                servers.join(", ")
+            },
+        );
+    }
+
     /// Ask for a whole-package lint of the module this document belongs to.
     ///
     /// `fresh` is what separates the two callers. A save wants a new answer and
@@ -1380,6 +1442,52 @@ impl Server {
 fn uri_path(uri: &Url) -> PathBuf {
     uri.to_file_path()
         .unwrap_or_else(|_| PathBuf::from(uri.path()))
+}
+
+/// This process's resident set, in kilobytes.
+///
+/// Two implementations because the two platforms keep it in different places,
+/// and `None` on anything else rather than a number that might be a guess: a
+/// memory log whose memory figure is wrong is worse than one without it.
+///
+/// Linux reads `VmRSS` out of `/proc/self/status` rather than the resident
+/// pages in `statm`, which would need the page size and get it wrong on the
+/// 16K-page arm64 kernels. macOS has no `/proc`, so it asks `ps` -- one
+/// short-lived process per file opened, which is the price of not linking a
+/// crate for one number behind a setting that ships off.
+#[cfg(target_os = "linux")]
+fn rss_kb() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn rss_kb() -> Option<u64> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rss_kb() -> Option<u64> {
+    None
+}
+
+/// Kilobytes as something a person reads without counting digits.
+fn human_kb(kb: u64) -> String {
+    if kb < 1024 {
+        format!("{kb} KB")
+    } else {
+        format!("{:.1} MB", kb as f64 / 1024.0)
+    }
 }
 
 /// The document a routed request is about.

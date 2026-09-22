@@ -7,13 +7,26 @@ Exits non-zero on any failed expectation.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "cli/target/release/poly"
 
-proc = subprocess.Popen([BIN, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+# The daemon's own log, kept rather than inherited: `poly.memoryLog` writes one
+# line per open and close saying what poly is holding, and the soak at the
+# bottom reads them. Everything else poly reports goes here too, which is why
+# the path is printed on the way out -- a failure worth reading is usually
+# explained by a line above it.
+LOG_PATH = os.path.join(tempfile.mkdtemp(prefix="poly-smoke-log-"), "daemon.log")
+# Not a context manager: the daemon writes to this fd until it exits, which is
+# the last thing this script does. A `with` would have to wrap the file.
+log_file = open(LOG_PATH, "w")  # poly: ignore ruff/SIM115
+
+proc = subprocess.Popen(
+    [BIN, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log_file
+)
 
 
 def send(msg):
@@ -72,7 +85,14 @@ send(
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
-        "params": {"processId": None, "rootUri": None, "capabilities": {}},
+        "params": {
+            "processId": None,
+            "rootUri": None,
+            "capabilities": {},
+            # On for the whole run, because the soak needs the per-close lines
+            # and there is nothing to be gained by turning it on halfway.
+            "initializationOptions": {"memoryLog": True},
+        },
     }
 )
 init = recv_response(1)
@@ -587,6 +607,47 @@ somewhere is going to have an opinion about, followed by a list:
         f" {drift_mb:+.1f} MB, series {[round(kb / 1024) for kb in marks]}"
     )
 
+    # The half of the question RSS cannot answer.
+    #
+    # `ps` reports one number for a process that keeps documents, lint hashes,
+    # package scopes and four kinds of finding, so a drift within budget is
+    # consistent with one of those maps never letting go of an entry -- the
+    # allocator hides small leaks behind blocks it already had. `poly.memoryLog`
+    # is the daemon saying what it holds, and these counts are exact rather than
+    # sampled: every round opens four documents and closes all four, so the line
+    # written by the last close of round 120 has to read the same as the line
+    # written by the last close of round 1. Anything that grows by one per round
+    # is a map with no `remove` behind it, and it names itself.
+    #
+    # Proved red 2026-09-22 by taking `lint_hashes.remove` out of didClose: RSS
+    # drifted +0.2MB and passed its budget, while this printed hashes 12 -> 488.
+    # That is the whole case for the assertion -- a Url and a u64 per closed
+    # file is a leak the allocator hides and `ps` will never show.
+    log_file.flush()
+    HELD = re.compile(
+        r"memory after didClose: .*?(?P<documents>\d+) documents .*?"
+        r"(?P<hashes>\d+) lint hashes; (?P<scopes>\d+) package scopes; "
+        r"findings lint (?P<lint>\d+) package (?P<package>\d+) over (?P<files>\d+) files, "
+        r"format (?P<format>\d+), downstream (?P<downstream>\d+)"
+    )
+    with open(LOG_PATH) as f:
+        held = [m.groupdict() for m in (HELD.search(line) for line in f) if m]
+    assert len(held) >= SOAK_ROUNDS, (
+        f"poly.memoryLog wrote {len(held)} usable close lines for {SOAK_ROUNDS}"
+        f" rounds of four documents -- the log is in {LOG_PATH}"
+    )
+    # One line per closed document, four per round, so a round's last close is
+    # the one that has handed everything back.
+    first, last = held[len(SOAK_DOCS) - 1], held[-1]
+    print("daemon held, first soak round -> last:")
+    for key in first:
+        print(f"  {key:11} {first[key]} -> {last[key]}")
+    grew = [key for key in first if int(last[key]) > int(first[key])]
+    assert not grew, (
+        f"poly kept more after {SOAK_ROUNDS} rounds of open/close than after one,"
+        f" in {', '.join(grew)}: {first} -> {last}"
+    )
+
 send({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": None})
 recv_response(3)
 send({"jsonrpc": "2.0", "method": "exit", "params": None})
@@ -596,8 +657,11 @@ except subprocess.TimeoutExpired:
     proc.kill()
     raise SystemExit("FAIL: server did not exit after `exit` notification")
 assert proc.returncode == 0, f"server exit code {proc.returncode}"
+log_file.close()
+print(f"daemon log: {LOG_PATH}")
 print(
     "LSP SMOKE PASS: formatting, Format Selection, diagnostics, spelling,"
     " lint excludes, rule hover, batch executeCommand, minify, .editorconfig,"
-    " unhandled methods declined, RSS settles under a soak, clean shutdown"
+    " unhandled methods declined, RSS settles under a soak, poly hands back"
+    " everything it held, clean shutdown"
 )

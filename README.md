@@ -76,6 +76,12 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   Poly 輸出面板。clangd 與 terraform-ls 每個請求寫一行，嫌吵就關掉——關掉是整份丟棄，
   不是去叫各家 server 安靜（有些根本沒這種旗標）。poly 自己的訊息（server 不在 PATH、
   啟動就掛）不受影響。
+- **`poly.memoryLog`（預設關閉）**：每開一個檔、關一個檔，寫一行 daemon 現在握著什麼：
+  常駐記憶體、幾份文件與多少位元組、lint 與整包快取、各來源留著幾筆診斷、哪些 language
+  server 在跑。RSS 只有一個數字，而 poly 有六個地方放東西——這一行的用處是讓漲上去的
+  數字歸到某一個快取頭上。`tools/lsp-smoke.py` 的 soak 也讀它：120 輪開關之後，poly
+  握著的每一項都必須跟第 1 輪一樣多（實測把 `lint_hashes` 的清除拿掉，RSS 只漂
+  +0.2 MB 照樣綠，而這條直接指名 hashes 12 → 488）。
 - **專案內工具優先**：偵測到專案的 biome／prettier／eslint／rustfmt 就用它們，
   避免和團隊 CI 結果不一致。
 - 背景檢查 GitHub Releases（預設 7 天一次，可調可關），一鍵更新裝了的那幾個

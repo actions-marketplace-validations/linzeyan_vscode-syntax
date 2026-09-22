@@ -691,6 +691,11 @@ export async function activate(context: vscode.ExtensionContext) {
         languageServerLogs: vscode.workspace
           .getConfiguration("poly")
           .get<boolean>("languageServerLogs", true),
+        // And again: the daemon reads it once, so turning it on mid-session
+        // logs nothing until the window reloads.
+        memoryLog: vscode.workspace
+          .getConfiguration("poly")
+          .get<boolean>("memoryLog", false),
       },
       // The suspend switch, applied here rather than in the daemon: the daemon
       // would have to be told about the setting and would still answer the
