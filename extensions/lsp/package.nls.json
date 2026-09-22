@@ -8,7 +8,7 @@
   "command.formatGitChanged.title": "Poly: Format Git Changed Files",
   "command.lintPath.title": "Poly: Lint (poly check)",
   "command.analyzeDeadCode.title": "Poly: Analyze Dead Code",
-  "command.minifyJson.title": "Poly: Minify JSON",
+  "command.minify.title": "Poly: Minify",
   "command.toggleFormat.title": "Poly: Toggle Formatting",
   "command.checkForUpdates.title": "Poly: Check for Updates",
   "command.showOutput.title": "Poly: Show Log",

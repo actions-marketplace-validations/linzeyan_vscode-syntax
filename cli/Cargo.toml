@@ -28,7 +28,13 @@ content_inspector = "0.2"
 # dprint-plugin-typescript is built on it -- so the version has to be the one
 # that resolves there: two deno_asts means two `SourcePos` types, and the one
 # deno_lint returns would be the other.
-deno_ast = "0.53"
+#
+# `codegen` re-exports swc_ecma_codegen, which is how `poly minify` prints
+# JavaScript back out. Through deno_ast rather than named directly for the same
+# reason the crate is here at all: the emitter has to be the one that matches
+# the parser that produced the tree, and pinning two swc crates by hand to keep
+# them in step is a job cargo already does through this feature.
+deno_ast = { version = "0.53", features = ["codegen"] }
 # JavaScript and TypeScript lint, embedded rather than downloaded. The crate
 # `deno lint` itself is built from, so the rules, codes, fixes, documentation
 # links and `// deno-lint-ignore` handling are the tool's own (09 §4.2). Exact
@@ -72,6 +78,20 @@ ignore = "0.4"
 # config costs a feature rather than a dependency -- and it is the same parser
 # `deno lint` reads that file with.
 jsonc-parser = { version = "0.33", features = ["serde"] }
+# CSS's printer for `poly minify`. A parser is unavoidable here -- CSS
+# whitespace is only mostly insignificant, and the exceptions (the descendant
+# combinator in `a b`, the spaces inside `calc(1px + 2px)`, anything inside a
+# string or a `url()`) are exactly what a text-level stripper gets wrong -- and
+# malva, which formats CSS today, can only print wide.
+#
+# Only `to_css(PrinterOptions { minify: true })` is called, never the crate's
+# own `minify()` transform: that one merges rules, rewrites colours and drops
+# declarations it believes are shadowed, which is a different file rather than
+# the same file written smaller. Default features off because every one of them
+# is something poly already is or does not want: `bundler` resolves `@import`
+# from disk, `nodejs` and `jsonschema` are the napi bindings, `rayon` is a
+# second thread pool next to poly's own.
+lightningcss = { version = "1.0.0-alpha.72", default-features = false }
 lsp-server = "0.7"
 lsp-types = "0.94"
 # PHP's formatter and linter. The top-level `mago` crate is the CLI; the work is
@@ -100,6 +120,18 @@ mago-span = "=1.47.6"
 mago-syntax = "=1.47.6"
 malva = "0.16"
 markup_fmt = "0.27"
+# HTML's printer for `poly minify`, and the one place where a dependency is
+# bought for its exceptions rather than its rule. Collapsing whitespace in HTML
+# is wrong inside `<pre>`, `<textarea>` and every inline element, where a space
+# between two tags is a space the browser renders; the table of which element is
+# which is the crate, and a hand-rolled stripper that got it wrong would change
+# how the page looks rather than how large it is.
+#
+# Configured well below its defaults -- see `minify_html` -- because those
+# defaults are a shipping minifier's: they drop optional closing tags, unquote
+# attributes and rewrite boolean attributes, none of which is "the same document
+# with what a machine does not read removed".
+minify-html = "0.18"
 pretty_graphql = "0.2"
 pretty_yaml = "0.6"
 # The descriptor types protox-parse hands a parsed .proto back in. Named

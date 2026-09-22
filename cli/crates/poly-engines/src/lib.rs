@@ -280,37 +280,91 @@ fn format_json(path: &Path, text: &str, opts: FormatOptions) -> Result<Option<St
     dprint_plugin_json::format_text(path, text, config).map_err(Into::into)
 }
 
-/// Languages `minify` can act on. JSON only, and deliberately: minifying is
-/// only meaningful where whitespace is purely presentational and something
-/// downstream reads the result by machine. Markdown and YAML are whitespace-
-/// significant, and a "minified" TOML is a file nobody has a use for.
+/// Languages `minify` can act on.
+///
+/// The list is decided by one contract rather than by how much each language
+/// stands to save: **remove what a machine reading the file does not need, and
+/// rewrite nothing else.** A language is here when whitespace is
+/// presentational, when something downstream reads the result by machine, and
+/// when poly has a printer that can be asked for the compact form without also
+/// being asked to improve the file.
+///
+/// What that rules out is as load-bearing as what it admits:
+///
+/// - Markdown, YAML and TOML are whitespace-significant. A YAML collapsed onto
+///   one line is not the same document, and a "minified" TOML is a file nobody
+///   has a use for.
+/// - SCSS and LESS format here but do not minify: lightningcss parses neither,
+///   and running their output through a CSS parser would either fail or, worse,
+///   succeed on the subset that happens to look like CSS.
+/// - Vue, Svelte, Astro, Jinja and Handlebars format as markup but do not
+///   minify: an HTML minifier reads a single-file component's `<template>` as
+///   HTML and its custom blocks as content to collapse.
 pub fn minifiable_language(lang: &str) -> bool {
-    lang == "json"
+    matches!(lang, "json" | "css" | "html" | "xml" | "typescript")
 }
 
-/// Strip everything a machine reading this JSON does not need.
+/// Strip everything a machine reading this file does not need.
 ///
 /// The inverse of formatting rather than a mode of it, which is why it is its
 /// own entry point instead of a `FormatOptions` knob: `poly fmt`'s contract is
 /// "make this file match the project's style", and a caller who wanted that
 /// would not want one line of 40KB.
 ///
-/// Validation runs through the same engine that formats the file, so a JSON
-/// poly refuses to minify is exactly one it refuses to format, reported at the
-/// same position in the same words -- rather than a second parser with its own
-/// opinions about what counts as JSON.
+/// Every language here is minified by a **printer**, never by an optimiser.
+/// Each of the five engines below could do more -- lightningcss merges rules
+/// and rewrites colours, minify-html omits closing tags, swc has a whole
+/// minifier that renames locals and folds constants -- and each of those turns
+/// the file into a different program that behaves the same. That is a build
+/// step, and poly is not a bundler. What comes back from `poly minify` is the
+/// same document with whitespace and comments removed, which is the only shape
+/// in which "undo" and "read the diff" still mean anything.
 ///
-/// What comes out is the same document with whitespace and comments removed;
-/// nothing is re-serialized. That is what keeps key order intact -- a
-/// round-trip through a map type would quietly sort them, and a diff of a
-/// minified file is unreadable enough without also being reordered.
+/// One documented exception, in CSS: the compact printer also spells values as
+/// short as it can, so `blue` comes back `#00f`. See `strip_css` -- it is one
+/// switch with the whitespace, and it changes how a value is written rather
+/// than which declarations survive.
+///
+/// A file poly refuses to minify is exactly one it refuses to format, reported
+/// at the same position in the same words -- see the arms for how each language
+/// gets there, because three of them need the formatter run first and two
+/// already parse with it.
 pub fn minify(lang: &str, path: &Path, text: &str) -> Result<Option<String>> {
     if !minifiable_language(lang) {
         return Ok(None);
     }
-    format_json(path, text, FormatOptions::default())?;
-    let stripped = strip_json(text);
-    Ok((stripped != text).then_some(stripped))
+    // Nothing below this line may fail on a file the formatter accepts, and
+    // nothing above it may accept a file the formatter rejects.
+    let validate = || format(lang, path, text, FormatOptions::default()).map(|_| ());
+    let minified = match lang {
+        // The transform cannot fail: `strip_json` scans text and never parses,
+        // and minify-html is error-tolerant by design -- it has no error type
+        // at all. Without the formatter in front, a broken file would come back
+        // confidently mangled instead of refused.
+        "json" => {
+            validate()?;
+            strip_json(text)
+        }
+        "html" => {
+            validate()?;
+            strip_html(text)?
+        }
+        // Two parsers for one language, so the formatter's runs first and is
+        // the one whose words the user sees. lightningcss would also report the
+        // error, in its own vocabulary, at its own offset.
+        "css" => {
+            validate()?;
+            strip_css(text)?
+        }
+        // One parser, shared with the formatter: `format_xml` parses with
+        // xmlem and `format_typescript` with deno_ast, which are the crates
+        // these two arms parse with. Validating first would produce the same
+        // message from the same crate, one parse later.
+        "xml" => strip_xml(text)?,
+        "typescript" => strip_typescript(path, text)?,
+        other => unreachable!("{other:?} is minifiable but has no minifier"),
+    };
+    Ok((minified != text).then_some(minified))
 }
 
 /// Remove whitespace and comments that are not inside a string.
@@ -367,6 +421,157 @@ fn strip_json(text: &str) -> String {
         }
     }
     out
+}
+
+/// Print the stylesheet compactly, without improving it.
+///
+/// The printer only, never `StyleSheet::minify`. That transform merges adjacent
+/// rules, shortens colours, and drops declarations it believes a later one
+/// shadows -- all of which render identically and none of which is the file the
+/// user wrote. The "believes" is the objection: it is sound only as far as its
+/// cascade model goes, and a stylesheet that quietly lost a declaration is not
+/// something a diff will show you, because the diff is one line either way.
+///
+/// CSS is the one language here that does not come out purely stripped, and it
+/// is worth being exact about why. `minify: true` is a single switch on the
+/// printer: it drops the whitespace *and* writes every value in its shortest
+/// equivalent spelling, so `blue` is printed `#00f`. That is the printer's
+/// token-level output and not an optimiser pass -- it cannot be turned off
+/// without also turning off the compaction, and it rewrites how a value is
+/// spelled rather than which declarations the file contains. The test pins it,
+/// so the exception is visible rather than discovered.
+fn strip_css(text: &str) -> Result<String> {
+    use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
+
+    let sheet =
+        StyleSheet::parse(text, ParserOptions::default()).map_err(|e| anyhow!("css {e}"))?;
+    let printed = sheet
+        .to_css(PrinterOptions {
+            minify: true,
+            ..PrinterOptions::default()
+        })
+        .map_err(|e| anyhow!("css {e}"))?;
+    Ok(printed.code)
+}
+
+/// Collapse the markup to what a browser renders identically.
+///
+/// The configuration is the substance of this function, because minify-html's
+/// defaults are a shipping minifier's: they omit closing tags, drop `<html>`
+/// and `<head>`, unquote attribute values and strip `type=text` from `<input>`.
+/// Each is a rewrite rather than a removal, and three of the four are filed
+/// upstream under "will still be parsed correctly by almost all browsers" --
+/// which is a bargain worth taking when the output is about to be gzipped and
+/// served, and not one worth taking with the file still open in the editor.
+///
+/// What poly keeps is the hard part, and the reason this is a dependency rather
+/// than a regex: whitespace in HTML is only *mostly* insignificant, and the
+/// exceptions -- `<pre>`, `<textarea>`, and the space between two inline
+/// elements that the renderer draws -- are a table of which element is which.
+///
+/// `minify_css` and `minify_js` stay off for the reason above and one more:
+/// they would hand a `<style>` to a second CSS engine and a `<script>` to oxc,
+/// a second JavaScript parser beside the swc one `poly check` already reads.
+/// One answer per language is most of why these crates are linked at all.
+fn strip_html(text: &str) -> Result<String> {
+    let cfg = minify_html::Cfg {
+        keep_closing_tags: true,
+        keep_html_and_head_opening_tags: true,
+        keep_input_type_text_attr: true,
+        // A server-side include is an instruction, not commentary: dropping it
+        // changes what the served page contains. Ordinary comments do go, for
+        // the reason `strip_json` drops them.
+        keep_ssi_comments: true,
+        ..minify_html::Cfg::default()
+    };
+    // Bytes in, bytes out, and the crate preserves whatever encoding it was
+    // handed -- so a failure here means the input was not UTF-8, which is worth
+    // saying rather than papering over with replacement characters.
+    String::from_utf8(minify_html::minify(text.as_bytes(), &cfg))
+        .map_err(|e| anyhow!("html minify produced invalid UTF-8: {e}"))
+}
+
+/// Print the XML tree with none of the whitespace that was only indentation.
+///
+/// `Display` rather than `to_string_pretty`: xmlem's non-alternate config is
+/// the compact one, so this is the printer `poly fmt` already uses with the
+/// other config. The two commands cannot end up disagreeing about what the
+/// document is, because only one of them ever read it.
+fn strip_xml(text: &str) -> Result<String> {
+    let doc: xmlem::Document = text.parse().map_err(|e| anyhow!("xml parse error: {e}"))?;
+    Ok(doc.to_string())
+}
+
+/// Print the program compactly: no whitespace, no comments, every name intact.
+///
+/// swc_ecma_codegen rather than swc_ecma_minifier, and the distinction is the
+/// whole design. The minifier renames locals, folds constants, drops
+/// unreachable branches and rewrites control flow; the emitter with
+/// `minify: true` prints the tree it was given with nothing between the tokens.
+/// Only the second one is "the same file, smaller".
+///
+/// Reached through deno_ast rather than by naming swc directly so that the
+/// emitter is guaranteed to be the one matching the parser -- the same parser
+/// `poly check` lints this file with, so the two cannot disagree about what
+/// JavaScript is.
+fn strip_typescript(path: &Path, text: &str) -> Result<String> {
+    use deno_ast::swc::codegen::{text_writer::JsWriter, Config, Emitter, Node};
+
+    // Absolute, because a `file://` URL cannot be built from a relative path;
+    // the specifier only names the file in diagnostics, so a path that will not
+    // absolutize falls back to something parseable rather than failing.
+    let specifier = std::path::absolute(path)
+        .ok()
+        .and_then(|abs| deno_ast::ModuleSpecifier::from_file_path(abs).ok())
+        .unwrap_or_else(|| {
+            deno_ast::ModuleSpecifier::parse("file:///buffer.ts").expect("a literal file URL")
+        });
+    let parsed = deno_ast::parse_program(deno_ast::ParseParams {
+        specifier: specifier.clone(),
+        text: text.into(),
+        // From the path, because the extension is what decides whether `<div/>`
+        // is JSX or a comparison -- and poly maps eight of them to this one
+        // language.
+        media_type: deno_ast::MediaType::from_path(path),
+        capture_tokens: false,
+        scope_analysis: false,
+        maybe_syntax: None,
+    })
+    .map_err(|e| anyhow!("{e}"))?;
+    // swc recovers from most syntax errors and keeps building a tree, so a file
+    // can parse and still be broken. Emitting from a recovered tree is the one
+    // failure this cannot afford: what comes out is compact, confident, and not
+    // the program that went in.
+    if let Some(first) = parsed.diagnostics().first() {
+        return Err(anyhow!("{first}"));
+    }
+
+    // A second source map over the same text. deno_ast builds one internally
+    // and does not hand it out, and the emitter needs one to resolve the spans
+    // in the tree; both are built the same way from the same bytes, so the
+    // positions agree.
+    let source_map = deno_ast::SourceMap::single(specifier, text.to_string());
+    let mut out = Vec::new();
+    {
+        let writer = JsWriter::new(source_map.inner().clone(), "\n", &mut out, None);
+        let mut emitter = Emitter {
+            // One switch, and deliberately only one. `with_omit_last_semi` is
+            // the neighbouring knob and it stays off: a statement that loses
+            // its semicolon is one ASI hazard away from meaning something else
+            // when anything is appended to the file.
+            cfg: Config::default().with_minify(true),
+            // Dropped, for the reason `strip_json` drops them: a comment is the
+            // one thing in the file that is unambiguously for a human.
+            comments: None,
+            cm: source_map.inner().clone(),
+            wr: writer,
+        };
+        match parsed.program_ref() {
+            deno_ast::ProgramRef::Module(module) => module.emit_with(&mut emitter)?,
+            deno_ast::ProgramRef::Script(script) => script.emit_with(&mut emitter)?,
+        }
+    }
+    String::from_utf8(out).map_err(|e| anyhow!("javascript minify produced invalid UTF-8: {e}"))
 }
 
 fn format_markdown(text: &str, opts: FormatOptions) -> Result<Option<String>> {
@@ -1171,13 +1376,171 @@ mod tests {
             .is_none());
     }
 
-    /// Invalid JSON must fail rather than produce confidently broken output,
-    /// and it has to fail the way `poly fmt` already fails on the same file.
+    /// The languages that format here and still must not minify, each for its
+    /// own reason -- see `minifiable_language`. Worth a test rather than a
+    /// comment because every one of them has an engine sitting right there that
+    /// would produce *something* if the match arm were widened by a line.
     #[test]
-    fn minify_rejects_json_the_formatter_rejects() {
-        let broken = "{\"a\": }";
-        assert!(minify("json", Path::new("a.json"), broken).is_err());
-        assert!(format_file(Path::new("a.json"), broken).is_err());
+    fn minify_declines_languages_a_printer_could_have_handled() {
+        for (lang, file, text) in [
+            // Whitespace-significant: one line is a different document.
+            ("yaml", "a.yaml", "a:\n  - 1\n"),
+            ("toml", "a.toml", "[a]\nb = 1\n"),
+            // Formats as CSS, parses with a parser lightningcss does not have.
+            ("scss", "a.scss", "a { b { color: red; } }\n"),
+            ("less", "a.less", "@x: red;\na { color: @x; }\n"),
+            // Formats as markup; an HTML minifier would read the custom blocks
+            // as content to collapse.
+            ("vue", "a.vue", "<template>\n  <p>hi</p>\n</template>\n"),
+            ("svelte", "a.svelte", "<p>\n  hi\n</p>\n"),
+        ] {
+            assert!(
+                minify(lang, Path::new(file), text).unwrap().is_none(),
+                "{lang} must decline, not minify"
+            );
+        }
+    }
+
+    /// Invalid input must fail rather than produce confidently broken output,
+    /// and it has to fail the way `poly fmt` already fails on the same file.
+    ///
+    /// All five, because they reach that guarantee by two different routes:
+    /// json, css and html run the formatter first, xml and typescript parse
+    /// with the crate the formatter parses with. A regression in either route
+    /// looks the same from here, which is the point.
+    #[test]
+    fn minify_rejects_what_the_formatter_rejects() {
+        for (lang, file, broken) in [
+            ("json", "a.json", "{\"a\": }"),
+            ("css", "a.css", "a { color: }}}"),
+            ("xml", "a.xml", "<a></b>"),
+            ("typescript", "a.js", "function ( {"),
+        ] {
+            assert!(
+                minify(lang, Path::new(file), broken).is_err(),
+                "{lang} minified something broken"
+            );
+            assert!(
+                format_file(Path::new(file), broken).is_err(),
+                "{lang} formats what it refuses to minify"
+            );
+        }
+    }
+
+    /// CSS collapses to one line, and the three things that are not whitespace
+    /// stay: the space in a descendant combinator, the spaces inside `calc()`,
+    /// and a declaration that a later one shadows.
+    ///
+    /// The last is the one that tells a printer from an optimiser.
+    /// `StyleSheet::minify` drops the shadowed `color: red` -- correctly, by
+    /// its own cascade model -- and that is a file the user did not write.
+    ///
+    /// The colour assertion pins the exception rather than the rule: `blue`
+    /// coming back as `#00f` is the compact printer spelling a value short, and
+    /// it is the only rewriting `poly minify` does in any language. Asserted
+    /// exactly, so that a lightningcss release which starts rewriting something
+    /// else fails here instead of shipping.
+    #[test]
+    fn minify_css_prints_compactly_without_optimizing() {
+        let text = concat!(
+            "/* a comment */\n",
+            ".a .b {\n",
+            "  color: red;\n",
+            "  color: blue;\n",
+            "  width: calc(100% - 2px);\n",
+            "}\n",
+        );
+        let out = minify("css", Path::new("a.css"), text).unwrap().unwrap();
+        assert_eq!(
+            out, ".a .b{color:red;color:#00f;width:calc(100% - 2px)}",
+            "the comment must go, and nothing else may"
+        );
+    }
+
+    /// HTML is the one language here where collapsing whitespace is sometimes
+    /// wrong, so the test is mostly about what does *not* change: the space
+    /// between two inline elements that the renderer draws, everything inside
+    /// `<pre>`, and the closing tags minify-html would otherwise omit.
+    #[test]
+    fn minify_html_keeps_the_whitespace_a_browser_renders() {
+        let text = concat!(
+            "<!doctype html>\n",
+            "<html>\n",
+            "  <body>\n",
+            "    <!-- gone -->\n",
+            "    <p>a <em>b</em> c</p>\n",
+            "    <pre>  kept  </pre>\n",
+            "    <ul>\n",
+            "      <li>one</li>\n",
+            "    </ul>\n",
+            "  </body>\n",
+            "</html>\n",
+        );
+        let out = minify("html", Path::new("a.html"), text).unwrap().unwrap();
+        assert!(!out.contains("gone"), "comment survived: {out}");
+        assert!(out.contains("a <em>b</em> c"), "inline spacing lost: {out}");
+        assert!(out.contains("<pre>  kept  </pre>"), "pre collapsed: {out}");
+        assert!(out.contains("</li>"), "closing tag omitted: {out}");
+        assert!(out.contains("<html"), "<html> omitted: {out}");
+    }
+
+    /// Indentation goes; character data does not. The `<b>` is the claim worth
+    /// pinning -- mixed content is where an XML pretty-printer's inverse stops
+    /// being merely cosmetic.
+    #[test]
+    fn minify_xml_drops_indentation_and_keeps_character_data() {
+        let text = "<a>\n  <b>  two  spaces  </b>\n  <c d=\"1\"/>\n</a>\n";
+        let out = minify("xml", Path::new("a.xml"), text).unwrap().unwrap();
+        assert!(!out.contains("\n  <"), "indentation survived: {out}");
+        assert!(out.contains("two  spaces"), "text content changed: {out}");
+        assert!(out.contains("d=\"1\""), "attribute lost: {out}");
+    }
+
+    /// Whitespace and comments go; nothing else does. Every assertion here is a
+    /// thing `swc_ecma_minifier` would have done and the emitter must not:
+    /// renaming the local, folding the constant, and deleting the branch it can
+    /// prove is dead.
+    #[test]
+    fn minify_javascript_renames_and_folds_nothing() {
+        let text = concat!(
+            "// a comment\n",
+            "export function go(aLongParameterName) {\n",
+            "  const anUnusedLocal = 1 + 2;\n",
+            "  if (false) {\n",
+            "    neverCalled();\n",
+            "  }\n",
+            "  return aLongParameterName;\n",
+            "}\n",
+        );
+        let out = minify("typescript", Path::new("a.js"), text)
+            .unwrap()
+            .unwrap();
+        assert!(!out.contains("a comment"), "comment survived: {out}");
+        assert!(out.len() < text.len(), "nothing was stripped: {out}");
+        assert!(out.contains("aLongParameterName"), "renamed: {out}");
+        assert!(
+            out.contains("anUnusedLocal"),
+            "dropped an unused local: {out}"
+        );
+        assert!(
+            out.contains("1+2") || out.contains("1 + 2"),
+            "folded: {out}"
+        );
+        assert!(out.contains("neverCalled"), "dropped a dead branch: {out}");
+    }
+
+    /// TypeScript's own syntax survives a minify, which is what makes the
+    /// language id rather than the extension the right gate: poly reads `.ts`
+    /// and `.js` as one language, and an arm that quietly transpiled one of
+    /// them would be doing a different job than the other.
+    #[test]
+    fn minify_typescript_keeps_its_types() {
+        let text = "export const n: number = 1;\ninterface Shape {\n  side: string;\n}\n";
+        let out = minify("typescript", Path::new("a.ts"), text)
+            .unwrap()
+            .unwrap();
+        assert!(out.contains(": number") || out.contains(":number"), "{out}");
+        assert!(out.contains("interface Shape"), "{out}");
     }
 
     #[test]

@@ -65,7 +65,7 @@ pub fn text(lang: Lang) -> String {
 usage:
   poly fmt   [paths...] [flags]         format in place
   poly check [paths...] [flags]         run the linters
-  poly minify [paths...] [flags]        strip JSON to one line, in place
+  poly minify [paths...] [flags]        strip comments and whitespace, in place
   poly tools <list|install> [tool...]   inspect or pre-fetch external tools
   poly config export                    print poly.toml with every default and comment
   poly deadcode [path]                  code no entry point reaches (go, js/ts, python)
@@ -101,7 +101,7 @@ language: POLY_LANG=en or POLY_LANG=zh-TW (defaults to the system locale).
 用法：
   poly fmt   [路徑...] [旗標]           就地格式化
   poly check [路徑...] [旗標]           跑 linter
-  poly minify [路徑...] [旗標]          把 JSON 壓成一行，就地改寫
+  poly minify [路徑...] [旗標]          去掉註解與空白，就地改寫
   poly tools <list|install> [工具...]   查看或預先抓取外部工具
   poly config export                    印出含所有預設值與註解的 poly.toml
   poly deadcode [路徑]                  進入點走不到的程式碼（go、js/ts、python）

@@ -195,38 +195,73 @@ with open(batch_file) as f:
 # Minify via executeCommand: the editor command that replaces a JSON Tools
 # install. Edits rather than a file write, because the buffer it acts on may
 # never have been saved -- so this asserts on what comes back, not on disk.
-MINIFY_URI = "file:///tmp/smoke-minify.json"
-send(
-    {
-        "jsonrpc": "2.0",
-        "method": "textDocument/didOpen",
-        "params": {
-            "textDocument": {
-                "uri": MINIFY_URI,
-                "languageId": "json",
-                "version": 1,
-                # Key order and the spaces inside the string are the two things
-                # a round-trip through a JSON map type would quietly destroy.
-                "text": '{\n  "b": 1,\n  "a": "two  spaces"\n}\n',
-            }
-        },
-    }
-)
-send(
-    {
-        "jsonrpc": "2.0",
-        "id": 11,
-        "method": "workspace/executeCommand",
-        "params": {
-            "command": "poly.minifyJsonEdits",
-            "arguments": [{"uri": MINIFY_URI}],
-        },
-    }
-)
-resp = recv_response(11)
-edits = resp.get("result")
-assert edits, f"expected minify edits: {resp}"
-assert edits[0]["newText"] == '{"b":1,"a":"two  spaces"}', edits[0]["newText"]
+#
+# Three languages and not one, because the daemon's dispatch is the thing under
+# test here rather than the engines: `run_minify` looks the language up with
+# poly's own detection and hands it to one entry point, and a unit test of that
+# entry point cannot tell that the daemon reached it. The expected strings are
+# the same ones `poly-engines` asserts, so a difference here is the daemon
+# taking a different route to the same function -- the failure that made this
+# file exist.
+MINIFY_CASES = [
+    (
+        11,
+        "file:///tmp/smoke-minify.json",
+        "json",
+        # Key order and the spaces inside the string are the two things a
+        # round-trip through a JSON map type would quietly destroy.
+        '{\n  "b": 1,\n  "a": "two  spaces"\n}\n',
+        '{"b":1,"a":"two  spaces"}',
+    ),
+    (
+        15,
+        "file:///tmp/smoke-minify.css",
+        "css",
+        "/* gone */\n.a .b {\n  color: red;\n}\n",
+        ".a .b{color:red}",
+    ),
+    (
+        16,
+        "file:///tmp/smoke-minify.js",
+        "javascript",
+        (
+            "// gone\nexport function go(aLongParameterName) {\n"
+            "  return aLongParameterName;\n}\n"
+        ),
+        # The name survives: this is a printer, not a minifier that mangles.
+        "export function go(aLongParameterName){return aLongParameterName;}",
+    ),
+]
+for request_id, uri, language_id, text, expected in MINIFY_CASES:
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language_id,
+                    "version": 1,
+                    "text": text,
+                }
+            },
+        }
+    )
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "workspace/executeCommand",
+            "params": {
+                "command": "poly.minifyEdits",
+                "arguments": [{"uri": uri}],
+            },
+        }
+    )
+    resp = recv_response(request_id)
+    edits = resp.get("result")
+    assert edits, f"expected {language_id} minify edits: {resp}"
+    assert edits[0]["newText"] == expected, (language_id, edits[0]["newText"])
 
 # .editorconfig, resolved by the daemon so the extension does not need a second
 # parser. Asked about a path that was never opened and in a language poly does

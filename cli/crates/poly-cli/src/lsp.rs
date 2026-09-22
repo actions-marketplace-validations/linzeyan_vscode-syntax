@@ -27,13 +27,13 @@ const METHOD_NOT_FOUND: i32 = -32601;
 /// registers every command a server advertises as an editor command of the same
 /// name, so sharing an id with `vscode.commands.registerCommand` makes that
 /// registration throw and the client never finishes starting -- no formatter,
-/// no diagnostics, no error anyone can see. Hence `poly.minifyJsonEdits` here
-/// against `poly.minifyJson` in package.json: the server hands back edits, the
+/// no diagnostics, no error anyone can see. Hence `poly.minifyEdits` here
+/// against `poly.minify` in package.json: the server hands back edits, the
 /// editor command is what applies them.
 const FORMAT_PATHS: &str = "poly.formatPaths";
-const MINIFY_JSON: &str = "poly.minifyJsonEdits";
+const MINIFY: &str = "poly.minifyEdits";
 const EDITOR_CONFIG: &str = "poly.editorConfig";
-pub(crate) const EXECUTE_COMMANDS: &[&str] = &[FORMAT_PATHS, MINIFY_JSON, EDITOR_CONFIG];
+pub(crate) const EXECUTE_COMMANDS: &[&str] = &[FORMAT_PATHS, MINIFY, EDITOR_CONFIG];
 
 pub fn run() -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
@@ -1082,7 +1082,7 @@ impl Server {
                 Ok(summary) => Response::new_ok(request.id, summary),
                 Err(e) => Response::new_err(request.id, INTERNAL_ERROR, format!("{e:#}")),
             },
-            MINIFY_JSON => self.run_minify(request.id, params.arguments.first()),
+            MINIFY => self.run_minify(request.id, params.arguments.first()),
             EDITOR_CONFIG => match editor_config(params.arguments.first()) {
                 Ok(settings) => Response::new_ok(request.id, settings),
                 Err(e) => Response::new_err(request.id, INTERNAL_ERROR, format!("{e:#}")),
@@ -1116,11 +1116,7 @@ impl Server {
             .and_then(serde_json::Value::as_str)
             .and_then(|u| Url::parse(u).ok());
         let Some(uri) = uri else {
-            return Response::new_err(
-                id,
-                INTERNAL_ERROR,
-                format!("{MINIFY_JSON} needs a uri argument"),
-            );
+            return Response::new_err(id, INTERNAL_ERROR, format!("{MINIFY} needs a uri argument"));
         };
         let Some(text) = self.documents.get(&uri).cloned() else {
             return Response::new_err(id, INTERNAL_ERROR, format!("{uri} is not open"));

@@ -368,7 +368,12 @@ fn cmd_fmt(inv: &Invocation) -> Result<i32> {
     Ok(if fatal { 1 } else { 0 })
 }
 
-/// `poly minify <paths>`: strip JSON down to what a machine needs.
+/// `poly minify <paths>`: strip a file down to what a machine needs.
+///
+/// JSON, CSS, HTML, XML, JavaScript and TypeScript; every other language in the
+/// walk is skipped rather than refused, because a caller who points this at a
+/// directory hands over every file in it. `minifiable_language` is where the
+/// list is decided and why.
 ///
 /// Its own command rather than a `poly fmt` flag because the two have opposite
 /// contracts -- `fmt` makes a file match the project's style, and nobody's

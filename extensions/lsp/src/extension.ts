@@ -94,6 +94,34 @@ const LANGUAGES = [
 // whose CI checks gofmt still passes, but a diff will show edits gofmt would
 // not have made.
 
+/**
+ * Editor language ids `poly.minify` offers itself for.
+ *
+ * poly's own five (`minifiable_language` in poly-engines) spelled in the
+ * editor's vocabulary, which needs more names than poly does: `json` splits
+ * into `json` and `jsonc`, and poly's one `typescript` is four ids here once
+ * JSX is counted. `xml` is listed although a bare VSCode has no such language
+ * id -- a `.xml` with no XML extension installed reads as `plaintext`, falls
+ * through this list and gets the message, which is the right answer.
+ *
+ * A copy of a list that lives in Rust, and the only honest thing to say about
+ * that is that the copy is not what decides anything: the daemon refuses or
+ * accepts by poly's own detection, and this list only picks which sentence the
+ * user reads. What keeps the two in step is the e2e test, which opens a buffer
+ * per language and asserts an edit comes back -- a behaviour, not a list.
+ */
+const MINIFIABLE = [
+  "json",
+  "jsonc",
+  "css",
+  "html",
+  "xml",
+  "javascript",
+  "javascriptreact",
+  "typescript",
+  "typescriptreact",
+];
+
 let client: LanguageClient | undefined;
 let status: vscode.StatusBarItem | undefined;
 let formatToggle: vscode.StatusBarItem | undefined;
@@ -812,18 +840,21 @@ export async function activate(context: vscode.ExtensionContext) {
     // Minify is the inverse of what every other command here does, so it is
     // driven by the user rather than by a save: nothing about it belongs in
     // format-on-save, and `poly fmt` would undo it on the next run.
-    vscode.commands.registerCommand("poly.minifyJson", async () => {
+    vscode.commands.registerCommand("poly.minify", async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.document.uri.scheme !== "file") {
         return;
       }
       // Checked here so the message can say which of the two things went
       // wrong: the daemon answers "no edits" for a file that is already
-      // minified and for one that was never JSON, and those deserve different
-      // words.
-      if (!["json", "jsonc"].includes(editor.document.languageId)) {
+      // minified and for one poly does not minify, and those deserve different
+      // words. The daemon is still the authority -- it decides by poly's own
+      // detection, which a remapped extension can change -- so this list is
+      // only ever allowed to be the reason for a *message*.
+      if (!MINIFIABLE.includes(editor.document.languageId)) {
         vscode.window.showWarningMessage(
-          `Poly: Minify JSON needs a JSON file (this one is ${editor.document.languageId})`,
+          `Poly: Minify handles JSON, CSS, HTML, XML and JavaScript/TypeScript `
+            + `(this one is ${editor.document.languageId})`,
         );
         return;
       }
@@ -833,10 +864,10 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       try {
         const edits = (await client.sendRequest("workspace/executeCommand", {
-          // Not "poly.minifyJson": the client registers every command the
+          // Not "poly.minify": the client registers every command the
           // server advertises as an editor command, so an id shared with the
           // one registered above would collide and stop the client starting.
-          command: "poly.minifyJsonEdits",
+          command: "poly.minifyEdits",
           arguments: [{ uri: editor.document.uri.toString() }],
         })) as {
           range: {

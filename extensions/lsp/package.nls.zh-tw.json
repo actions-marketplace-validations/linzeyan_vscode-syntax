@@ -8,7 +8,7 @@
   "command.formatGitChanged.title": "Poly：格式化 Git 有變更的檔案",
   "command.lintPath.title": "Poly：檢查（poly check）",
   "command.analyzeDeadCode.title": "Poly：分析未使用的程式碼",
-  "command.minifyJson.title": "Poly：壓縮 JSON",
+  "command.minify.title": "Poly：壓縮檔案",
   "command.toggleFormat.title": "Poly：切換格式化開關",
   "command.checkForUpdates.title": "Poly：檢查更新",
   "command.showOutput.title": "Poly：顯示記錄",

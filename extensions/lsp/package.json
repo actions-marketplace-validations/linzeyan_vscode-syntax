@@ -101,8 +101,8 @@
         "title": "%command.analyzeDeadCode.title%"
       },
       {
-        "command": "poly.minifyJson",
-        "title": "%command.minifyJson.title%"
+        "command": "poly.minify",
+        "title": "%command.minify.title%"
       },
       {
         "command": "poly.toggleFormat",
@@ -135,10 +135,10 @@
     },
     "keybindings": [
       {
-        "command": "poly.minifyJson",
+        "command": "poly.minify",
         "key": "ctrl+alt+m",
         "mac": "cmd+alt+m",
-        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(json|jsonc)$/"
+        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(json|jsonc|css|html|xml|javascript|javascriptreact|typescript|typescriptreact)$/"
       }
     ],
     "configuration": {

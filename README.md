@@ -42,9 +42,11 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **Format Selection**：只格式化選取的範圍，其餘的行原封不動。
 - **Lint**：存檔即時 diagnostics 進 Problems panel；`Poly: Lint (poly check)`
   在終端跑完整 CLI。
-- **`Poly: Minify JSON`**：把當前 JSON／JSONC buffer 壓成一行。刻意**不**進
-  format-on-save——它是格式化的反向操作，`poly fmt` 下一次就會把它還原。改動以編輯器
-  edit 送出而非寫檔，所以 undo 是一個按鍵，未存檔的 buffer 也能用。
+- **`Poly: Minify`**（`cmd+alt+m`／`ctrl+alt+m`）：把當前 buffer 壓成一行，涵蓋
+  JSON／JSONC、CSS、HTML、XML、JavaScript／TypeScript。只移除空白與註解，不改名、
+  不折常數、不刪分支。刻意**不**進 format-on-save——它是格式化的反向操作，`poly fmt`
+  下一次就會把它還原。改動以編輯器 edit 送出而非寫檔，所以 undo 是一個按鍵，未存檔的
+  buffer 也能用。
 - **規則說明**：滑鼠移到 SQL 的波浪線上會顯示 sqruff 該條規則的 anti-pattern／
   best-practice 全文。sqruff 沒有文件站可連，那份說明編在 binary 裡，版本精確、
   離線可讀。其他工具有自己的規則頁，走規則代碼上的超連結。

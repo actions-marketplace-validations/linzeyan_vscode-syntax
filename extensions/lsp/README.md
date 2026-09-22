@@ -37,9 +37,13 @@
   - 三支工具 poly 都不代裝，各自來自該語言的 toolchain：`go install
     golang.org/x/tools/cmd/deadcode@latest`／`npm install --save-dev knip`／
     `pip install vulture`。`poly.deadCodeCodeLens.enabled` 可關。
-- **`Poly: Minify JSON`**：把當前 JSON／JSONC buffer 壓成一行（移除空白與註解，
-  保留 key 順序與字串內容）。命令面板執行。刻意不進 format-on-save：它是格式化的
-  反向，下一次 `poly fmt` 就會還原。CLI 對應 `poly minify <路徑>`。
+- **`Poly: Minify`**（`cmd+alt+m`／`ctrl+alt+m`）：把當前 buffer 壓成一行。涵蓋
+  JSON／JSONC、CSS、HTML、XML、JavaScript／TypeScript。只移除空白與註解，不做任何
+  語義改寫——不改名、不折常數、不刪它認為到不了的分支，所以 undo 與 diff 都還讀得懂。
+  唯一例外是 CSS：壓縮印表機同時會把值寫成最短等價形式（`blue` → `#00f`）。
+  YAML／TOML 不處理（換行有意義），SCSS／LESS 與 Vue／Svelte 也不處理。
+  刻意不進 format-on-save：它是格式化的反向，下一次 `poly fmt` 就會還原。
+  CLI 對應 `poly minify <路徑>`。
 - 專案內工具（biome／prettier／eslint／rustfmt）優先於內嵌引擎，與團隊 CI
   對齊；外部工具受管下載並以 sha256 lock 驗證。
 - rust／go／c／c++／swift／terraform 也能格式化（走各自的 toolchain），但不會

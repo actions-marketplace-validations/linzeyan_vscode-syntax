@@ -19,6 +19,7 @@ encoding_rs.workspace = true
 full_moon.workspace = true
 ignore.workspace = true
 jsonc-parser.workspace = true
+lightningcss.workspace = true
 mago-allocator.workspace = true
 mago-database.workspace = true
 mago-formatter.workspace = true
@@ -30,6 +31,7 @@ mago-span.workspace = true
 mago-syntax.workspace = true
 malva.workspace = true
 markup_fmt.workspace = true
+minify-html.workspace = true
 poly-core = { path = "../poly-core" }
 pretty_graphql.workspace = true
 pretty_yaml.workspace = true
