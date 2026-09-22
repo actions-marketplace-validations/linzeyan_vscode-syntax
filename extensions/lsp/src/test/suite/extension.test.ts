@@ -18,6 +18,7 @@ const COMMANDS = [
   "poly.lintPath",
   "poly.analyzeDeadCode",
   "poly.minifyJson",
+  "poly.toggleFormat",
   "poly.checkForUpdates",
   "poly.showOutput",
   "poly.createGoWork",
@@ -245,6 +246,49 @@ suite("poly-lsp in a real editor", () => {
       writeFile("messy.py", "def  f( a,b ):\n    return a+b\n"),
     );
     assert.strictEqual(text, "def f(a, b):\n    return a + b\n");
+  });
+
+  // The suspend switch lives in the client's middleware, so nothing in the
+  // protocol tests can see it: the daemon is asked the same question and gives
+  // the same answer, and the whole feature is the client deciding not to ask.
+  //
+  // Two files, not one. Formatting the control leaves it formatted, so a
+  // second pass over the same document returns no edits whether the switch is
+  // on or off -- which is exactly the shape of a test that passes against a
+  // broken switch.
+  test("suspending formatting stops poly rewriting a file", async () => {
+    const messy = "select a,b from t\n";
+    const config = vscode.workspace.getConfiguration("poly");
+    assert.strictEqual(await formatted(writeFile("resumed.sql", messy)), "select a, b from t\n");
+
+    await config.update("format.enabled", false, vscode.ConfigurationTarget.Workspace);
+    try {
+      const uri = writeFile("suspended.sql", messy);
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+      const edits = await vscode.commands.executeCommand<vscode.TextEdit[]>(
+        "vscode.executeFormatDocumentProvider",
+        uri,
+        { tabSize: 2, insertSpaces: true },
+      );
+      assert.deepStrictEqual(edits ?? [], [], "poly formatted a file while suspended");
+    } finally {
+      await config.update("format.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  test("the toggle command flips the switch both ways", async () => {
+    const value = () => vscode.workspace.getConfiguration("poly").get<boolean>("format.enabled");
+    assert.strictEqual(value(), true, "the switch did not start on");
+    try {
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(value(), false);
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(value(), true);
+    } finally {
+      await vscode.workspace
+        .getConfiguration("poly")
+        .update("format.enabled", undefined, vscode.ConfigurationTarget.Global);
+    }
   });
 
   test("publishes sqruff diagnostics into the Problems panel", async () => {

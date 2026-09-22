@@ -105,6 +105,10 @@
         "title": "Poly: Minify JSON"
       },
       {
+        "command": "poly.toggleFormat",
+        "title": "Poly: Toggle Formatting"
+      },
+      {
         "command": "poly.checkForUpdates",
         "title": "Poly: Check for Updates"
       },
@@ -149,6 +153,11 @@
           "type": "boolean",
           "default": true,
           "description": "Publish lint diagnostics when a supported file is opened or saved."
+        },
+        "poly.format.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let poly rewrite files: Format Document, format-on-save, Format Selection, and the trailing-whitespace and final-newline fixes .editorconfig asks for on save. Turning it off suspends all of them at once -- the point being to stop formatting for a while without disabling the extension or hunting through per-language settings. Linting is unaffected: not wanting a file rewritten is not the same as not wanting to know what is wrong with it. There is a status bar switch for this next to the Poly item, and `Poly: Toggle Formatting` in the command palette."
         },
         "poly.deadCodeCodeLens.enabled": {
           "type": "boolean",

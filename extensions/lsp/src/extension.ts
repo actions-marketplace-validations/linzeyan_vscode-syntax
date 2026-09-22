@@ -96,7 +96,27 @@ const LANGUAGES = [
 
 let client: LanguageClient | undefined;
 let status: vscode.StatusBarItem | undefined;
+let formatToggle: vscode.StatusBarItem | undefined;
 let health: "starting" | "ready" | "failed" = "starting";
+
+/// May poly rewrite a file right now?
+///
+/// One rule rather than two. The tempting version suppresses only the
+/// automatic rewrites and lets an explicit Format Document through, but the
+/// provider is handed the same request either way -- the editor does not say
+/// whether a save or a keystroke asked -- so "except when you ask twice" would
+/// have to be guessed at from a save participant's timing. A switch that means
+/// "poly does not touch my files while this is off" is one sentence, and the
+/// status bar says which way it is pointing.
+///
+/// Not `editor.formatOnSave`: this machine, like many, leaves that false
+/// globally and turns it on in per-language blocks, so flipping the global one
+/// from a button would look broken. poly owns its own answer instead.
+function mayFormat(): boolean {
+  return vscode.workspace
+    .getConfiguration("poly")
+    .get<boolean>("format.enabled", true);
+}
 
 // The binary and the extension ship in one VSIX and are versioned together, so
 // a mismatch means something replaced one of them: a `poly.serverPath` aimed at
@@ -125,10 +145,11 @@ function refreshStatus(): void {
     return;
   }
   const language = vscode.window.activeTextEditor?.document.languageId;
+  const mine = language !== undefined && LANGUAGES.includes(language);
+  refreshFormatToggle(mine);
   // A version mismatch stays on screen whatever the active file is: it is a
   // broken installation, not a per-file state, and it will not fix itself.
-  const relevant = health !== "ready" || versionWarning !== undefined
-    || (language !== undefined && LANGUAGES.includes(language));
+  const relevant = health !== "ready" || versionWarning !== undefined || mine;
   if (!relevant) {
     status.hide();
     return;
@@ -151,10 +172,42 @@ function refreshStatus(): void {
     );
   } else {
     status.text = "$(check) Poly";
-    status.tooltip = "Poly is formatting and linting this file — click for the log";
+    status.tooltip = mayFormat()
+      ? "Poly is formatting and linting this file — click for the log"
+      : "Poly is linting this file; formatting is suspended — click for the log";
     status.backgroundColor = undefined;
   }
   status.show();
+}
+
+/// A second item, because it is a second thing.
+///
+/// The Poly item answers "is the daemon working"; this one answers "is it
+/// allowed to rewrite this file", which the user changes many times a day and
+/// the other never. Folding the switch into the health item would mean a click
+/// that opens the log when poly is unhappy and rewrites a setting when it is
+/// not. Shown only for a file poly handles — a suspend button over a .png is
+/// an offer to suspend nothing.
+function refreshFormatToggle(relevant: boolean): void {
+  if (!formatToggle) {
+    return;
+  }
+  if (!relevant) {
+    formatToggle.hide();
+    return;
+  }
+  const on = mayFormat();
+  formatToggle.text = on ? "$(edit) Format" : "$(circle-slash) Format";
+  formatToggle.tooltip = on
+    ? "Poly formats this file on save — click to suspend"
+    : "Poly will not rewrite this file — click to resume formatting";
+  // Warning rather than error: suspended is a state the user chose, and it has
+  // to be visible across a window full of tabs or it is the kind of switch
+  // that gets left off for a week.
+  formatToggle.backgroundColor = on
+    ? undefined
+    : new vscode.ThemeColor("statusBarItem.warningBackground");
+  formatToggle.show();
 }
 
 async function reportDaemonFailure(detail: string): Promise<void> {
@@ -611,6 +664,17 @@ export async function activate(context: vscode.ExtensionContext) {
           .getConfiguration("poly")
           .get<boolean>("languageServerLogs", true),
       },
+      // The suspend switch, applied here rather than in the daemon: the daemon
+      // would have to be told about the setting and would still answer the
+      // same request the same way, and a client that never asks is one fewer
+      // round trip on every save. Diagnostics are untouched -- suspending the
+      // rewrite is not the same as not wanting to know.
+      middleware: {
+        provideDocumentFormattingEdits: (document, options, token, next) =>
+          mayFormat() ? next(document, options, token) : [],
+        provideDocumentRangeFormattingEdits: (document, range, options, token, next) =>
+          mayFormat() ? next(document, range, options, token) : [],
+      },
     },
   );
 
@@ -619,6 +683,13 @@ export async function activate(context: vscode.ExtensionContext) {
     100,
   );
   status.command = "poly.showOutput";
+  // Left of the health item: the one that changes is the one the eye should
+  // land on first, and 99 puts it there.
+  formatToggle = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    99,
+  );
+  formatToggle.command = "poly.toggleFormat";
   // State changes cover crashes and restarts too, not just the initial start.
   client.onDidChangeState((event) => {
     health = event.newState === State.Running
@@ -631,6 +702,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     status,
+    formatToggle,
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("poly.format")) {
+        refreshStatus();
+      }
+    }),
     vscode.window.onDidChangeActiveTextEditor(() => {
       refreshStatus();
       applyIndentationToVisible();
@@ -641,7 +718,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // wrong indentation.
     vscode.window.onDidChangeVisibleTextEditors(applyIndentationToVisible),
     vscode.workspace.onWillSaveTextDocument((event) => {
-      if (event.document.uri.scheme !== "file") {
+      // Same switch as the formatter: these are the save-time rewrites for a
+      // file poly does not format, and "poly does not touch my files" has to
+      // mean both or it means neither.
+      if (event.document.uri.scheme !== "file" || !mayFormat()) {
         return;
       }
       // waitUntil holds the save until the edits arrive. The daemon answers in
@@ -653,6 +733,14 @@ export async function activate(context: vscode.ExtensionContext) {
       );
     }),
     vscode.commands.registerCommand("poly.showOutput", () => client?.outputChannel.show()),
+    // Global scope: the switch is "I am not in the mood for this right now",
+    // which is about the person and not about the project. Writing it at
+    // workspace scope would leave a line in somebody's .vscode/settings.json
+    // for the whole team to inherit.
+    vscode.commands.registerCommand("poly.toggleFormat", async () => {
+      const config = vscode.workspace.getConfiguration("poly");
+      await config.update("format.enabled", !mayFormat(), vscode.ConfigurationTarget.Global);
+    }),
     vscode.commands.registerCommand("poly.createGoWork", createGoWork),
     vscode.commands.registerCommand("poly.formatFile", async () => {
       const doc = vscode.window.activeTextEditor?.document;
