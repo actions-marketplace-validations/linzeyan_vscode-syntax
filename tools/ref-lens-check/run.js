@@ -13,7 +13,6 @@
 // Usage: node tools/ref-lens-check/run.js
 const { execFileSync } = require("node:child_process");
 const { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } = require("node:fs");
-const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
@@ -24,7 +23,8 @@ const ROOT = resolve(__dirname, "..", "..");
 const EDITOR = join(ROOT, "extensions", "editor");
 const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
 
-const SCRATCH = join(tmpdir(), "poly-ref-lens");
+// One scratch root per checkout, agreed in runnable.js -- see there for why.
+const SCRATCH = runnable.SCRATCH;
 const WORKSPACE = join(SCRATCH, "workspace");
 const OUT = join(ROOT, ".logs", "audit", "ref-lens.json");
 const CACHE = join(ROOT, "extensions", "lsp", ".vscode-test");

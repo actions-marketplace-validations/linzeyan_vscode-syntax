@@ -159,36 +159,97 @@ fn shellcheck_url(code: u64) -> String {
     format!("https://www.shellcheck.net/wiki/SC{code}")
 }
 
-fn shellcheck_parse(stdout: &[u8]) -> Result<Vec<FileIssue>> {
+/// shellcheck's tab stop, and the reason these columns need translating at all.
+const TAB_WIDTH: usize = 8;
+
+/// Where a shellcheck column lands once a tab is one character again.
+///
+/// shellcheck reports a column with tabs expanded to the next multiple of
+/// eight: on `\tgreet` it calls `greet` column 9. Every other tool poly runs
+/// counts characters, and `Issue::col` is what `Position::new` hands the editor,
+/// where LSP defines the number as an offset into the line. Passed through, a
+/// shell squiggle sat seven characters right of the defect on every
+/// tab-indented line -- which, in a shell script, is most of them.
+///
+/// Counted in UTF-16 units because that is what the editor reads it as. For the
+/// ASCII a shell script is almost entirely made of the two readings are equal,
+/// and where they are not, every other tool in poly is wrong the same way --
+/// one question, not this one.
+fn untabbed_column(line: &str, column: u32) -> u32 {
+    let column = column.max(1) as usize;
+    let mut expanded = 1usize;
+    let mut offset = 0u32;
+    for ch in line.chars() {
+        if expanded >= column {
+            return offset;
+        }
+        expanded += if ch == '\t' {
+            TAB_WIDTH - (expanded - 1) % TAB_WIDTH
+        } else {
+            1
+        };
+        offset += ch.len_utf16() as u32;
+    }
+    // Past the end of the line -- shellcheck points one past the last character
+    // for a missing terminator. There are no more tabs out there, so the rest
+    // of the count is already one per column.
+    offset + (column - expanded) as u32
+}
+
+fn shellcheck_parse(
+    stdout: &[u8],
+    text_of: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<FileIssue>> {
     let items: Vec<ShellcheckItem> =
         serde_json::from_slice(stdout).context("parsing shellcheck output")?;
+    let mut sources: std::collections::HashMap<String, Option<Vec<String>>> =
+        std::collections::HashMap::new();
     Ok(items
         .into_iter()
-        .map(|i| FileIssue {
-            file: PathBuf::from(i.file),
-            issue: Issue {
-                line: i.line.saturating_sub(1),
-                col: i.column.saturating_sub(1),
-                end_line: i.end_line.saturating_sub(1),
-                end_col: i.end_column.saturating_sub(1),
-                severity: severity_of("shellcheck", shellcheck_level(&i.level)),
-                code: format!("SC{}", i.code),
-                message: i.message,
-                source: "shellcheck",
-                fix: i.fix.is_some().then_some(Fix::Automatic),
-                url: Some(shellcheck_url(i.code)),
-            },
+        .map(|i| {
+            // Read each file once however many findings it carries, and treat a
+            // file that cannot be read as one with no tabs: shellcheck's column
+            // is then no worse than it was before.
+            let lines = sources
+                .entry(i.file.clone())
+                .or_insert_with(|| {
+                    text_of(&i.file).map(|t| t.lines().map(str::to_string).collect())
+                })
+                .as_ref();
+            let at = |line: u32, column: u32| match lines
+                .and_then(|l| l.get(line.saturating_sub(1) as usize))
+            {
+                Some(text) => untabbed_column(text, column),
+                None => column.saturating_sub(1),
+            };
+            FileIssue {
+                file: PathBuf::from(&i.file),
+                issue: Issue {
+                    line: i.line.saturating_sub(1),
+                    col: at(i.line, i.column),
+                    end_line: i.end_line.saturating_sub(1),
+                    end_col: at(i.end_line, i.end_column),
+                    severity: severity_of("shellcheck", shellcheck_level(&i.level)),
+                    code: format!("SC{}", i.code),
+                    message: i.message,
+                    source: "shellcheck",
+                    fix: i.fix.is_some().then_some(Fix::Automatic),
+                    url: Some(shellcheck_url(i.code)),
+                },
+            }
         })
         .collect())
 }
 
 pub fn shellcheck_files(cmd: &Path, files: &[PathBuf]) -> Result<Vec<FileIssue>> {
-    shellcheck_parse(&run(cmd, &["-f", "json"], files, None)?)
+    let out = run(cmd, &["-f", "json"], files, None)?;
+    shellcheck_parse(&out, &|file| std::fs::read_to_string(file).ok())
 }
 
 pub fn shellcheck_stdin(cmd: &Path, text: &str) -> Result<Vec<Issue>> {
     let out = run(cmd, &["-f", "json", "-"], &[], Some(text))?;
-    Ok(shellcheck_parse(&out)?
+    // Whatever shellcheck calls the document it read on stdin, it is this one.
+    Ok(shellcheck_parse(&out, &|_| Some(text.to_string()))?
         .into_iter()
         .map(|f| f.issue)
         .collect())
@@ -224,7 +285,7 @@ pub fn shellcheck_script(
         &[],
         Some(script),
     )?;
-    Ok(shellcheck_parse(&out)?
+    Ok(shellcheck_parse(&out, &|_| Some(script.to_string()))?
         .into_iter()
         .map(|f| f.issue)
         .collect())
@@ -2043,10 +2104,46 @@ mod tests {
     #[test]
     fn parses_shellcheck_json() {
         let raw = br#"[{"file":"a.sh","line":2,"endLine":2,"column":6,"endColumn":9,"level":"warning","code":2086,"message":"Double quote"}]"#;
-        let issues = shellcheck_parse(raw).unwrap();
+        let issues = shellcheck_parse(raw, &|_| Some("#!/bin/sh\necho $x\n".to_string())).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].issue.code, "SC2086");
         assert_eq!(issues[0].issue.line, 1);
+    }
+
+    /// shellcheck counts a tab as eight columns and poly handed that straight
+    /// to the editor, so on `\tgreet` the squiggle started seven characters
+    /// right of `greet` -- and a shell script is mostly tab-indented lines.
+    ///
+    /// The numbers are shellcheck 0.11.0's own, for the file below.
+    #[test]
+    fn a_tab_is_one_character_by_the_time_the_editor_sees_it() {
+        let script = "#!/usr/bin/env bash\ngreet() {\n\techo \"$1\"\n}\n\tgreet\n";
+        let raw = br#"[{"file":"-","line":5,"endLine":5,"column":9,"endColumn":14,"level":"info","code":2119,"message":"Use greet \"$@\""}]"#;
+        let issues = shellcheck_parse(raw, &|_| Some(script.to_string())).unwrap();
+        assert_eq!((issues[0].issue.col, issues[0].issue.end_col), (1, 6));
+
+        // A line with no tab is untouched, which is what keeps this from being
+        // a change of convention rather than a fix.
+        let raw = br#"[{"file":"-","line":2,"endLine":2,"column":1,"endColumn":6,"level":"info","code":2119,"message":"x"}]"#;
+        let issues = shellcheck_parse(raw, &|_| Some(script.to_string())).unwrap();
+        assert_eq!((issues[0].issue.col, issues[0].issue.end_col), (0, 5));
+    }
+
+    /// Tabs do not stop at every eighth column; they stop at the next one. A
+    /// rule that added eight per tab would agree with shellcheck only when the
+    /// tab is the first thing on the line, which is the case that made the bug
+    /// visible and is not the only case there is.
+    #[test]
+    fn a_tab_advances_to_the_next_stop_and_not_by_a_fixed_width() {
+        // `a` is 1, `b` is 2, the tab covers 3 through 8, so `c` is 9 -- not
+        // the 11 a fixed width of eight would have made it.
+        assert_eq!(untabbed_column("ab\tc", 9), 3);
+        // Two tabs from the start: the first covers 1 through 8, the second 9
+        // through 16, so `x` is 17.
+        assert_eq!(untabbed_column("\t\tx", 17), 2);
+        // Past the end of the line, where shellcheck points at a missing
+        // terminator: `\tab` ends at column 10, so 12 is two beyond it.
+        assert_eq!(untabbed_column("\tab", 12), 4);
     }
 
     /// tflint is the one tool that hands over both halves itself: a

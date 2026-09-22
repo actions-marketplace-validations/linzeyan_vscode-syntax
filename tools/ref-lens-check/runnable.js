@@ -11,9 +11,27 @@
 // Five files rather than one, because the rule is per language and the claims
 // worth pinning are about a language having exactly one of the two routes --
 // or neither, which is the answer for most of the files in either language.
+const { createHash } = require("node:crypto");
 const { readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { join } = require("node:path");
+const { join, resolve } = require("node:path");
+
+/**
+ * Where this check keeps the fixture workspace and the editor state it makes.
+ *
+ * Keyed by the checkout rather than fixed, because it was fixed and two
+ * worktrees running `make ref-lens` at once shared one user-data directory and
+ * one fixture workspace: the second editor to start read the first one's
+ * files, which is a failure that looks like a flaky assertion. Stable across
+ * runs of one checkout, so the editor state is reused rather than rebuilt.
+ *
+ * Agreed here because both processes of this check load this module -- see
+ * `OUT` -- and they have to land on the same directory.
+ */
+const SCRATCH = join(
+  tmpdir(),
+  `poly-ref-lens-${createHash("sha1").update(resolve(__dirname, "..", "..")).digest("hex").slice(0, 8)}`,
+);
 
 /**
  * What the host saw, on its way back out.
@@ -22,7 +40,7 @@ const { join } = require("node:path");
  * check load this module, so the path is agreed here and neither of the two
  * shared files has to carry an env var or a field for it.
  */
-const OUT = join(tmpdir(), "poly-ref-lens", "runnable.json");
+const OUT = join(SCRATCH, "runnable.json");
 
 /**
  * What each button has to invoke, spelled out here rather than imported.
@@ -125,6 +143,8 @@ function fakePythonSymbols(vscode) {
     },
   );
 }
+
+exports.SCRATCH = SCRATCH;
 
 /** Open every fixture in the host and write down what carries a lens. */
 exports.collect = async function collect(lensesFor) {

@@ -3,6 +3,7 @@
 // document to it — activation events, the client's documentSelector and the
 // contributed commands all live outside the protocol, and both times we broke
 // them the protocol tests stayed green.
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -23,6 +24,26 @@ function stripHostEnvironment(): void {
       delete process.env[key];
     }
   }
+}
+
+/// Where this checkout's editor state goes, kept short on purpose.
+///
+/// VSCode puts its IPC socket inside the user-data directory, and a unix
+/// socket path cannot exceed 103 characters. The default sits under the
+/// checkout — extensions/lsp/.vscode-test/user-data — which fits for a clone in
+/// ~/git and does not for a worktree a few directories below one, so `make e2e`
+/// only ran where the checkout happened to be shallow enough, and failed
+/// elsewhere with an ENAMETOOLONG that named neither the limit nor the path.
+/// `/tmp` rather than os.tmpdir() because macOS's is a 48-character per-user
+/// path: half the budget spent before the name.
+///
+/// Keyed by the checkout rather than by the run, so that two worktrees can
+/// test at once — a shared user-data directory means the second editor to
+/// start finds the first one's state — and so that repeated runs reuse it.
+function userDataDir(repo: string): string {
+  const key = createHash("sha1").update(repo).digest("hex").slice(0, 8);
+  const root = process.platform === "win32" ? tmpdir() : "/tmp";
+  return join(root, `poly-e2e-${key}`, "user-data");
 }
 
 async function main(): Promise<void> {
@@ -65,7 +86,10 @@ async function main(): Promise<void> {
     // reads a leading positional as the app to run rather than as a workspace.
     // Built-in extensions stay on — they own the `sql` and `python` language
     // ids the tests rely on.
-    launchArgs: [`--folder-uri=${pathToFileURL(workspace).toString()}`],
+    launchArgs: [
+      `--folder-uri=${pathToFileURL(workspace).toString()}`,
+      `--user-data-dir=${userDataDir(repo)}`,
+    ],
   });
 }
 
