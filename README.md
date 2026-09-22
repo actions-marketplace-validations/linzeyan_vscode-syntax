@@ -157,6 +157,11 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **TODOs 檢視**：檔案總管多一個面板，列出整個 workspace 的 `TODO`／`FIXME`／`HACK`／
   `XXX`／`BUG`。只在面板顯示時才掃描，排除規則沿用 `files.exclude`／`search.exclude`，
   而且掃描上限會寫在標題上——「清單很短」跟「清單被截斷」不該長得一樣。
+- **`Poly: Syntax Colors for This Language`**：列出目前這個檔的文法能產生的**全部**
+  TextMate scope，做成一份可以直接複製的 `editor.tokenColorCustomizations.textMateRules`。
+  改配色這件事 VSCode 一直都做得到，卡住的是沒人知道 scope 叫什麼——內建的
+  `Inspect Editor Tokens and Scopes` 一次只給游標下的那一個。顏色欄位是
+  `#RRGGBB` 佔位字串而不是某個預設色：整份貼上去不會改變任何顏色，你只會改你改過的那幾條。
 
 ### poly — CLI
 

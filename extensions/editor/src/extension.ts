@@ -25,6 +25,7 @@ import { refactorChoices, Refactoring, REFACTORINGS } from "./refactors";
 import { Direction, elsewhere, implLabel, LensTarget, lensTargets, refLabel } from "./references";
 import { ReferenceTree, registerReferenceTree } from "./referenceTree";
 import { entryLine, entryPoints, findsEntryInText, runLine } from "./runnable";
+import { colorSheet, scopesIn } from "./scopes";
 import { offerMessage, serverToOffer } from "./servers";
 import { registerTodoTree } from "./todoTree";
 
@@ -770,6 +771,69 @@ async function showReferences(
   editor.selection = new vscode.Selection(position, position);
   await referenceTree?.show(ASKED[counts], locations);
   await vscode.commands.executeCommand("polyReferences.focus");
+}
+
+/**
+ * The grammar registered for a language, and which extension registered it.
+ *
+ * Asked of every installed extension rather than of poly's own, because the
+ * question is "what is painting this file", and for a language poly does not
+ * ship a grammar for the answer is somebody else's -- which is still the answer
+ * worth printing. Poly's is preferred when both are there, since poly's is the
+ * one in effect: a grammar contributed later wins the language id.
+ */
+function grammarFor(languageId: string): { path: string; from: string } | undefined {
+  const found: { path: string; from: string }[] = [];
+  for (const extension of vscode.extensions.all) {
+    const grammars = extension.packageJSON?.contributes?.grammars;
+    if (!Array.isArray(grammars)) {
+      continue;
+    }
+    for (const grammar of grammars) {
+      if (grammar?.language === languageId && typeof grammar.path === "string") {
+        found.push({
+          path: path.join(extension.extensionPath, grammar.path),
+          from: extension.id,
+        });
+      }
+    }
+  }
+  return found.find((one) => one.from === "ricky.poly-syntax-highlight") ?? found[0];
+}
+
+/**
+ * Open a sheet of every scope the current file's grammar can produce.
+ *
+ * The answer to "let me set the highlight colours", which VSCode already
+ * supports and nobody can use: `editor.tokenColorCustomizations.textMateRules`
+ * addresses tokens by scope name, and the only way to learn a scope name is to
+ * put the cursor on a token and run the built-in inspector, once per token.
+ */
+async function showSyntaxColors(editor: vscode.TextEditor): Promise<void> {
+  const languageId = editor.document.languageId;
+  const grammar = grammarFor(languageId);
+  if (!grammar) {
+    vscode.window.showWarningMessage(
+      `Poly: no grammar is registered for ${languageId}, so it has no scopes to colour`,
+    );
+    return;
+  }
+  let scopes: string[];
+  try {
+    scopes = scopesIn(JSON.parse(fs.readFileSync(grammar.path, "utf8")));
+  } catch (error) {
+    // A grammar can be a plist rather than JSON -- poly converts those at sync
+    // time, but another extension may ship one as it came.
+    vscode.window.showWarningMessage(
+      `Poly: could not read the ${languageId} grammar at ${grammar.path}: ${error}`,
+    );
+    return;
+  }
+  const sheet = await vscode.workspace.openTextDocument({
+    language: "jsonc",
+    content: colorSheet(languageId, `${grammar.from} — ${grammar.path}`, scopes),
+  });
+  await vscode.window.showTextDocument(sheet);
 }
 
 /**
@@ -1679,6 +1743,10 @@ export function activate(context: vscode.ExtensionContext) {
           await shiftListItem(editor, "outdent");
         }
       },
+    ],
+    [
+      "poly.syntaxColors",
+      withEditor("Syntax Colors", showSyntaxColors),
     ],
     ["poly.nextChangedFile", () => stepChangedFile(1)],
     ["poly.previousChangedFile", () => stepChangedFile(-1)],

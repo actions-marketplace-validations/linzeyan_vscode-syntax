@@ -1,17 +1,19 @@
 # Poly Syntax Highlight
 
-統一 syntax highlighting 文法包（批次 1：25 語言）。文法一律從上游 repo／marketplace VSIX
-以 pinned 版本同步（`grammars/sources.json` 為單一真相，`tools/grammar-sync.py` 產生本
-extension 的 syntaxes 與 contributes），任何 VSCode color theme 直接生效。
+153 份文法，一個 extension。文法一律從上游 repo／marketplace VSIX 以 pinned commit 同步
+（`grammars/sources.json` 是單一真相，`tools/grammar-sync.py` 產生本 extension 的 syntaxes
+與 contributes），輸出標準 TextMate scope，任何 VSCode color theme 直接生效。
 
 ## 涵蓋
 
-- **接管內建**（與內建同源、由 poly 控制更新節奏）：swift、c#、lua、go、c、c++/cuda、
-  xml/xsl、yaml、markdown（另加清單自動接續，見下）、sql、dockerfile、shellscript；
-  rust 採社群強化文法（dustypomerleau/rust-syntax）。
-- **新增語言**：HCL、Terraform、nginx、zig、toml、go template（含 go/html/markdown
-  injection）、dotenv、protobuf、mermaid（含 markdown code block injection）、svelte、
-  graphql（含 js/ts/vue/svelte/python 內 gql template injection）、csv/tsv（rainbow 欄位上色）。
+- **接管 49 個內建語言**：多數與內建同源，只是更新節奏由 poly 控制；rust 改用社群的
+  dustypomerleau/rust-syntax，scope 比內建細。
+- **另加 47 個內建沒有的語言**：HCL／Terraform、nginx、zig、toml、go template、dotenv、
+  protobuf、mermaid、svelte、graphql、jsonnet、just、nix、cabal、dune、ocaml、elixir、
+  erlang、haskell、scala、caddyfile、systemd unit、apacheconf、ssh_config、jinja 家族、
+  Solidity／Cairo／Vyper，以及 csv／tsv 的 rainbow 欄位上色。
+- 完整清單在 `package.json` 的 `contributes.languages`，授權與 pin 在
+  THIRD-PARTY-NOTICES.md。
 
 ## markdown 清單自動接續
 
@@ -34,6 +36,21 @@ poly-editor 的話，Enter 由它接管**，號碼會遞增，空的項目按 En
 
 開啟 `.rs` 檔 → `Developer: Inspect Editor Tokens and Scopes` → 游標放在 `->` 上，
 scopes 應含 `keyword.operator.arrow.skinny.rust`（內建文法無此 scope）。
+
+## 配色與開關
+
+**poly 不帶配色。** 文法只負責替 token 取名（scope），顏色是主題給的——所以換主題就是
+換配色，poly 不參與。
+
+要自己改某個 scope 的顏色，用 VSCode 本來就有的
+`editor.tokenColorCustomizations.textMateRules`。它一直都能用，卡住的只有一件事：沒人
+知道 scope 叫什麼名字。裝了 **poly-editor** 的話，`Poly: Syntax Colors for This Language`
+會把目前這個語言的文法能產生的**全部** scope 列成一份可以直接複製的設定片段；沒裝的話，
+內建的 `Developer: Inspect Editor Tokens and Scopes` 一次告訴你游標下的那一個。
+
+**沒有「只關掉某個文法」這種開關，而且那不是 poly 偷懶。** VSCode 的文法是靜態註冊的，
+沒有任何 contribution point 能在執行期停用其中一份。唯一的關法是停用整個 extension。
+poly 不做一個按了沒作用的假開關。
 
 ## 更新
 

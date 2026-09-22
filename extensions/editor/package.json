@@ -194,6 +194,11 @@
         "category": "%command.category%"
       },
       {
+        "command": "poly.syntaxColors",
+        "title": "%command.syntaxColors.title%",
+        "category": "%command.category%"
+      },
+      {
         "command": "poly.revertAndSave",
         "title": "%command.revertAndSave.title%",
         "category": "%command.category%"
