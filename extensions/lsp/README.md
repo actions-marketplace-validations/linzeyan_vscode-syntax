@@ -38,8 +38,12 @@ toolchain 裡的** language server：gopls、rust-analyzer、clangd、sourcekit-
 lua-language-server、bash-language-server，以及 poly 代抓的 buf 與 arity。
 
 poly 不實作任何一行語意分析，只做路由，所以品質就是那支 server 的品質。server 一律從 PATH
-找，找不到就說一聲。預設關閉是因為它會跟你八成已經裝了的官方 extension 重疊——要用請先移除
-那個 extension，改完要重新載入視窗。
+找，找不到就說一聲。改完要重新載入視窗。
+
+**已經有官方 extension 的語言，poly 讓開**：裝了 Go（golang.go）、rust-analyzer、clangd 或
+C/C++、Swift、HashiCorp Terraform、Lua（sumneko）、Bash IDE、Buf 的那幾個語言，poly 不啟動
+自己那支 server，同一個語言不會有兩支在跑、兩份 hover。裝上或移除那個 extension 時 poly
+自己重新分配，不用重新載入視窗。
 
 存檔時會跑的 `source.*` code action 不轉（會跟 poly 的格式化搶同一段程式碼），燈泡裡的照常。
 

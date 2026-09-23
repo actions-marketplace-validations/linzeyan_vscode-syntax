@@ -660,8 +660,65 @@ function analyzeDeadCodeLens(context: vscode.ExtensionContext): void {
   );
 }
 
+/**
+ * Extensions that start a language server of their own, and the server of
+ * poly's each one stands in for.
+ *
+ * With both running, every question is answered twice: two gopls hold the same
+ * module in memory, every reference search runs in both, and hover and
+ * completion show each answer twice. The two cannot be merged and poly cannot
+ * stop somebody else's server, so the one direction that can be enforced is
+ * poly stepping back -- the extension the user installed for that language
+ * keeps it, and poly routes only the languages nobody else serves.
+ *
+ * A list of other people's extension ids, which elsewhere in poly is a smell
+ * (a guess about what is installed). Here it is not a guess: `getExtension`
+ * answers from what is actually installed and enabled, and the list only says
+ * which server each one runs. R is absent on purpose -- REditorSupport.r serves
+ * nothing unless the `languageserver` R package is installed, and yielding to
+ * it would leave most R files with no server at all.
+ */
+const OFFICIAL_SERVERS: readonly [extension: string, server: string][] = [
+  ["golang.go", "gopls"],
+  ["rust-lang.rust-analyzer", "rust-analyzer"],
+  ["llvm-vs-code-extensions.vscode-clangd", "clangd"],
+  ["ms-vscode.cpptools", "clangd"],
+  ["swiftlang.swift-vscode", "sourcekit-lsp"],
+  ["sswg.swift-lang", "sourcekit-lsp"],
+  ["hashicorp.terraform", "terraform-ls"],
+  ["sumneko.lua", "lua-language-server"],
+  ["mads-hartmann.bash-ide-vscode", "bash-language-server"],
+  ["bufbuild.vscode-buf", "buf"],
+];
+
+/**
+ * The servers poly should leave alone, keyed by server with the extension that
+ * serves the language instead -- the daemon names it in the log line that says
+ * why a language went to someone else.
+ */
+function yieldServers(): Record<string, string> {
+  const yielded: Record<string, string> = {};
+  for (const [extension, server] of OFFICIAL_SERVERS) {
+    if (!vscode.extensions.getExtension(extension) || yielded[server]) {
+      continue;
+    }
+    // cpptools is often installed for its debugger alone, with IntelliSense
+    // switched off so clangd can have C and C++. Yielding to it then would hand
+    // the language to an engine that has been told to answer nothing.
+    if (
+      extension === "ms-vscode.cpptools"
+      && vscode.workspace.getConfiguration("C_Cpp").get<string>("intelliSenseEngine") === "disabled"
+    ) {
+      continue;
+    }
+    yielded[server] = extension;
+  }
+  return yielded;
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   const serverPath = resolveServerPath(context);
+  let yielded = yieldServers();
   client = new LanguageClient(
     "poly",
     "Poly",
@@ -675,7 +732,11 @@ export async function activate(context: vscode.ExtensionContext) {
         scheme: "file",
         language,
       })),
-      initializationOptions: {
+      // A function, so that a restart asks again: `yieldServers` changes when an
+      // extension is installed or removed, and the client re-sends these on
+      // every start.
+      initializationOptions: () => ({
+        yieldServers: yielded,
         lintOnSave: vscode.workspace
           .getConfiguration("poly")
           .get<boolean>("lintOnSave", true),
@@ -696,7 +757,7 @@ export async function activate(context: vscode.ExtensionContext) {
         memoryLog: vscode.workspace
           .getConfiguration("poly")
           .get<boolean>("memoryLog", false),
-      },
+      }),
       // The suspend switch, applied here rather than in the daemon: the daemon
       // would have to be told about the setting and would still answer the
       // same request the same way, and a client that never asks is one fewer
@@ -750,6 +811,19 @@ export async function activate(context: vscode.ExtensionContext) {
     // is a no-op, and missing an editor is a file being typed into with the
     // wrong indentation.
     vscode.window.onDidChangeVisibleTextEditors(applyIndentationToVisible),
+    // Installing golang.go mid-session is the moment two gopls start sharing a
+    // window, and uninstalling it is the moment Go loses its only one. A
+    // restart is what gets the daemon a new list: it is read at spawn time,
+    // like every other initialization option.
+    vscode.extensions.onDidChange(() => {
+      const now = yieldServers();
+      if (JSON.stringify(now) === JSON.stringify(yielded)) {
+        return;
+      }
+      yielded = now;
+      logLine(`[poly] language servers left to other extensions: ${JSON.stringify(now)}`);
+      void client?.restart();
+    }),
     vscode.workspace.onWillSaveTextDocument((event) => {
       // Same switch as the formatter: these are the save-time rewrites for a
       // file poly does not format, and "poly does not touch my files" has to

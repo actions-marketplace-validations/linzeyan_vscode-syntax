@@ -2479,6 +2479,255 @@ def a_cancelled_request_reaches_the_server():
     shutil.rmtree(root, ignore_errors=True)
 
 
+def start_session(root, options, env=None):
+    """Start poly for one of the checks below, which need no Case around them.
+
+    Returns the stderr watcher so a check about what poly logged can wait for
+    the last line, rather than reading a list another thread is still filling.
+    """
+    global proc, INBOX, STDERR
+    INBOX, STDERR = [], []
+    proc = subprocess.Popen(
+        [BIN, "lsp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    watcher = threading.Thread(target=watch, args=(proc.stderr,), daemon=True)
+    watcher.start()
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": None,
+                "rootUri": f"file://{root}",
+                "workspaceFolders": [{"uri": f"file://{root}", "name": "probe"}],
+                "initializationOptions": options,
+                "capabilities": {
+                    "textDocument": {"synchronization": {"dynamicRegistration": True}},
+                    "workspace": {"configuration": True, "didChangeConfiguration": {}},
+                },
+            },
+        }
+    )
+    pump(want_id=1)
+    send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+    return watcher
+
+
+def open_document(root, name, language, text):
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": f"file://{root}/{name}",
+                    "languageId": language,
+                    "version": 1,
+                    "text": text,
+                }
+            },
+        }
+    )
+
+
+def end_session(root, watcher):
+    """Shut poly down, and only then read what it said: the reply to shutdown
+    is the proof every notification sent before it has been handled."""
+    send({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": None})
+    pump(want_id=99)
+    send({"jsonrpc": "2.0", "method": "exit", "params": None})
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("poly did not exit")
+    watcher.join(timeout=5)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+# Three files VSCode calls shellscript and poly's path detection does not: a
+# `.zsh`, which poly calls `zsh` so that its shellcheck never reads it; a script
+# named only by its shebang; a dotfile with no extension at all. Each defines a
+# function the outline has to show, and each has the same unquoted `$1`, which
+# is SC2086 wherever shellcheck reads it as bash.
+SHELL_BY_EDITOR = {
+    "prompt.zsh": ("prompt_setup", "prompt_setup() {\n  print -P hello $1\n}\n"),
+    "deploy": (
+        "ship",
+        '#!/usr/bin/env bash\n\nship() {\n  echo shipping $1\n}\n\nship "$@"\n',
+    ),
+    ".bashrc": ("greet", "greet() {\n  echo hello $1\n}\n"),
+}
+
+
+def shell_the_editor_names():
+    """Route by the editor's language id: three files only VSCode calls shell.
+
+    Until routing asked the editor, all three reached poly under the
+    shellscript selector and were refused -- documentSymbol was poly's to
+    answer, and poly has no outline -- while bash-language-server was never
+    shown the document at all. The `.zsh` is opened first and alone, so it is
+    the thing that has to start the server.
+
+    The shellcheck half is the constraint the routing must not break: a `.zsh`
+    never reaches shellcheck, from poly or from anyone poly hands it to. It
+    holds today because bash-language-server reads `.zsh` as zsh and declines
+    to lint it; `.bashrc` carries the same defect as the control, so the
+    absence on the `.zsh` is measured after shellcheck has demonstrably run.
+    """
+    if not shutil.which("bash-language-server"):
+        print("SKIPPED shell by editor id: bash-language-server is not on PATH")
+        return
+    root = os.path.realpath(tempfile.mkdtemp(prefix="poly-proxy-shell-id-"))
+    for name, (_, text) in SHELL_BY_EDITOR.items():
+        with open(os.path.join(root, name), "w") as f:
+            f.write(text)
+
+    print("shell files named by the editor rather than by their path:")
+    watcher = start_session(root, {"languageServers": True})
+    open_document(root, "prompt.zsh", "shellscript", SHELL_BY_EDITOR["prompt.zsh"][1])
+    guard = threading.Timer(60, proc.kill)
+    guard.start()
+    try:
+        registration, _ = pump(want_method="client/registerCapability")
+    except EOFError:
+        raise AssertionError(
+            "a .zsh the editor calls shellscript started nothing in 60s -- "
+            "poly routed it by its path, where it is zsh"
+        ) from None
+    finally:
+        guard.cancel()
+    send({"jsonrpc": "2.0", "id": registration["id"], "result": None})
+    print("  the .zsh started bash-language-server")
+
+    # One at a time, each outline settled before the next file opens. Not
+    # politeness: bash-language-server analyses nothing until the editor has
+    # answered its `workspace/configuration`, and of the documents opened
+    # before that it keeps only the last -- measured with 5.8.1, where opening
+    # all three at once left the `.zsh` and `deploy` with an empty outline for
+    # the rest of the session.
+    for rid, (name, (function, text)) in enumerate(SHELL_BY_EDITOR.items(), start=70):
+        if name != "prompt.zsh":
+            open_document(root, name, "shellscript", text)
+        found = settle(
+            rid,
+            "textDocument/documentSymbol",
+            {"textDocument": {"uri": f"file://{root}/{name}"}},
+            lambda result, function=function: any(
+                s.get("name") == function for s in result or []
+            ),
+            f"{function} in the outline of {name}",
+        )
+        print(f"  {name}: outline has {sorted(s['name'] for s in found)}")
+
+    def shellchecked(name):
+        return [
+            d
+            for published in diagnostics_for(f"file://{root}/{name}")
+            for d in published
+            if d.get("source") == "shellcheck"
+        ]
+
+    # Asked rather than slept on: INBOX only fills while something is reading,
+    # and bash-language-server publishes when its debounced lint finishes.
+    deadline = time.time() + 60
+    attempt = 0
+    while not shellchecked(".bashrc") and time.time() < deadline:
+        ask(
+            930000 + attempt,
+            "textDocument/documentSymbol",
+            {"textDocument": {"uri": f"file://{root}/.bashrc"}},
+        )
+        time.sleep(0.5)
+        attempt += 1
+    assert shellchecked(".bashrc"), (
+        "no shellcheck finding on .bashrc in 60s: a shellcheck is on PATH, so "
+        "the control never ran and the .zsh assertion below would be vacuous"
+    )
+    assert not shellchecked("prompt.zsh"), (
+        f"shellcheck reached a .zsh through the server: {shellchecked('prompt.zsh')}"
+    )
+    print("  shellcheck read .bashrc and never the .zsh")
+    end_session(root, watcher)
+
+
+def an_official_extension_already_serves_it():
+    """yieldServers: the server is not started, not reported, and said once.
+
+    Two .sh files open, so "once" is a count rather than a hope. The map also
+    names a server poly does not have, which is what a typo in the client's list
+    looks like -- and that has to be loud, because the cost of it is a second
+    server nobody asked for. Needs nothing installed: a yielded server is never
+    looked for, which is the point.
+    """
+    root = os.path.realpath(tempfile.mkdtemp(prefix="poly-proxy-yield-"))
+    print("a server an installed extension already runs:")
+    watcher = start_session(
+        root,
+        {
+            "languageServers": True,
+            "lintOnSave": False,
+            "yieldServers": {
+                "bash-language-server": "mads-hartmann.bash-ide-vscode",
+                "gopl": "golang.go",
+            },
+        },
+    )
+    for name in ("a.sh", "b.sh"):
+        open_document(root, name, "shellscript", MAIN_SH)
+    end_session(root, watcher)
+
+    said = [m["method"] for m in INBOX if m.get("method")]
+    assert "client/registerCapability" not in said, f"poly started it anyway: {said}"
+    assert "window/showMessage" not in said, f"poly called it missing: {INBOX}"
+    yielded = [line for line in STDERR if "so poly does not start a second one" in line]
+    expected = (
+        "[poly] bash-language-server: mads-hartmann.bash-ide-vscode is installed "
+        "and serves shellscript, so poly does not start a second one"
+    )
+    assert yielded == [expected], yielded
+    typo = [line for line in STDERR if 'yieldServers names "gopl"' in line]
+    assert len(typo) == 1, STDERR
+    print("  not started, not reported missing, said once; the typo was named")
+
+
+def a_missing_server_is_said_in_the_editor():
+    """The one server not on PATH gets one popup that says how to fix it.
+
+    The stderr line was all there was before, and with poly.languageServers on
+    the extension says nothing, so shell functions with no references had no
+    cause anyone could see. PATH is narrowed for this session only, so the
+    absence is real rather than configured -- it is the not-on-PATH sentence,
+    with its install command, that is being checked.
+    """
+    root = os.path.realpath(tempfile.mkdtemp(prefix="poly-proxy-missing-"))
+    narrowed = os.pathsep.join(
+        d
+        for d in os.environ["PATH"].split(os.pathsep)
+        if not os.path.exists(os.path.join(d, "bash-language-server"))
+    )
+    print("a server that is not installed:")
+    watcher = start_session(
+        root,
+        {"languageServers": True, "lintOnSave": False},
+        env=dict(os.environ, PATH=narrowed),
+    )
+    for name in ("a.sh", "b.sh"):
+        open_document(root, name, "shellscript", MAIN_SH)
+    end_session(root, watcher)
+
+    popups = [m["params"] for m in INBOX if m.get("method") == "window/showMessage"]
+    assert len(popups) == 1, f"one popup per server per session, got {popups}"
+    assert popups[0]["type"] == 2, popups  # MessageType.Warning
+    assert "npm install -g bash-language-server" in popups[0]["message"], popups
+    print(f"  said once: {popups[0]['message']}")
+
+
 def a_shellcheck_where_the_server_will_look():
     """Put poly's own shellcheck on PATH before any server starts.
 
@@ -2571,6 +2820,9 @@ cross_crate_rust()
 one_query_two_servers()
 a_folder_added_mid_session()
 a_cancelled_request_reaches_the_server()
+shell_the_editor_names()
+an_official_extension_already_serves_it()
+a_missing_server_is_said_in_the_editor()
 
 if not ran:
     print("PROXY PROBE SKIPPED: no language server on PATH")
