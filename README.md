@@ -241,7 +241,8 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **看起來不是本人的字元**（code 長 `poly/unicode-*`，類別 `confusable-character`，
   等級一律 warning）。不分語言，每個檔案都檢查——這是取代 gremlins 那類編輯器裝飾的部分，
   差別在於它同樣會在 CLI 與 CI 裡紅。五條規則：`-bidi`（雙向控制字元，也就是
-  Trojan Source）、`-invisible`（零寬字元、軟連字號；檔首的 BOM 不算）、`-space`
+  Trojan Source）、`-invisible`（零寬字元、軟連字號、ETX／VT 控制字元、行與段落分隔符號
+  U+2028／U+2029、物件取代字元 U+FFFC；檔首的 BOM 不算）、`-space`
   （不斷行空格、全形空格這類「看起來是空白但不是」）、`-lookalike`（EN DASH 之於 `-`、
   彎引號之於 `'`／`"`）、`-mixed-script`（同一個字裡混了西里爾或希臘字母）。
   界線是**「會被誤認成某個 ASCII 字元」而不是「非 ASCII」**，而且是量出來的：
@@ -311,9 +312,9 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 選檔案 → 重新載入視窗。或用命令列：
 
 ```sh
-code --install-extension poly-syntax-highlight-0.18.0.vsix
-code --install-extension poly-lsp-darwin-arm64-0.18.0.vsix
-code --install-extension poly-editor-0.18.0.vsix
+code --install-extension poly-syntax-highlight-0.18.1.vsix
+code --install-extension poly-lsp-darwin-arm64-0.18.1.vsix
+code --install-extension poly-editor-0.18.1.vsix
 ```
 
 之後的版本由 poly-lsp 自己提示更新，不必再手動抓——它只更新你已經裝了的那幾個。
@@ -327,7 +328,7 @@ extension，只能手動裝。
 0.5.0 的更新提示還是會跳，但按下 Install 一定失敗，而且訊息會騙你：
 
 > Poly: automatic install failed (Error: release has no asset
-> poly-syntax-0.18.0.vsix). The VSIX files were downloaded — install them
+> poly-syntax-0.18.1.vsix). The VSIX files were downloaded — install them
 > manually via "Extensions: Install from VSIX".
 
 其實一個檔都沒下載（它在第一個找不到的 asset 就放棄了），所以「Show Files」按下
@@ -361,7 +362,7 @@ irm https://raw.githubusercontent.com/linzeyan/vscode-syntax/main/install.ps1 | 
 版本就設環境變數——`irm | iex` 沒辦法傳參數，所以兩邊都認得：
 
 ```sh
-POLY_VERSION=0.18.0 POLY_INSTALL_DIR=~/bin sh install.sh
+POLY_VERSION=0.18.1 POLY_INSTALL_DIR=~/bin sh install.sh
 ```
 
 Windows on ARM 上會裝 arm64 版，即使腳本本身跑在 x64 模擬層裡（從 ssh 或某些
@@ -387,7 +388,7 @@ SmartScreen 擋，處理方式見
 - run: poly check --strict .
 ```
 
-`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.18.0" }`——poly
+`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.18.1" }`——poly
 會改寫檔案，所以新版本自己跑進來有可能把綠的分支變紅。
 
 Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、放進 PATH。順便
@@ -400,7 +401,7 @@ Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、
 docker run --rm -v "$PWD:/work" ghcr.io/linzeyan/poly check --strict .
 ```
 
-`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.18.0`、`0.18`；pre-release
+`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.18.1`、`0.18`；pre-release
 不會動到 `latest`。image 裡的 binary 就是 release 附的那一支，不是另外編的。
 
 image **不含任何語言 toolchain**，只含 poly 自己會下載的那些 linter。所以 Rust

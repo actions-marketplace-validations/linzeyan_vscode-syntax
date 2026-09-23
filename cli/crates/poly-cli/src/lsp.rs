@@ -97,6 +97,44 @@ const LAUNCH: &[(&str, &[&str])] = &[
     ("bash-language-server", &["start"]),
 ];
 
+/// The command that installs a server, where there is exactly one.
+///
+/// Only three, and the rest are left out on purpose rather than forgotten.
+/// These are the ones whose own project names a single command that works the
+/// same on every platform poly ships for, and whose toolchain a user of that
+/// language already has -- `go`, `rustup`, `npm`. clangd, sourcekit-lsp,
+/// terraform-ls and lua-language-server come from a package manager that
+/// differs per OS, or from an SDK, and a command that is right on macOS and
+/// wrong on Windows is worse in a popup than no command: it gets pasted.
+const INSTALL: &[(&str, &str)] = &[
+    ("gopls", "go install golang.org/x/tools/gopls@latest"),
+    ("rust-analyzer", "rustup component add rust-analyzer"),
+    (
+        "bash-language-server",
+        "npm install -g bash-language-server",
+    ),
+];
+
+/// Why a server poly would have started is not going to run.
+///
+/// Three answers rather than one `None`, because the editor is told something
+/// different about each. Before this split all three were the same stderr
+/// line, and the one a user could act on -- the server is simply not
+/// installed -- was also the one nobody saw: the log is not where anyone looks
+/// when references just come back empty.
+#[derive(Debug, PartialEq)]
+enum Unavailable {
+    /// `[tools] x = "off"`. The project decided, so there is nothing to tell
+    /// anyone -- a popup about their own setting would be a nag, not news.
+    Disabled,
+    /// A PATH-only server that is not on PATH, which is the one case where the
+    /// remedy is "install it" and poly can say how.
+    NotOnPath,
+    /// poly pins it or poly.toml points at it, and it is not there anyway.
+    /// Carries `resolve`'s own sentence, which already says what went wrong.
+    Missing(String),
+}
+
 /// How poly gets hold of a language server binary.
 ///
 /// The tool registry when poly pins the binary, PATH when the project does.
@@ -106,7 +144,7 @@ const LAUNCH: &[(&str, &[&str])] = &[
 /// turn buf off or point it somewhere else through the same `[tools]` entry
 /// that governs it as a formatter, rather than through a second setting that
 /// says the same thing.
-fn server_command(name: &str, config: &poly_core::Config) -> Option<PathBuf> {
+fn server_command(name: &str, config: &poly_core::Config) -> Result<PathBuf, Unavailable> {
     // A `[tools]` entry decides first, registry member or not. For buf that is
     // the version poly pins; for the PATH-only servers it is the two answers a
     // project may need and previously had no way to give: `off` turns one
@@ -116,11 +154,90 @@ fn server_command(name: &str, config: &poly_core::Config) -> Option<PathBuf> {
     // of them is better. Both were silently ignored before, because `resolve`
     // was only consulted for tools poly downloads.
     if poly_tools::tool(name).is_some() || config.tools.contains_key(name) {
-        return poly_tools::resolve(name, config, false)
-            .command()
-            .map(Path::to_path_buf);
+        use poly_tools::Resolved;
+        return match poly_tools::resolve(name, config, false) {
+            Resolved::Managed(path) | Resolved::Path(path) | Resolved::Pinned(path) => Ok(path),
+            // No server is off by default today; if one ever is, it is off for
+            // the same reason `off` is -- somebody decided -- and says as much.
+            Resolved::Disabled | Resolved::OffByDefault => Err(Unavailable::Disabled),
+            Resolved::Missing(why) => Err(Unavailable::Missing(why)),
+        };
     }
-    poly_tools::find_on_path(name)
+    poly_tools::find_on_path(name).ok_or(Unavailable::NotOnPath)
+}
+
+/// What the editor is told about a server that is not going to run, if
+/// anything.
+///
+/// A popup and not only the stderr line, because the stderr line was the whole
+/// story and it was not enough: with `poly.languageServers` on and no
+/// bash-language-server, shell functions had no references and nothing on
+/// screen said why. The extension stays quiet once that setting is on, so this
+/// is the only place the cause can surface.
+///
+/// The languages are named the way the stderr line names them -- poly's ids,
+/// which are the editor's too for every language here -- rather than through a
+/// second table of display names that would have to be kept in step with
+/// `LANGUAGE_SERVERS`.
+fn unavailable_message(name: &str, why: &Unavailable, languages: &[String]) -> Option<String> {
+    let (reason, remedy) = match why {
+        Unavailable::Disabled => return None,
+        Unavailable::NotOnPath => (
+            format!("{name} is not on PATH"),
+            match INSTALL.iter().find(|(known, _)| *known == name) {
+                Some((_, command)) => {
+                    format!("Install it with `{command}`, then reload the window.")
+                }
+                None => "Install it and put it on PATH, then reload the window.".to_string(),
+            },
+        ),
+        // "Install it" would be wrong advice here: poly.toml names a binary
+        // that is not where it says, or poly's own download failed, and the
+        // sentence from `resolve` is the thing to fix. Reloading is still part
+        // of the answer, since the absence is remembered for the session.
+        Unavailable::Missing(why) => (
+            why.clone(),
+            "Reload the window once that is fixed.".to_string(),
+        ),
+    };
+    Some(format!(
+        "poly: {reason}, so {} files get no outline, references or hover. {remedy}",
+        languages.join(", ")
+    ))
+}
+
+/// `initializationOptions.yieldServers`: server name to the id of the editor
+/// extension already serving that server's languages.
+///
+/// The client knows which extensions are installed and poly does not, so the
+/// client decides and this only obeys. An unknown name is dropped with a line
+/// on stderr rather than kept: the list is written by hand on the TypeScript
+/// side, and a typo there would otherwise leave poly quietly starting the
+/// second server this exists to prevent.
+fn yield_servers(init_params: &serde_json::Value) -> HashMap<String, String> {
+    let Some(given) = init_params
+        .get("initializationOptions")
+        .and_then(|o| o.get("yieldServers"))
+        .filter(|v| !v.is_null())
+    else {
+        return HashMap::new();
+    };
+    let Ok(given) = serde_json::from_value::<HashMap<String, String>>(given.clone()) else {
+        eprintln!("[poly] yieldServers is not a map of server name to extension id; ignored");
+        return HashMap::new();
+    };
+    given
+        .into_iter()
+        .filter(|(name, _)| {
+            let known = is_language_server(name);
+            if !known {
+                eprintln!(
+                    "[poly] yieldServers names {name:?}, which is not a server poly routes to; ignored"
+                );
+            }
+            known
+        })
+        .collect()
 }
 
 fn args_for(table: &'static [(&str, &[&str])], name: &str) -> &'static [&'static str] {
@@ -166,6 +283,11 @@ fn languages_for(name: &str) -> Vec<String> {
 struct Server {
     connection: Connection,
     documents: HashMap<Url, String>,
+    /// The language each open document has in the editor, as its didOpen said.
+    ///
+    /// Routing only -- see `server_of`. Same keys as `documents` and dropped
+    /// with it, which is why `log_memory` does not count it separately.
+    language_ids: HashMap<Url, String>,
     lint_on_save: bool,
     /// Opt-in, and off by default: taking over Go means colliding with a
     /// golang.go the user has probably already installed, and that is their
@@ -191,6 +313,18 @@ struct Server {
     /// A server that failed to start is remembered as absent so poly does not
     /// retry the spawn on every keystroke.
     downstream: HashMap<String, Option<crate::proxy::Downstream>>,
+    /// Servers an installed extension already runs, by the id the client gave
+    /// for that extension. See `yield_servers`.
+    ///
+    /// Kept out of `downstream` rather than recorded there as absent, because
+    /// absent is not what they are: `route` answers a request for an absent
+    /// server with nothing, which here would also swallow poly's own rule hover
+    /// on a Go file that golang.go is serving perfectly well. A yielded server
+    /// has to leave poly exactly as it is with `languageServers` off.
+    yield_to: HashMap<String, String>,
+    /// The members of `yield_to` already named in the log, so a session that
+    /// opens forty Go files says why gopls is not starting once.
+    yielded: HashSet<String>,
     /// Server that answered the most recent `textDocument/completion`, which is
     /// the only thing that can route a `completionItem/resolve`. See `route`.
     last_completion: Option<String>,
@@ -490,39 +624,7 @@ fn serve(connection: Connection) -> Result<()> {
         ..Default::default()
     };
     let init_params = connection.initialize(serde_json::to_value(capabilities)?)?;
-    let option = |name: &str, default: bool| {
-        init_params
-            .get("initializationOptions")
-            .and_then(|o| o.get(name))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(default)
-    };
-    let lint_on_save = option("lintOnSave", true);
-    let language_servers = option("languageServers", false);
-    let language_server_logs = option("languageServerLogs", true);
-    let memory_log = option("memoryLog", false);
-
-    let mut server = Server {
-        connection,
-        documents: HashMap::new(),
-        lint_on_save,
-        language_servers,
-        language_server_logs,
-        memory_log,
-        init_params,
-        downstream: HashMap::new(),
-        last_completion: None,
-        last_code_action: None,
-        last_inlay_hint: None,
-        last_code_lens: None,
-        code_action_ids: Arc::new(Mutex::new(HashSet::new())),
-        symbol_fanouts: Arc::new(Mutex::new(HashMap::new())),
-        workspace_symbol_registered: false,
-        lint_hashes: HashMap::new(),
-        package_roots: HashSet::new(),
-        package_jobs: None,
-        diagnostics: Arc::new(Mutex::new(Diagnostics::default())),
-    };
+    let mut server = Server::new(connection, init_params);
 
     // A receive error means the editor closed the pipe: nothing left to serve.
     while let Ok(message) = server.connection.receiver.recv() {
@@ -582,6 +684,52 @@ fn serve(connection: Connection) -> Result<()> {
 }
 
 impl Server {
+    /// A session for the editor that sent `init_params`, with nothing open and
+    /// nothing started.
+    ///
+    /// Apart from `serve` so the tests can hold one over an in-memory
+    /// connection: what a didOpen starts, routes and tells the editor is only
+    /// visible from inside a session.
+    fn new(connection: Connection, init_params: serde_json::Value) -> Server {
+        let option = |name: &str, default: bool| {
+            init_params
+                .get("initializationOptions")
+                .and_then(|o| o.get(name))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(default)
+        };
+        let lint_on_save = option("lintOnSave", true);
+        let language_servers = option("languageServers", false);
+        let language_server_logs = option("languageServerLogs", true);
+        let memory_log = option("memoryLog", false);
+        let yield_to = yield_servers(&init_params);
+
+        Server {
+            connection,
+            documents: HashMap::new(),
+            language_ids: HashMap::new(),
+            lint_on_save,
+            language_servers,
+            language_server_logs,
+            memory_log,
+            init_params,
+            downstream: HashMap::new(),
+            yield_to,
+            yielded: HashSet::new(),
+            last_completion: None,
+            last_code_action: None,
+            last_inlay_hint: None,
+            last_code_lens: None,
+            code_action_ids: Arc::new(Mutex::new(HashSet::new())),
+            symbol_fanouts: Arc::new(Mutex::new(HashMap::new())),
+            workspace_symbol_registered: false,
+            lint_hashes: HashMap::new(),
+            package_roots: HashSet::new(),
+            package_jobs: None,
+            diagnostics: Arc::new(Mutex::new(Diagnostics::default())),
+        }
+    }
+
     /// Hand `request` to a downstream server if one answers for it.
     ///
     /// `Ok(None)` means it was forwarded and poly must stay quiet — two
@@ -847,8 +995,7 @@ impl Server {
         }
     }
 
-    /// Start the server that answers for `language`, if there is one and it is
-    /// wanted.
+    /// Start server `name` for the document at `uri`, if it is wanted.
     ///
     /// Called on didOpen, and keyed by server: opening a .cpp after a .c finds
     /// the clangd that is already running rather than starting a second one.
@@ -856,26 +1003,44 @@ impl Server {
     /// one message rather than one spawn attempt per keystroke — and it is a
     /// message, because a silently absent feature is the failure this project
     /// keeps refusing to ship.
-    fn ensure_downstream(&mut self, language: &str, uri: &Url) {
-        let Some(name) = server_for(language) else {
-            return;
-        };
+    fn ensure_downstream(&mut self, name: &str, uri: &Url) {
         if !self.language_servers || self.downstream.contains_key(name) {
             return;
         }
         let languages = languages_for(name);
+        // Before anything is resolved: a yielded server is not looked for, so
+        // it can be neither started nor reported missing. Two servers on one
+        // project is the whole cost being avoided -- gopls twice is two
+        // indexes, and every hover and reference answered twice over.
+        if let Some(extension) = self.yield_to.get(name) {
+            if self.yielded.insert(name.to_string()) {
+                eprintln!(
+                    "[poly] {name}: {extension} is installed and serves {}, so poly does not start a second one",
+                    languages.join(", ")
+                );
+            }
+            return;
+        }
         // The document's own config, so a `[tools]` entry disabling or
         // relocating a registry-resolved server is honoured the same way it is
         // for the formatter (R5/A4).
         let config = poly_core::Config::discover(&uri_path(uri))
             .unwrap_or_else(|_| poly_core::Config::empty());
-        let Some(command) = server_command(name, &config) else {
-            eprintln!(
-                "[poly] {name} is unavailable — no language features for {}",
-                languages.join(", ")
-            );
-            self.downstream.insert(name.to_string(), None);
-            return;
+        let command = match server_command(name, &config) {
+            Ok(command) => command,
+            Err(why) => {
+                eprintln!(
+                    "[poly] {name} is unavailable — no language features for {}",
+                    languages.join(", ")
+                );
+                // Once per server per session, which the entry below is what
+                // guarantees: nothing reaches this line for `name` again.
+                if let Some(message) = unavailable_message(name, &why, &languages) {
+                    self.show_warning(message);
+                }
+                self.downstream.insert(name.to_string(), None);
+                return;
+            }
         };
         let sender = self.connection.sender.clone();
         let diagnostics = Arc::clone(&self.diagnostics);
@@ -948,6 +1113,23 @@ impl Server {
         let _ = self.connection.sender.send(Message::Request(request));
     }
 
+    /// A popup in the editor, for the one kind of news stderr is not enough
+    /// for. See `unavailable_message`.
+    fn show_warning(&self, message: String) {
+        let params = lsp_types::ShowMessageParams {
+            typ: lsp_types::MessageType::WARNING,
+            message,
+        };
+        // A send error means the editor is gone, and so is anyone to tell.
+        let _ = self
+            .connection
+            .sender
+            .send(Message::Notification(Notification::new(
+                "window/showMessage".to_string(),
+                params,
+            )));
+    }
+
     /// The language poly detects for a document, by the same rules the CLI
     /// uses (R5/A4).
     fn language_of(&self, uri: &Url) -> Option<String> {
@@ -958,8 +1140,30 @@ impl Server {
     }
 
     /// The server poly would route this document to, running or not.
+    ///
+    /// The editor's language id first, and poly's own detection only when that
+    /// names no server. Routing is the one question where the editor's answer
+    /// is the right one: it is the editor that decided this document is shell
+    /// and registered it under that selector, so it is the editor that sends
+    /// the outline and hover requests for it. Path detection alone never
+    /// reached bash-language-server for three kinds of file VSCode calls
+    /// shellscript -- a `.zsh`, which poly calls `zsh` so shellcheck never
+    /// sees it; a script named only by its shebang; a dotfile like `.bashrc`
+    /// -- and for each of them the editor sent requests poly could only
+    /// refuse, about a document the server had never been shown.
+    ///
+    /// Lint and format do not come through here and must not: they ask
+    /// `language_of`, the same question `poly check` asks, and a `.zsh` has
+    /// to keep missing shellcheck there however the editor labels it (R5/A4).
+    ///
+    /// The fallback covers every document the editor did not open -- a file
+    /// operation, a call hierarchy item in another file -- and every id the
+    /// table does not list, which leaves those exactly as they were.
     fn server_of(&self, uri: &Url) -> Option<&'static str> {
-        self.language_of(uri).as_deref().and_then(server_for)
+        self.language_ids
+            .get(uri)
+            .and_then(|id| server_for(id))
+            .or_else(|| self.language_of(uri).as_deref().and_then(server_for))
     }
 
     /// Which running server declared this command, if any.
@@ -1146,6 +1350,22 @@ impl Server {
     }
 
     fn on_notification(&mut self, notification: Notification) -> Result<()> {
+        // Recorded ahead of `sync_downstream`, which is where a didOpen starts
+        // the server: it has to pick the same one every later request about
+        // this document is routed to, and both ask `server_of`.
+        if notification.method == "textDocument/didOpen" {
+            let document = notification.params.get("textDocument");
+            let uri = document
+                .and_then(|d| d.get("uri"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|uri| Url::parse(uri).ok());
+            let id = document
+                .and_then(|d| d.get("languageId"))
+                .and_then(serde_json::Value::as_str);
+            if let (Some(uri), Some(id)) = (uri, id) {
+                self.language_ids.insert(uri, id.to_string());
+            }
+        }
         self.sync_downstream(&notification);
         self.broadcast_downstream(&notification);
         self.file_operation_downstream(&notification);
@@ -1190,6 +1410,9 @@ impl Server {
                     serde_json::from_value(notification.params)?;
                 let uri = params.text_document.uri;
                 self.documents.remove(&uri);
+                // After `sync_downstream` above has used it to hand the close
+                // to the server that had the open.
+                self.language_ids.remove(&uri);
                 self.lint_hashes.remove(&uri);
                 self.lock().forget(&uri);
                 // Clear diagnostics so closed files don't linger in Problems.
@@ -1260,15 +1483,12 @@ impl Server {
         else {
             return;
         };
-        let Some(language) = self.language_of(&uri) else {
+        let Some(name) = self.server_of(&uri) else {
             return;
         };
         if notification.method == "textDocument/didOpen" {
-            self.ensure_downstream(&language, &uri);
+            self.ensure_downstream(name, &uri);
         }
-        let Some(name) = server_for(&language) else {
-            return;
-        };
         if let Some(Some(server)) = self.downstream.get_mut(name) {
             if let Err(e) = server.send(Message::Notification(notification.clone())) {
                 eprintln!("[poly] {name}: {e:#}");
@@ -2115,9 +2335,11 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
     // others, which is a minority of the files an editor opens.
     //
     // From the buffer rather than from disk, unlike spelling: there is no
-    // per-file configuration keyed off the name, and the value of the rule is
-    // that the character is underlined as it is pasted rather than after a
-    // save. `poly check` calls the same function with what it read from disk.
+    // per-file configuration keyed off the name, so the text is all it needs.
+    // That does not make it live. It runs when the rest of lint does -- on
+    // open and on save, since didChange only stores the text -- so a pasted
+    // character is underlined at the next save, not as it lands. `poly check`
+    // calls the same function with what it read from disk.
     let unicode = poly_engines::unicode::check(text);
     let Some(lang) = config.language(path) else {
         // Rare from this client -- its document selector only sends languages
@@ -3314,21 +3536,284 @@ mod tests {
                 .insert("rust-analyzer".to_string(), value.to_string());
             config
         };
-        assert_eq!(server_command("rust-analyzer", &entry("off")), None);
+        assert_eq!(
+            server_command("rust-analyzer", &entry("off")),
+            Err(Unavailable::Disabled)
+        );
 
         // A path that is not there is a failure, not a fall back to PATH: the
         // project said which binary it wanted.
-        assert_eq!(
+        assert!(matches!(
             server_command("rust-analyzer", &entry("./bin/rust-glancer")),
-            None
-        );
+            Err(Unavailable::Missing(_))
+        ));
 
         // No entry, so PATH decides as it always did.
         let empty = poly_core::Config::empty();
         assert_eq!(
-            server_command("rust-analyzer", &empty),
+            server_command("rust-analyzer", &empty).ok(),
             poly_tools::find_on_path("rust-analyzer")
         );
+        // And a miss there is its own answer, apart from the two above: it is
+        // the only one the editor is told how to fix.
+        assert_eq!(
+            server_command("poly-test-no-such-server", &empty),
+            Err(Unavailable::NotOnPath)
+        );
+    }
+
+    /// Three reasons a server is not running, and the editor hears about two.
+    ///
+    /// `off` is the project's own decision, so a popup about it on every window
+    /// would be a nag; the other two are news nobody had before -- the stderr
+    /// line was all there was, and with `poly.languageServers` on the extension
+    /// deliberately says nothing, so shell functions with no references had no
+    /// visible cause. The install command appears only where there is one
+    /// command for every platform, because a wrong one in a popup gets pasted.
+    #[test]
+    fn a_missing_server_says_how_to_fix_it_and_a_disabled_one_says_nothing() {
+        let shell = ["shellscript".to_string()];
+        assert_eq!(
+            unavailable_message("bash-language-server", &Unavailable::Disabled, &shell),
+            None
+        );
+
+        let missing = unavailable_message("bash-language-server", &Unavailable::NotOnPath, &shell)
+            .expect("a missing server is news");
+        assert!(
+            missing.contains("bash-language-server is not on PATH"),
+            "{missing}"
+        );
+        assert!(missing.contains("shellscript"), "{missing}");
+        assert!(
+            missing.contains("`npm install -g bash-language-server`"),
+            "{missing}"
+        );
+        assert!(missing.contains("reload the window"), "{missing}");
+
+        // clangd comes from a different package manager on every OS, so it
+        // gets the instruction and no command.
+        let c = ["c".to_string(), "cpp".to_string()];
+        let clangd = unavailable_message("clangd", &Unavailable::NotOnPath, &c).unwrap();
+        assert!(clangd.contains("c, cpp"), "{clangd}");
+        assert!(clangd.contains("put it on PATH"), "{clangd}");
+        assert!(!clangd.contains('`'), "no command to paste: {clangd}");
+
+        // A poly.toml path that is wrong is fixed in poly.toml, not by
+        // installing anything, so the reason is `resolve`'s and so is the fix.
+        let why = "poly.toml points gopls at /p/bin/gopls (not found)";
+        let pinned = unavailable_message(
+            "gopls",
+            &Unavailable::Missing(why.to_string()),
+            &["go".to_string()],
+        )
+        .unwrap();
+        assert!(pinned.contains(why), "{pinned}");
+        assert!(!pinned.contains("go install"), "{pinned}");
+    }
+
+    /// A session over an in-memory pipe, and the editor's end of it.
+    ///
+    /// Lint is off in every one: these are about which server a document
+    /// reaches, and linting a `.sh` would resolve shellcheck -- a download on a
+    /// machine that does not have it.
+    fn session(mut options: serde_json::Value) -> (Server, Connection) {
+        let (server, editor) = Connection::memory();
+        options["lintOnSave"] = serde_json::json!(false);
+        let init = serde_json::json!({ "initializationOptions": options });
+        (Server::new(server, init), editor)
+    }
+
+    /// A project whose poly.toml points bash-language-server somewhere it is
+    /// not, so the server is missing on every machine alike -- whatever this
+    /// one has on PATH -- and nothing a test does can start a real one.
+    fn project(tools: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("poly.toml"), format!("[tools]\n{tools}")).unwrap();
+        (dir, root)
+    }
+
+    fn file_uri(root: &Path, name: &str) -> Url {
+        Url::from_file_path(root.join(name)).unwrap()
+    }
+
+    fn open(server: &mut Server, uri: &Url, language_id: &str) {
+        let params = serde_json::json!({
+            "textDocument": {"uri": uri, "languageId": language_id, "version": 1, "text": "f() { :; }\n"},
+        });
+        server
+            .on_notification(Notification::new(
+                "textDocument/didOpen".to_string(),
+                params,
+            ))
+            .unwrap();
+    }
+
+    fn close(server: &mut Server, uri: &Url) {
+        let params = serde_json::json!({ "textDocument": {"uri": uri} });
+        server
+            .on_notification(Notification::new(
+                "textDocument/didClose".to_string(),
+                params,
+            ))
+            .unwrap();
+    }
+
+    /// The outline request, which is what shell had none of before routing.
+    fn outline(id: i32, uri: &Url) -> lsp_server::Request {
+        lsp_server::Request {
+            id: lsp_server::RequestId::from(id),
+            method: "textDocument/documentSymbol".to_string(),
+            params: serde_json::json!({ "textDocument": {"uri": uri} }),
+        }
+    }
+
+    /// Every popup the editor has been sent so far.
+    fn popups(editor: &Connection) -> Vec<String> {
+        editor
+            .receiver
+            .try_iter()
+            .filter_map(|message| match message {
+                Message::Notification(n) if n.method == "window/showMessage" => {
+                    n.params["message"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A missing server is said once per session, and a disabled one never.
+    ///
+    /// Once, because the absence is remembered and the next forty `.sh` files
+    /// opened are not forty pieces of news. Never for `off`, because the
+    /// project decided that and the reader of a popup did not ask to be told.
+    #[test]
+    fn the_editor_hears_once_about_a_missing_server_and_never_about_a_disabled_one() {
+        let (_dir, root) =
+            project("bash-language-server = \"./missing/bash-language-server\"\ngopls = \"off\"\n");
+        let (mut server, editor) = session(serde_json::json!({"languageServers": true}));
+
+        open(&mut server, &file_uri(&root, "a.sh"), "shellscript");
+        open(&mut server, &file_uri(&root, "b.sh"), "shellscript");
+        open(&mut server, &file_uri(&root, "main.go"), "go");
+
+        let said = popups(&editor);
+        assert_eq!(said.len(), 1, "{said:?}");
+        // poly.toml's reason, which is also proof the fixture was read rather
+        // than this machine's PATH.
+        assert!(
+            said[0].contains("poly.toml points bash-language-server"),
+            "{said:?}"
+        );
+        // Both are remembered as absent all the same: neither is retried.
+        assert!(matches!(
+            server.downstream.get("bash-language-server"),
+            Some(None)
+        ));
+        assert!(matches!(server.downstream.get("gopls"), Some(None)));
+    }
+
+    /// A server an installed extension already runs is not started, not
+    /// reported missing, and not in poly's way.
+    ///
+    /// The fixture's bash-language-server is missing, so without the yield this
+    /// session would pop up a warning and record the server as absent -- which
+    /// is the other half of what is checked. Absent is the wrong state for a
+    /// yielded server: `route` answers an absent server's requests with
+    /// nothing, and the hover poly declares for its own findings would go
+    /// silent on every file the other extension is serving.
+    #[test]
+    fn a_yielded_server_is_never_looked_for() {
+        let (_dir, root) = project("bash-language-server = \"./missing/bash-language-server\"\n");
+        let (mut server, editor) = session(serde_json::json!({
+            "languageServers": true,
+            "yieldServers": {
+                "bash-language-server": "mads-hartmann.bash-ide-vscode",
+                "gopl": "golang.go",
+            },
+        }));
+
+        let script = file_uri(&root, "a.sh");
+        open(&mut server, &script, "shellscript");
+        open(&mut server, &file_uri(&root, "b.sh"), "shellscript");
+
+        assert!(popups(&editor).is_empty());
+        assert!(!server.downstream.contains_key("bash-language-server"));
+        assert!(server.yielded.contains("bash-language-server"));
+        // A typo in the client's list names nothing poly would start.
+        assert!(!server.yield_to.contains_key("gopl"));
+
+        let hover = lsp_server::Request {
+            id: lsp_server::RequestId::from(7),
+            method: "textDocument/hover".to_string(),
+            params: serde_json::json!({
+                "textDocument": {"uri": script},
+                "position": {"line": 0, "character": 0},
+            }),
+        };
+        assert!(
+            server.route(hover).unwrap().is_some(),
+            "a hover on a yielded server's file is poly's to answer"
+        );
+    }
+
+    /// VSCode calls three kinds of file shellscript that poly's path detection
+    /// does not, and each has to reach the shell server anyway.
+    ///
+    /// A `.zsh` is `zsh` to poly on purpose, so shellcheck never lints it; a
+    /// script named by its shebang alone and a dotfile have no extension at
+    /// all. The editor registered them under the shellscript selector and sends
+    /// their outline requests to poly -- which, routing by path, refused every
+    /// one of them, and never showed the server the document either.
+    ///
+    /// Each in a session of its own, so each one's didOpen has to be the thing
+    /// that goes looking for the server.
+    #[test]
+    fn a_document_routes_by_the_language_the_editor_gave_it() {
+        let (_dir, root) = project("bash-language-server = \"./missing/bash-language-server\"\n");
+        for name in ["prompt.zsh", "deploy", ".bashrc"] {
+            let (mut server, editor) = session(serde_json::json!({"languageServers": true}));
+            let uri = file_uri(&root, name);
+            open(&mut server, &uri, "shellscript");
+
+            assert!(
+                server.downstream.contains_key("bash-language-server"),
+                "{name}: opening it did not go looking for the shell server"
+            );
+            assert!(
+                server.route(outline(1, &uri)).unwrap().is_none(),
+                "{name}: the outline request was handed back to poly"
+            );
+            let answered = editor.receiver.try_iter().any(|message| {
+                matches!(message, Message::Response(r) if r.id == lsp_server::RequestId::from(1))
+            });
+            assert!(answered, "{name}: routed, and then nobody answered");
+
+            // What lint and format read is untouched: `poly check` has no
+            // editor to ask, so the editor's label must not reach them either.
+            let expected = (name == "prompt.zsh").then(|| "zsh".to_string());
+            assert_eq!(server.language_of(&uri), expected, "{name}");
+
+            // Closed, the label goes with it, and the path is all there is.
+            close(&mut server, &uri);
+            assert_eq!(server.server_of(&uri), None, "{name}");
+        }
+    }
+
+    /// The editor's id only decides when it names a server. Anything else --
+    /// vscode-proto3 calls a `.proto` `proto3` -- falls through to the path,
+    /// which is where every document routed before the editor was asked.
+    #[test]
+    fn an_id_the_table_does_not_know_falls_back_to_the_path() {
+        let (mut server, _editor) = session(serde_json::json!({"languageServers": false}));
+        let proto = Url::parse("file:///p/api.proto").unwrap();
+        open(&mut server, &proto, "proto3");
+        assert_eq!(server.server_of(&proto), Some("buf"));
+
+        // Never opened at all: a call hierarchy item in another file.
+        let elsewhere = Url::parse("file:///p/other.go").unwrap();
+        assert_eq!(server.server_of(&elsewhere), Some("gopls"));
     }
 
     /// poly passes arguments only where the binary is not itself the server.

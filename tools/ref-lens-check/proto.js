@@ -135,10 +135,9 @@ function target(file, needle) {
  *
  * The label is half the claim: `go type` over a message that opens the wrong
  * file is a lens pointing nowhere, which is the thing `linkGeneratedGo` is
- * written to refuse. Both of poly's lens commands carry their destinations as
- * objects with a `uri` and a `range`, so one flat pass finds them --
- * `poly.goToSymbol` a list of targets, `poly.showReferences` the locations
- * behind the count.
+ * written to refuse. `poly.showLocations` carries its destinations as
+ * `Location`s, so one flat pass finds them. `poly.showReferences` carries only
+ * where to ask, and `observeProto` clicks it instead.
  *
  * Read in the host and not off the report, because `Range.toJSON` is a
  * two-element array: written out and parsed back, a destination has no `.start`
@@ -327,16 +326,34 @@ exports.observeProto = async function observeProto() {
     settled = now.length > 0 && now.length === lenses.length ? settled + 1 : 0;
     lenses = now;
   }
+  // An implementation lens carries where to ask, not the answer: the click asks
+  // again (see `showReferences` in the editor). So its answer is read the way a
+  // person gets it -- click, then read the list the click filled -- with the
+  // providers above still registered to answer. And the editor has to still be
+  // on the .proto afterwards: until 0.18.1 the click opened the generated file
+  // the question was asked of, and threw the reader out of the one they were in.
+  const observed = [];
+  for (const lens of lenses) {
+    const seen = {
+      line: lens.range.start.line,
+      text: document.lineAt(lens.range.start.line).text.trim(),
+      title: lens.command?.title ?? "(unresolved)",
+      targets: targetsOf(lens.command),
+    };
+    if (lens.command?.command === "poly.showReferences") {
+      await vscode.commands.executeCommand(lens.command.command, ...lens.command.arguments);
+      const shown = await vscode.commands.executeCommand("poly.referencesShown");
+      seen.targets = shown.files
+        .flatMap((file) => file.rows.map((row) => `${basename(file.path)}:${row.line + 1}`))
+        .sort();
+      seen.stayed = vscode.window.activeTextEditor?.document.uri.toString() === uri.toString();
+    }
+    observed.push(seen);
+  }
   for (const disposable of disposables) {
     disposable.dispose();
   }
-
-  return lenses.map((lens) => ({
-    line: lens.range.start.line,
-    text: document.lineAt(lens.range.start.line).text.trim(),
-    title: lens.command?.title ?? "(unresolved)",
-    targets: targetsOf(lens.command),
-  }));
+  return observed;
 };
 
 /** What the .proto's lenses said, and what is wrong with it. */
@@ -356,6 +373,11 @@ exports.checkProto = function checkProto(observed) {
   }
 
   const problems = [];
+  for (const one of observed ?? []) {
+    if (one.stayed === false) {
+      problems.push(`clicking "${one.title}" on ${one.text} left the .proto for another file`);
+    }
+  }
   for (const [text, want] of Object.entries(EXPECTED)) {
     const got = said.get(text) ?? [];
     if (got.join("; ") !== want.join("; ")) {

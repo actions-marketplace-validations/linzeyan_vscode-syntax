@@ -51,11 +51,16 @@ pub const RULES: &[(&str, Severity, &str)] = &[
     (
         "unicode-invisible",
         Severity::Warning,
-        "A character with no width. It survives copy and paste, it makes two \
-         identifiers that look identical compare unequal, and no editor will \
-         show you where it is. A byte order mark is exempt at the very start \
-         of a file, where it is a legitimate encoding marker, and reported \
-         anywhere else, where it arrived by concatenation.",
+        "A character that draws nothing, or nothing that says what it is: a \
+         zero-width space, a control code, the placeholder a rich-text paste \
+         leaves where an image was. It survives copy and paste, it makes two \
+         identifiers that look identical compare unequal, and reading the line \
+         will not tell you what it is. LINE SEPARATOR and PARAGRAPH SEPARATOR \
+         do one thing more: JavaScript and `str.splitlines` end a line at them \
+         and LSP, git and `grep` do not, so two tools reading one file \
+         disagree about which line they are on. A byte order mark is exempt at \
+         the very start of a file, where it is a legitimate encoding marker, \
+         and reported anywhere else, where it arrived by concatenation.",
     ),
     (
         "unicode-lookalike",
@@ -93,7 +98,41 @@ pub const RULES: &[(&str, Severity, &str)] = &[
 ///
 /// U+FEFF is here and handled specially by the caller: as the first character
 /// of a file it is a byte order mark and belongs there.
+///
+/// Five members are here for parity with the table gremlins ships by default,
+/// which is what this rule replaces -- someone who uninstalls gremlins for
+/// poly should not lose a squiggle they had. END OF TEXT, LINE TABULATION,
+/// PARAGRAPH SEPARATOR and OBJECT REPLACEMENT CHARACTER are gremlins' own;
+/// LINE SEPARATOR is not, and is here as PARAGRAPH SEPARATOR's twin: the two
+/// are one hazard, and reporting one of them would be a gap nobody could
+/// explain.
+///
+/// This code rather than another, because none of them impersonates an ASCII
+/// character, which is what `-lookalike` and `-space` both claim. LINE
+/// TABULATION comes closest to `-space` and still is not one: it is ASCII, and
+/// every tokenizer that knows a tab knows it as whitespace too -- `-space` is
+/// about the characters a tokenizer does *not* split on. What all five share
+/// with the rest of this list is that they draw nothing, or draw a stand-in
+/// that does not say what they are, which is why the rule's prose reads that
+/// way rather than "no width": U+FFFC is a visible box in the fonts that have
+/// it.
+///
+/// The two separators carry one harm more. JavaScript treats them as line
+/// terminators and Python's `str.splitlines` does too (it splits at LINE
+/// TABULATION as well), while LSP, git and `grep` count only `\n`, `\r\n` and
+/// `\r` -- so a finding after one is on a different line depending on who is
+/// counting. This module counts `\n`, which is the editor's answer and the one
+/// the squiggle has to agree with.
+///
+/// Measured before adding them, the way the rest of this module was: this
+/// repository has none of the five, and the 46,374 text files of the
+/// differential corpus have two -- both U+FFFC, both in a comment explaining
+/// the placeholder Signal puts where a mention goes. That is the deliberate
+/// kind of finding the module header describes, and it is what `poly: ignore`
+/// is for.
 const INVISIBLE: &[char] = &[
+    '\u{0003}', // END OF TEXT
+    '\u{000B}', // LINE TABULATION
     '\u{00AD}', // SOFT HYPHEN
     '\u{061C}', // ARABIC LETTER MARK
     '\u{180E}', // MONGOLIAN VOWEL SEPARATOR
@@ -102,8 +141,11 @@ const INVISIBLE: &[char] = &[
     '\u{200D}', // ZERO WIDTH JOINER
     '\u{200E}', // LEFT-TO-RIGHT MARK
     '\u{200F}', // RIGHT-TO-LEFT MARK
+    '\u{2028}', // LINE SEPARATOR
+    '\u{2029}', // PARAGRAPH SEPARATOR
     '\u{2060}', // WORD JOINER
     '\u{FEFF}', // ZERO WIDTH NO-BREAK SPACE / BYTE ORDER MARK
+    '\u{FFFC}', // OBJECT REPLACEMENT CHARACTER
 ];
 
 /// The bidirectional overrides and isolates, which is the whole Trojan Source
@@ -276,9 +318,12 @@ pub fn check(text: &str) -> Vec<Issue> {
                 ),
             ))
         } else if !bom && INVISIBLE.contains(&c) {
+            // Not "is invisible": U+FFFC draws a box and VSCode draws a control
+            // picture for U+0003, and a message contradicting what is on screen
+            // reads as a false positive. Neither of them draws *itself*.
             Some((
                 "unicode-invisible",
-                format!("U+{:04X} is invisible: nothing here renders it", c as u32),
+                format!("U+{:04X} does not render as what it is", c as u32),
             ))
         } else if SPACES.contains(&c) {
             Some((
@@ -390,6 +435,28 @@ mod tests {
     fn a_byte_order_mark_is_only_a_marker_at_the_start() {
         assert_eq!(codes("\u{FEFF}{}\n"), Vec::<String>::new());
         assert_eq!(codes("{}\u{FEFF}\n"), ["unicode-invisible"]);
+    }
+
+    /// This rule replaces gremlins, so what gremlins flags out of the box has
+    /// to be flagged here, or uninstalling it for poly loses a squiggle the
+    /// user had. LINE SEPARATOR is not in gremlins' table and is here as
+    /// PARAGRAPH SEPARATOR's twin; EM DASH is in neither, and stays prose.
+    #[test]
+    fn what_gremlins_flags_by_default_is_flagged_here() {
+        for c in ['\u{0003}', '\u{000B}', '\u{2028}', '\u{2029}', '\u{FFFC}'] {
+            assert_eq!(
+                codes(&format!("a{c}b\n")),
+                ["unicode-invisible"],
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        // A separator ends a line for JavaScript and not for LSP, and the
+        // squiggle is drawn by LSP's count: a finding after one stays on the
+        // line the editor shows it on.
+        let found = check("a\u{2028}b\u{200B}\n");
+        let at: Vec<_> = found.iter().map(|i| (i.line, i.col)).collect();
+        assert_eq!(at, [(0, 1), (0, 3)]);
     }
 
     /// Text in one script is text. The rule is about a word that uses two, and

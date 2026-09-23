@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { At, elsewhere, implLabel, lensTargets, refLabel } from "./references";
+import { Answered, At, declarationKeys, elsewhere, implLabel, lensTargets, nameStart, refLabel } from "./references";
 
 // vscode.SymbolKind, by the numbers the provider actually hands over.
 const FUNCTION = 11;
@@ -167,4 +167,50 @@ test("a Go method is asked too, though it is nobody's child", () => {
     lensTargets(file, 100).map((t) => [t.symbol.name, t.implementation]),
     [["Circle", "up"], ["(Circle).Area", "up"]],
   );
+});
+
+// bash-language-server gives a shell function one range, the whole definition,
+// and the editor copies it into `selectionRange`. Asked at that range's start,
+// `function greet {` is asked at a keyword and answers nothing -- which is how
+// shell functions written that way came to read `no refs`.
+test("a flat symbol is asked about at its name, not its keyword", () => {
+  assert.equal(nameStart("function greet {", "greet", 0), 9);
+  assert.equal(nameStart("function greet() {", "greet", 0), 9);
+  // The other spelling already started at the name, and must not move.
+  assert.equal(nameStart("greet() {", "greet", 0), 0);
+  // From the declaration's column, not the line's: an indented definition.
+  assert.equal(nameStart("  function greet {", "greet", 2), 11);
+});
+
+test("a name is found whole, not inside a longer one", () => {
+  assert.equal(nameStart("function rerun { run; }", "run", 0), 17);
+  assert.equal(nameStart("function run_all {", "run", 0), undefined);
+  assert.equal(nameStart("x", "", 0), undefined);
+});
+
+test("a declaration keeps its key while lines move around it", () => {
+  const before = declarationKeys([
+    { name: "area", kind: INTERFACE },
+    { name: "area", kind: METHOD },
+    { name: "area", kind: METHOD },
+  ]);
+  // Same names, same order: typing above them changes no key, and two methods
+  // of one name stay apart -- neither may show the other's count.
+  assert.deepEqual(before, ["10:area#0", "5:area#0", "5:area#1"]);
+  assert.equal(new Set(before).size, 3);
+});
+
+test("a count is reused for a while and then asked again", () => {
+  let now = 1_000;
+  const answered = new Answered(10_000, () => now);
+  answered.set("file:///a.go", "22:Circle#0", 4);
+  now += 9_999;
+  assert.equal(answered.get("file:///a.go", "22:Circle#0"), 4, "typing must not re-ask");
+  now += 1;
+  assert.equal(answered.get("file:///a.go", "22:Circle#0"), undefined, "a stale count is asked again");
+  // Another file's declaration of the same name is a different question.
+  answered.set("file:///a.go", "22:Circle#0", 4);
+  assert.equal(answered.get("file:///b.go", "22:Circle#0"), undefined);
+  answered.forget("file:///a.go");
+  assert.equal(answered.get("file:///a.go", "22:Circle#0"), undefined);
 });

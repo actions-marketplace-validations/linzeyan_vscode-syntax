@@ -27,6 +27,7 @@ const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@v
 const SCRATCH = runnable.SCRATCH;
 const WORKSPACE = join(SCRATCH, "workspace");
 const OUT = join(ROOT, ".logs", "audit", "ref-lens.json");
+const COST_OUT = join(ROOT, ".logs", "audit", "ref-lens-cost.json");
 const CACHE = join(ROOT, "extensions", "lsp", ".vscode-test");
 
 /**
@@ -171,6 +172,7 @@ async function main() {
       POLY_LENS_FIXTURE: fixture,
       POLY_FLAT_FIXTURE: flat,
       POLY_LENS_OUT: OUT,
+      POLY_COST_OUT: COST_OUT,
       ...protoEnv,
     },
     ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
@@ -278,6 +280,37 @@ async function main() {
     );
   }
   problems.push(...runnable.check());
+
+  // What the lens asked of the server behind it, per gesture. See cost.js.
+  const cost = JSON.parse(readFileSync(COST_OUT, "utf8"));
+  console.log(
+    `\nquestions put to a server answering in ${cost.answerMs}ms, `
+      + `${cost.declarations} declarations, a click on ${cost.hitFiles * 2} hits in ${cost.hitFiles} files:`,
+  );
+  for (const [gesture, counts] of Object.entries(cost.phases)) {
+    console.log(`  ${gesture.padEnd(13)} ${JSON.stringify(counts)}`);
+  }
+  // Only the counts poly decides are held down. Typing that changes no
+  // declaration and a scroll over lenses already drawn were 17 reference and
+  // 6-12 implementation queries each before 0.18.1; a click opened every file
+  // it listed. What is left unbounded is the first open, which has to ask, and
+  // a lens drawn again after its count went stale, which is the reuse window
+  // doing its job.
+  const { typing, scroll, click, clickSettled } = cost.phases;
+  if (typing.references + typing.implementations > 0) {
+    problems.push(`typing asked again: ${JSON.stringify(typing)}`);
+  }
+  if (scroll.implementations > 0) {
+    problems.push(`a scroll probed implementations again: ${JSON.stringify(scroll)}`);
+  }
+  if (click.opened > 0) {
+    problems.push(`the click opened ${click.opened} file(s) before the list appeared`);
+  }
+  // MAX_EXPANDED in extensions/editor/src/referenceTree.ts: the files that
+  // arrive unfolded, each of which is an outline request.
+  if (clickSettled.opened > 10) {
+    problems.push(`the list opened ${clickSettled.opened} files, more than it unfolds`);
+  }
 
   if (problems.length > 0) {
     console.error(`\n${problems.length} problem(s):`);

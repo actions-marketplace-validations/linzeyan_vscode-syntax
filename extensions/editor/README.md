@@ -27,7 +27,8 @@
 - **引用與實作 CodeLens**（設定）：每個宣告一行 `11 refs`；interface 多一顆 `3 impls`，
   具體型別多一顆 `1 interface`，方法寫在型別外面的語言（Go）再多一顆 `4 methods`。
   數字全部來自該語言已註冊的 provider，poly 只數與畫。
-  - 只有一筆就直接跳過去，多筆開檔案總管裡的 **References** 面板。那是 poly 自己的樹，
+  - `N refs`、`N impls`、`N methods` 點下去都一樣：只有一筆就直接跳過去，多筆開檔案總管裡的
+    **References** 面板。那是 poly 自己的樹，
     每一列除了原始碼還帶**行號**與**它落在哪個符號裡**（`method Handle`、`func main`）——
     內建的 `references-view` 兩欄都沒有，而別人的樹加不了欄位。
 - **`run | debug` CodeLens**（設定）：程式進入點上方一行。`run` 存檔後在一個叫 `Poly Run`
@@ -35,7 +36,8 @@
   shell → shebang 指定的直譯器），不經過 debugger；要先編譯的 C／C++／Java／C# 只畫
   `debug`。poly 沒有 debugger，`debug` 交給你已經裝的 debug extension。
 - **protobuf → 生成的 Go**（設定）：`.proto` 的 `message`／`enum` 上方 `go type`，
-  `service` 上方 `go server`／`go client`，`rpc` 上方 `N impls`。認 protoc-gen-go 與
+  `service` 上方 `go server`／`go client`，`rpc` 上方 `N impls`。點下去跟引用 lens 一樣：
+  一筆直接跳、多筆開 **References** 面板，編輯器停在 `.proto` 上。認 protoc-gen-go 與
   protoc-gen-go-grpc 的命名規則；生成檔不在 workspace 裡就不畫。
 - **跨檔案 next／previous change**：跳到上／下一個有改動的檔案並落在改動上。內建的只到
   「同一個檔案裡的下一處」。`Revert Selected Changes and Save` 還原游標所在的 hunk 並存檔。
