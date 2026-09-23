@@ -33,7 +33,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
-	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff mermaid-diff engine-diff \
+	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff ext-diff mermaid-diff engine-diff \
 	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz gutter-cache bump control clean
 
 help: ## List targets
@@ -287,6 +287,24 @@ grammar-real: tokdeps ## grammar-diff over ordinary source files from GRAMMAR_TR
 
 editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 	node tools/editor-diff/run.js
+
+# The same question asked of the extensions people had installed before poly
+# replaced them -- gremlins, a status-bar format toggle, bash-ide -- and of the
+# built-in references view poly's lens now opens a tree in place of. It exists
+# because features that passed every test here still worked badly in use: the
+# tests only ever asked poly, never the thing a user was comparing it with.
+#
+# Two launches per case set, one with the original and one with poly loaded
+# from this checkout's source, so neither side's decorations reach the other's
+# screenshots. Each writes results.json and PNG screenshots; .logs/ext-diff-<time>/ gets
+# diff.json and an index.html that pairs the pictures with the rows.
+#
+# Out of `gates` for editor-diff's reason -- it downloads software this repo
+# does not ship, and a disagreement is a finding to read rather than a failure.
+# It exits non-zero only when a side could not be measured. `POLY=` points it
+# at another binary, as it does for the targets that drive this one.
+ext-diff: build ## poly against the extensions it replaced, with screenshots (downloads them)
+	node tools/ext-diff/run.js $(POLY)
 
 # The other half of ref-lens. What it holds down is the half of poly-editor
 # that is not poly's code -- five lenses and commands are wired to particular
