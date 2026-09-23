@@ -1,0 +1,20 @@
+{
+  "name": "poly-e2e-language-defaults",
+  "displayName": "poly e2e: a language default another extension ships",
+  "description": "Loaded beside poly-lsp in the e2e host and nowhere else. golang.go ships `[go]` format-on-save as a language default, which outranks a global `editor.formatOnSave: false` -- the reason a global-only format toggle leaves Go formatting on save. This ships the same shape for `[bat]`, a language no other test touches, so the Format switch can be tested against it without golang.go.",
+  "publisher": "poly-e2e",
+  "version": "0.0.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "contributes": {
+    "configurationDefaults": {
+      "[bat]": {
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.organizeImports": "explicit"
+        }
+      }
+    }
+  }
+}

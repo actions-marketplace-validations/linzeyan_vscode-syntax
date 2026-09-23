@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import { LanguageClient, State, TransportKind } from "vscode-languageclient/node";
 import { firstCodeLine } from "./anchor";
 import { commonRoot, useLines } from "./gowork";
+import { isOn, type Quiet, stillOn, toggler } from "./quiet";
 import { checkForUpdates, scheduleUpdateCheck } from "./update";
 
 // Everything the extension does goes through the daemon, so a daemon that
@@ -125,6 +126,7 @@ const MINIFIABLE = [
 let client: LanguageClient | undefined;
 let status: vscode.StatusBarItem | undefined;
 let formatToggle: vscode.StatusBarItem | undefined;
+let lintToggle: vscode.StatusBarItem | undefined;
 let health: "starting" | "ready" | "failed" = "starting";
 
 /// May poly rewrite a file right now?
@@ -137,13 +139,11 @@ let health: "starting" | "ready" | "failed" = "starting";
 /// "poly does not touch my files while this is off" is one sentence, and the
 /// status bar says which way it is pointing.
 ///
-/// Not `editor.formatOnSave`: this machine, like many, leaves that false
-/// globally and turns it on in per-language blocks, so flipping the global one
-/// from a button would look broken. poly owns its own answer instead.
+/// Not `editor.formatOnSave` alone, even though the status bar switch writes
+/// that too (see quiet.ts): Format Document does not consult it, and "poly
+/// does not touch my files" has to cover the explicit request as well.
 function mayFormat(): boolean {
-  return vscode.workspace
-    .getConfiguration("poly")
-    .get<boolean>("format.enabled", true);
+  return isOn("format");
 }
 
 // The binary and the extension ship in one VSIX and are versioned together, so
@@ -174,7 +174,8 @@ function refreshStatus(): void {
   }
   const language = vscode.window.activeTextEditor?.document.languageId;
   const mine = language !== undefined && LANGUAGES.includes(language);
-  refreshFormatToggle(mine);
+  refreshSwitch(formatToggle, "format", language !== undefined);
+  refreshSwitch(lintToggle, "lint", language !== undefined);
   // A version mismatch stays on screen whatever the active file is: it is a
   // broken installation, not a per-file state, and it will not fix itself.
   const relevant = health !== "ready" || versionWarning !== undefined || mine;
@@ -200,42 +201,51 @@ function refreshStatus(): void {
     );
   } else {
     status.text = "$(check) Poly";
-    status.tooltip = mayFormat()
-      ? "Poly is formatting and linting this file — click for the log"
-      : "Poly is linting this file; formatting is suspended — click for the log";
+    const doing = [isOn("format") && "formatting", isOn("lint") && "linting"].filter(Boolean);
+    status.tooltip = doing.length > 0
+      ? `Poly is ${doing.join(" and ")} this file — click for the log`
+      : "Formatting and linting are stopped — click for the log";
     status.backgroundColor = undefined;
   }
   status.show();
 }
 
-/// A second item, because it is a second thing.
+/// Items of their own, because they are other things.
 ///
-/// The Poly item answers "is the daemon working"; this one answers "is it
-/// allowed to rewrite this file", which the user changes many times a day and
-/// the other never. Folding the switch into the health item would mean a click
-/// that opens the log when poly is unhappy and rewrites a setting when it is
-/// not. Shown only for a file poly handles — a suspend button over a .png is
-/// an offer to suspend nothing.
-function refreshFormatToggle(relevant: boolean): void {
-  if (!formatToggle) {
+/// The Poly item answers "is the daemon working"; these answer "may anything
+/// rewrite this file" and "may anything lint it", which the user changes many
+/// times a day and the other never. Folding a switch into the health item would
+/// mean a click that opens the log when poly is unhappy and rewrites settings
+/// when it is not. Shown for any file, not only poly's: the switches reach
+/// every extension's formatter and linter, so a Go file served by golang.go is
+/// as much theirs as a .ts is.
+function refreshSwitch(item: vscode.StatusBarItem | undefined, which: Quiet, relevant: boolean): void {
+  if (!item) {
     return;
   }
   if (!relevant) {
-    formatToggle.hide();
+    item.hide();
     return;
   }
-  const on = mayFormat();
-  formatToggle.text = on ? "$(edit) Format" : "$(circle-slash) Format";
-  formatToggle.tooltip = on
-    ? "Poly formats this file on save — click to suspend"
-    : "Poly will not rewrite this file — click to resume formatting";
-  // Warning rather than error: suspended is a state the user chose, and it has
+  const on = isOn(which);
+  const name = which === "format" ? "Format" : "Lint";
+  item.text = on ? `$(${which === "format" ? "edit" : "checklist"}) ${name}` : `$(circle-slash) ${name}`;
+  const leftover = on ? [] : stillOn(which);
+  item.tooltip = (on
+    ? which === "format"
+      ? "Files are formatted on save, type and paste — click to stop it for every extension"
+      : "Linters are running — click to stop poly's and every other extension's"
+    : which === "format"
+    ? "No extension rewrites files on its own — click to resume"
+    : "Linters are stopped — click to resume")
+    + (leftover.length > 0 ? `\nStill on in this workspace's settings: ${leftover.join(", ")}` : "");
+  // Warning rather than error: stopped is a state the user chose, and it has
   // to be visible across a window full of tabs or it is the kind of switch
   // that gets left off for a week.
-  formatToggle.backgroundColor = on
+  item.backgroundColor = on
     ? undefined
     : new vscode.ThemeColor("statusBarItem.warningBackground");
-  formatToggle.show();
+  item.show();
 }
 
 async function reportDaemonFailure(detail: string): Promise<void> {
@@ -737,10 +747,13 @@ export async function activate(context: vscode.ExtensionContext) {
       // every start.
       initializationOptions: () => ({
         yieldServers: yielded,
+        // Read at startup, and a change restarts the client (below): the lint
+        // switch has to take poly's findings off the screen when it is clicked,
+        // not at the next reload.
         lintOnSave: vscode.workspace
           .getConfiguration("poly")
           .get<boolean>("lintOnSave", true),
-        // Read once at startup, like lintOnSave: the daemon acts on it when it
+        // Read once at startup: the daemon acts on it when it
         // spawns a downstream server, and a server already running cannot be
         // un-started by a settings change. Toggling it takes a reload, which
         // is what the setting description says.
@@ -784,6 +797,11 @@ export async function activate(context: vscode.ExtensionContext) {
     99,
   );
   formatToggle.command = "poly.toggleFormat";
+  lintToggle = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    98,
+  );
+  lintToggle.command = "poly.toggleLint";
   // State changes cover crashes and restarts too, not just the initial start.
   client.onDidChangeState((event) => {
     health = event.newState === State.Running
@@ -797,9 +815,16 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     status,
     formatToggle,
+    lintToggle,
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.format")) {
+      if (event.affectsConfiguration("poly.format") || event.affectsConfiguration("poly.lintOnSave")) {
         refreshStatus();
+      }
+      // The daemon reads it at spawn time, and a restart is also what clears
+      // the findings already on screen: the client drops its diagnostics when
+      // it stops, and a daemon started with lint off publishes none.
+      if (event.affectsConfiguration("poly.lintOnSave")) {
+        void client?.restart();
       }
     }),
     vscode.window.onDidChangeActiveTextEditor(() => {
@@ -840,16 +865,13 @@ export async function activate(context: vscode.ExtensionContext) {
       );
     }),
     vscode.commands.registerCommand("poly.showOutput", () => client?.outputChannel.show()),
-    // Global scope: the switch is "I am not in the mood for this right now",
+    // Global scope: a switch is "I am not in the mood for this right now",
     // which is about the person and not about the project. Writing it at
-    // workspace scope would leave a line in somebody's .vscode/settings.json
-    // for the whole team to inherit. Switching back on removes the line rather
-    // than writing `true`: on is the default, and a toggle should leave the
-    // settings file as it found it.
-    vscode.commands.registerCommand("poly.toggleFormat", async () => {
-      const config = vscode.workspace.getConfiguration("poly");
-      await config.update("format.enabled", mayFormat() ? false : undefined, vscode.ConfigurationTarget.Global);
-    }),
+    // workspace scope would leave lines in somebody's .vscode/settings.json
+    // for the whole team to inherit. Switching back on puts back exactly what
+    // was there, so the settings file ends as it started.
+    vscode.commands.registerCommand("poly.toggleFormat", toggler("format", context.globalState, logLine)),
+    vscode.commands.registerCommand("poly.toggleLint", toggler("lint", context.globalState, logLine)),
     vscode.commands.registerCommand("poly.createGoWork", createGoWork),
     vscode.commands.registerCommand("poly.formatFile", async () => {
       const doc = vscode.window.activeTextEditor?.document;

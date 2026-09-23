@@ -20,8 +20,18 @@
   JavaScript／TypeScript。只移除空白與註解，不改名、不折常數、不刪分支。唯一例外是 CSS：
   壓縮印表機同時會把值寫成最短等價形式（`blue` → `#00f`）。YAML／TOML 不處理（換行有意義）。
   刻意不進 format-on-save——它是格式化的反向。
-- **`Poly: Toggle Formatting`**：狀態列一個開關，暫停 poly 所有的改寫（Format Document、
-  format-on-save、Format Selection、`.editorconfig` 的存檔修正），診斷照常。
+- **狀態列的 Format／Lint 兩個總開關**：關掉的不只 poly，是整個編輯器。
+  - **Format**（`Poly: Toggle Formatting`）：存檔／打字／貼上時格式化、存檔時的 code action
+    （organizeImports 之類）、行尾空白與結尾換行、poly 自己的所有改寫，**包括其他 extension
+    自帶的各語言預設**——golang.go 的 `[go]` 存檔格式化、Pylance 的 `[python]` 打字格式化，
+    只改全域設定的開關擋不到這些。
+  - **Lint**（`Poly: Toggle Linting`）：poly 的 lint，加上已安裝的 ruff、Go 存檔時的
+    lint／vet、rust-analyzer 存檔時的 check、Code Spell Checker、autocorrect、ESLint、
+    ShellCheck、Stylelint、Pylint、Flake8。編譯與型別錯誤不是 lint，照常顯示。
+  - 再按一次，每一項**還原成原本的樣子**；關著的時候你自己改過的設定不會被蓋掉。只寫使用者
+    設定，不動專案的 `.vscode/settings.json`——那裡若還開著什麼，開關的提示會列出來。
+  - 手動用其他 extension 的 formatter 跑 Format Document 照樣有效（那是你要求的）。
+    markdownlint 與 gremlins 沒有關閉的設定，關不到。
 - **規則說明**：SQL 的波浪線上 hover 會顯示 sqruff 該條規則的全文（編在 binary 裡，離線可讀）；
   其他工具走規則代碼上的超連結。
 - **Protobuf**（`.proto`）由 buf 處理，格式化免設定。**lint 只在有 `buf.yaml` 的 module 裡跑**，
@@ -55,7 +65,7 @@ C/C++、Swift、HashiCorp Terraform、Lua（sumneko）、Bash IDE、Buf 的那�
 
 其餘命令沒有預設快捷鍵，從命令面板叫，或自己在 `keybindings.json` 綁：
 `poly.formatFile`／`formatPath`／`formatWorkspace`／`formatGitRepo`／`formatGitChanged`、
-`poly.lintPath`、`poly.analyzeDeadCode`、`poly.toggleFormat`、`poly.createGoWork`、
+`poly.lintPath`、`poly.analyzeDeadCode`、`poly.toggleFormat`、`poly.toggleLint`、`poly.createGoWork`、
 `poly.checkForUpdates`、`poly.showOutput`。
 
 ## 設定
@@ -63,8 +73,8 @@ C/C++、Swift、HashiCorp Terraform、Lua（sumneko）、Bash IDE、Buf 的那�
 | 設定                            | 預設    | 作用                                                         |
 | ------------------------------- | ------- | ------------------------------------------------------------ |
 | `poly.serverPath`               | `""`    | 改用指定路徑的 poly binary，空字串是用內附的那支             |
-| `poly.lintOnSave`               | `true`  | 存檔時跑 lint 並更新 Problems                                |
-| `poly.format.enabled`           | `true`  | 關掉後 poly 的所有改寫都不動作，診斷照常                     |
+| `poly.lintOnSave`               | `true`  | 開檔與存檔時跑 lint，改了立即生效；Lint 開關也寫這一項       |
+| `poly.format.enabled`           | `true`  | 關掉後 poly 的所有改寫都不動作；Format 開關也寫這一項        |
 | `poly.deadCodeCodeLens.enabled` | `false` | 每個 Go／TS／JS／Python 檔第一行上方一條 `analyze dead code` |
 | `poly.languageServers`          | `false` | 把語言功能路由給下游 server（見上），改完要重新載入視窗      |
 | `poly.languageServerLogs`       | `true`  | 下游 server 的 stderr 轉進 Poly 輸出面板                     |

@@ -109,6 +109,10 @@
         "title": "%command.toggleFormat.title%"
       },
       {
+        "command": "poly.toggleLint",
+        "title": "%command.toggleLint.title%"
+      },
+      {
         "command": "poly.checkForUpdates",
         "title": "%command.checkForUpdates.title%"
       },
