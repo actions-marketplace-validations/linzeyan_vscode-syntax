@@ -214,6 +214,16 @@ const vscode = {
     showWarningMessage: () => Promise.resolve(undefined),
     showQuickPick: () => Promise.resolve(undefined),
     setStatusBarMessage: () => nothing,
+    // The "Poly Editor" log channel. Nothing here reads what it says.
+    createOutputChannel: () => ({
+      ...nothing,
+      trace() {},
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      appendLine() {},
+    }),
   },
   workspace: {
     workspaceFolders: [{ uri: Uri.file(WORKSPACE), name: "workspace", index: 0 }],
