@@ -905,7 +905,10 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage(`Poly: minify failed: ${err}`);
       }
     }),
-    vscode.commands.registerCommand("poly.checkForUpdates", () => checkForUpdates(context, false)),
+    vscode.commands.registerCommand(
+      "poly.checkForUpdates",
+      () => checkForUpdates(context, false, logLine),
+    ),
   );
   analyzeDeadCodeLens(context);
 
@@ -925,7 +928,12 @@ export async function activate(context: vscode.ExtensionContext) {
   // The editors already open when the window was restored: they fired their
   // events before the daemon could answer, so nothing above has seen them.
   applyIndentationToVisible();
-  scheduleUpdateCheck(context);
+  scheduleUpdateCheck(context, logLine);
+}
+
+/** A line in the "Poly" channel, from code that runs outside the client. */
+function logLine(line: string): void {
+  client?.outputChannel.appendLine(line);
 }
 
 export function deactivate(): Thenable<void> | undefined {

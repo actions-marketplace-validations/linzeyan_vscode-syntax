@@ -44,8 +44,38 @@ function vsceTarget(): string {
   return `${platform}-${arch}`;
 }
 
+/**
+ * Is the release GitHub last named newer than what is installed?
+ *
+ * The cached tag is not "already seen" in any sense that matters: seeing a
+ * release is not installing it. A prompt that was dismissed, or that faded into
+ * the notification centre unread, leaves exactly this state behind -- and until
+ * 0.18.1 the check below treated it as "nothing to do", so a 304 kept a machine
+ * on 0.11.0 through seven releases.
+ */
+export function knownNewer(cachedTag: string | undefined, current: string): boolean {
+  return cachedTag !== undefined && isNewer(cachedTag, current);
+}
+
+/**
+ * Should the check ask GitHub "has anything changed since this ETag"?
+ *
+ * Only when the cached answer is one there is nothing to do about. A 304
+ * carries no body, and the asset list an install needs is in the body -- so
+ * while the cached tag is still ahead of this install, the question has to be
+ * asked in full or the answer cannot be acted on.
+ */
+export function revalidates(
+  etag: string | undefined,
+  cachedTag: string | undefined,
+  current: string,
+): boolean {
+  return etag !== undefined && cachedTag !== undefined && !knownNewer(cachedTag, current);
+}
+
 async function fetchLatest(
   state: vscode.Memento,
+  current: string,
 ): Promise<Release | undefined> {
   const headers: Record<string, string> = {
     "User-Agent": "poly-lsp",
@@ -53,7 +83,7 @@ async function fetchLatest(
   };
   const etag = state.get<string>(ETAG);
   const cachedTag = state.get<string>(CACHED_TAG);
-  if (etag && cachedTag) {
+  if (etag && revalidates(etag, cachedTag, current)) {
     headers["If-None-Match"] = etag;
   }
   const res = await fetch(
@@ -61,8 +91,8 @@ async function fetchLatest(
     { headers },
   );
   if (res.status === 304 && cachedTag) {
-    // Unchanged since last check; no need to re-parse assets because an
-    // unchanged tag can only mean an already-seen (or current) version.
+    // Only reachable when the cached tag is not newer than this install, which
+    // is the one case where "unchanged" really does mean "nothing to update".
     return undefined;
   }
   // /releases/latest skips pre-releases, so a repo carrying only -rc tags
@@ -87,7 +117,7 @@ async function fetchLatest(
   };
 }
 
-function isNewer(latestTag: string, current: string): boolean {
+export function isNewer(latestTag: string, current: string): boolean {
   const parse = (v: string) => v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
   const [a, b] = [parse(latestTag), parse(current)];
   for (let i = 0; i < 3; i++) {
@@ -186,10 +216,12 @@ async function installUpdate(release: Release): Promise<void> {
 export async function checkForUpdates(
   context: vscode.ExtensionContext,
   quiet: boolean,
+  log: (line: string) => void,
 ): Promise<void> {
   const state = context.globalState;
+  const current = context.extension.packageJSON.version as string;
   try {
-    const release = await fetchLatest(state);
+    const release = await fetchLatest(state, current);
     // Recorded only once GitHub has answered. Written before the fetch, a
     // check that never got there -- offline, or the unauthenticated 60/hr API
     // budget exhausted -- still spent the whole interval, and the background
@@ -202,7 +234,6 @@ export async function checkForUpdates(
       }
       return;
     }
-    const current = context.extension.packageJSON.version as string;
     if (!isNewer(release.tag, current)) {
       if (!quiet) {
         vscode.window.setStatusBarMessage(
@@ -230,26 +261,42 @@ export async function checkForUpdates(
     }
   } catch (err) {
     // Network failures are routine (offline, rate limit): never toast on the
-    // background path.
+    // background path. Into poly's own log rather than console.warn, which
+    // lands in the extension host log where nobody looking at "Poly" finds it.
     if (quiet) {
-      console.warn(`poly update check failed: ${err}`);
+      log(`[update] check failed: ${err}`);
     } else {
       vscode.window.showWarningMessage(`Poly: update check failed: ${err}`);
     }
   }
 }
 
-/** Deferred background check, at most once per intervalDays (02 §8). */
-export function scheduleUpdateCheck(context: vscode.ExtensionContext): void {
+/**
+ * Deferred background check, at most once per intervalDays (02 §8) -- unless a
+ * newer release is already known and was neither installed nor skipped.
+ *
+ * The interval is there to spare GitHub's API, not to ration prompts. Once a
+ * newer tag is on record, waiting out the week just means a missed prompt costs
+ * a week, and the only way to stop hearing about a release is "Skip This
+ * Version", which is still honoured.
+ */
+export function scheduleUpdateCheck(
+  context: vscode.ExtensionContext,
+  log: (line: string) => void,
+): void {
   const config = vscode.workspace.getConfiguration("poly");
   if (!config.get<boolean>("updateCheck.enabled", true)) {
     return;
   }
+  const state = context.globalState;
+  const cachedTag = state.get<string>(CACHED_TAG);
+  const pending = knownNewer(cachedTag, context.extension.packageJSON.version as string)
+    && state.get<string>(SKIPPED) !== cachedTag;
   const days = config.get<number>("updateCheck.intervalDays", 7);
-  const last = context.globalState.get<number>(LAST_CHECK, 0);
-  if (Date.now() - last < days * 86_400_000) {
+  const last = state.get<number>(LAST_CHECK, 0);
+  if (!pending && Date.now() - last < days * 86_400_000) {
     return;
   }
-  const timer = setTimeout(() => void checkForUpdates(context, true), 10_000);
+  const timer = setTimeout(() => void checkForUpdates(context, true, log), 10_000);
   context.subscriptions.push({ dispose: () => clearTimeout(timer) });
 }

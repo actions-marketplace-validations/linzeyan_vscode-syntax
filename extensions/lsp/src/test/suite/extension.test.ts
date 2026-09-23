@@ -6,6 +6,7 @@ import { join } from "node:path";
 import * as vscode from "vscode";
 
 import { commonRoot, useLines } from "../../gowork";
+import { knownNewer, revalidates } from "../../update";
 
 const EXTENSION_ID = "ricky.poly-lsp";
 
@@ -234,6 +235,28 @@ suite("poly-lsp in a real editor", () => {
     // Nothing to cover, and nothing in common: both have to say so rather than
     // return a root that would put the file somewhere arbitrary.
     assert.strictEqual(commonRoot([]), undefined);
+  });
+
+  // A release that was announced is not a release that was installed. The
+  // check used to revalidate its cached answer regardless, so once one prompt
+  // was dismissed -- or faded into the notification centre unread -- every
+  // later check got a 304, read it as "nothing new", and a machine sat on
+  // 0.11.0 through seven releases without hearing of any of them.
+  test("an announced but uninstalled release is asked for in full again", () => {
+    assert.strictEqual(knownNewer("v0.18.0", "0.11.0"), true);
+    assert.strictEqual(
+      revalidates("W/\"etag\"", "v0.18.0", "0.11.0"),
+      false,
+      "a 304 has no asset list, so it cannot answer a pending update",
+    );
+  });
+
+  test("an install that is up to date still saves the round trip", () => {
+    assert.strictEqual(revalidates("W/\"etag\"", "v0.18.0", "0.18.0"), true);
+    assert.strictEqual(knownNewer("v0.18.0", "0.18.0"), false);
+    // Nothing cached is nothing to revalidate against.
+    assert.strictEqual(revalidates(undefined, "v0.18.0", "0.18.0"), false);
+    assert.strictEqual(revalidates("W/\"etag\"", undefined, "0.18.0"), false);
   });
 
   test("registers a formatter for sql", async () => {
