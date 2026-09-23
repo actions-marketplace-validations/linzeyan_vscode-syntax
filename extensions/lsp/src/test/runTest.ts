@@ -85,7 +85,11 @@ async function main(): Promise<void> {
   writeFileSync(join(workspace, "go.mod"), "module polye2e\n\ngo 1.21\n");
 
   await runTests({
-    extensionDevelopmentPath,
+    // The second one ships only a language default; see its description.
+    extensionDevelopmentPath: [
+      extensionDevelopmentPath,
+      resolve(extensionDevelopmentPath, "src", "test", "fixture-defaults"),
+    ],
     extensionTestsPath,
     // --folder-uri, not a bare path: launchArgs are prepended, and Electron
     // reads a leading positional as the app to run rather than as a workspace.

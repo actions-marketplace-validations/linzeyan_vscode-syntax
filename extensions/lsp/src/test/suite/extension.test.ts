@@ -20,6 +20,7 @@ const COMMANDS = [
   "poly.analyzeDeadCode",
   "poly.minify",
   "poly.toggleFormat",
+  "poly.toggleLint",
   "poly.checkForUpdates",
   "poly.showOutput",
   "poly.createGoWork",
@@ -316,6 +317,109 @@ suite("poly-lsp in a real editor", () => {
         .getConfiguration("poly")
         .update("format.enabled", undefined, vscode.ConfigurationTarget.Global);
     }
+  });
+
+  // The switches reach other extensions' settings, which is only worth having
+  // if the way back is exact: they write the user's settings.json, and a
+  // switch that leaves it different from how it found it is one nobody clicks
+  // twice. These run the real commands against real settings, so each one
+  // puts the switch back on and removes what it set, whatever happens.
+  const root = () => vscode.workspace.getConfiguration();
+  const inLanguage = (languageId: string) => vscode.workspace.getConfiguration(undefined, { languageId });
+  const Global = vscode.ConfigurationTarget.Global;
+  async function switchedOn(command: string, key: string): Promise<void> {
+    if (root().get(key) === false) {
+      await vscode.commands.executeCommand(command);
+    }
+  }
+
+  // The case that made a global-only toggle useless: golang.go ships `[go]`
+  // format-on-save as a language default, and a language default outranks a
+  // global `false`. The fixture extension ships the same shape for `[bat]`.
+  test("stopping formatting reaches a language's own default, and resuming puts back exactly what was there", async () => {
+    assert.strictEqual(
+      inLanguage("bat").get("editor.formatOnSave"),
+      true,
+      "the fixture's language default is not in effect",
+    );
+    await root().update("editor.formatOnType", true, Global);
+    await inLanguage("json").update("editor.formatOnPaste", true, Global, true);
+    await root().update("editor.codeActionsOnSave", { "source.fixAll": "always" }, Global);
+    try {
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(root().get("poly.format.enabled"), false);
+      assert.strictEqual(
+        inLanguage("bat").get("editor.formatOnSave"),
+        false,
+        "a language default outranked the switch",
+      );
+      assert.strictEqual(root().get("editor.formatOnType"), false);
+      assert.strictEqual(
+        inLanguage("json").get("editor.formatOnPaste"),
+        false,
+        "a user's [json] block outranked the switch",
+      );
+      for (const scope of [root(), inLanguage("bat")]) {
+        const actions = scope.get<Record<string, unknown>>("editor.codeActionsOnSave") ?? {};
+        assert.ok(Object.values(actions).every((one) => one === "never"), JSON.stringify(actions));
+      }
+
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(root().inspect("poly.format.enabled")?.globalValue, undefined);
+      assert.strictEqual(
+        inLanguage("bat").inspect("editor.formatOnSave")?.globalLanguageValue,
+        undefined,
+        "resuming left a [bat] line in settings.json",
+      );
+      assert.strictEqual(inLanguage("bat").get("editor.formatOnSave"), true);
+      assert.strictEqual(root().inspect("editor.formatOnType")?.globalValue, true);
+      assert.strictEqual(inLanguage("json").inspect("editor.formatOnPaste")?.globalLanguageValue, true);
+      assert.deepStrictEqual(root().inspect("editor.codeActionsOnSave")?.globalValue, { "source.fixAll": "always" });
+    } finally {
+      await switchedOn("poly.toggleFormat", "poly.format.enabled");
+      await root().update("editor.formatOnType", undefined, Global);
+      await inLanguage("json").update("editor.formatOnPaste", undefined, Global, true);
+      await root().update("editor.codeActionsOnSave", undefined, Global);
+    }
+  });
+
+  test("a setting changed while formatting was stopped is not undone by resuming", async () => {
+    await root().update("files.trimTrailingWhitespace", true, Global);
+    try {
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(root().get("files.trimTrailingWhitespace"), false);
+      // A decision made while stopped: the default after all. It is later
+      // than the snapshot, so it wins over the snapshot.
+      await root().update("files.trimTrailingWhitespace", undefined, Global);
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(
+        root().inspect("files.trimTrailingWhitespace")?.globalValue,
+        undefined,
+        "resuming overwrote a setting changed while stopped",
+      );
+    } finally {
+      await switchedOn("poly.toggleFormat", "poly.format.enabled");
+      await root().update("files.trimTrailingWhitespace", undefined, Global);
+    }
+  });
+
+  // Asserted on the screen rather than on the setting: the daemon read the
+  // setting once at spawn, so a switch that only wrote it would leave every
+  // finding in place until the next reload -- and look like it did nothing.
+  test("stopping lint takes poly's findings off the file at once, and resuming brings them back", async () => {
+    const uri = writeFile("quiet.css", ".a\u200bb { color: red; }\n");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+    const mine = () => vscode.languages.getDiagnostics(uri).filter((one) => one.source === "poly");
+    await eventually("poly's findings before stopping", () => mine().length > 0 || undefined);
+    try {
+      await vscode.commands.executeCommand("poly.toggleLint");
+      assert.strictEqual(root().get("poly.lintOnSave"), false);
+      await eventually("poly's findings to go", () => mine().length === 0 || undefined, 20_000);
+    } finally {
+      await switchedOn("poly.toggleLint", "poly.lintOnSave");
+    }
+    assert.strictEqual(root().inspect("poly.lintOnSave")?.globalValue, undefined);
+    await eventually("poly's findings to come back", () => mine().length > 0 || undefined);
   });
 
   // The list of languages minify offers itself for exists twice -- MINIFIABLE
