@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { methodLabel, methodsOf, receiverOf } from "./methods";
+import { methodLabel, methodsByType, receiverOf } from "./methods";
 
 const METHOD = 5;
 const FUNCTION = 11;
@@ -42,23 +42,27 @@ test("a type's methods are its siblings, not its children", () => {
     symbol("(Square).Area", METHOD),
     symbol("Describe", FUNCTION),
   ];
-  assert.deepEqual(methodsOf("Circle", file).map((s) => s.name), [
+  const byType = methodsByType(file);
+  assert.deepEqual(byType.get("Circle")?.map((s) => s.name), [
     "(Circle).Area",
     "(*Circle).Scale",
   ]);
-  assert.deepEqual(methodsOf("Square", file).map((s) => s.name), ["(Square).Area"]);
+  assert.deepEqual(byType.get("Square")?.map((s) => s.name), ["(Square).Area"]);
+  // Only types with methods are keys, so "no lens" is a missing entry and not
+  // an empty list somebody has to remember to check.
+  assert.deepEqual([...byType.keys()], ["Circle", "Square"]);
 });
 
 test("a type whose methods are inside it gets no count", () => {
   // TypeScript, Java and Python all nest a method under its class, where it is
   // already on screen. Counting furniture is the noise this avoids.
   const file = [symbol("Circle", STRUCT), symbol("area", METHOD)];
-  assert.deepEqual(methodsOf("Circle", file), []);
+  assert.equal(methodsByType(file).get("Circle"), undefined);
 });
 
 test("a function is not a method however it is named", () => {
   const file = [symbol("(Circle).Area", FUNCTION)];
-  assert.deepEqual(methodsOf("Circle", file), []);
+  assert.equal(methodsByType(file).get("Circle"), undefined);
 });
 
 test("the label says what the number means", () => {

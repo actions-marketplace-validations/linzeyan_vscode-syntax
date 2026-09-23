@@ -14,6 +14,7 @@ const { writeFileSync } = require("node:fs");
 
 const vscode = require("vscode");
 
+const { measure: measureCost } = require("./cost");
 const { observeProto } = require("./proto");
 const runnable = require("./runnable");
 
@@ -195,4 +196,9 @@ exports.run = async function run() {
   // Last, and with the TypeScript server already warm: it writes its own file
   // and needs nothing from the report above.
   await runnable.collect(lensesFor);
+
+  // After everything else, with every editor closed: it counts questions, and
+  // a lens from another section resolving meanwhile would be counted too.
+  const cost = await measureCost(vscode.workspace.workspaceFolders[0].uri.fsPath);
+  writeFileSync(process.env.POLY_COST_OUT, `${JSON.stringify(cost, null, 2)}\n`);
 };

@@ -207,6 +207,93 @@ export function elsewhere<T>(
   });
 }
 
+/** What an identifier may be made of, for the boundary test below. */
+const WORD = /[\p{L}\p{N}_$]/u;
+
+/**
+ * Where `name` starts on a declaration's first line, searching from `from`.
+ *
+ * For the symbol shape that has no name range. A provider answering in the
+ * flat `SymbolInformation` gives one range for the whole declaration, and the
+ * editor copies it into `selectionRange` -- so `selectionRange.start` is where
+ * the declaration starts, which is only where the name starts if nothing comes
+ * before it. bash-language-server is that provider: `greet() {` begins with
+ * its name and `function greet {` begins with a keyword, and a reference query
+ * asked at the keyword comes back empty. Every shell function written the
+ * second way read `no refs`, or drew nothing at all when the first three in a
+ * file were written that way and the probe found nobody answering.
+ *
+ * A whole-word match, so `run` is not found inside `rerun`.
+ */
+export function nameStart(line: string, name: string, from: number): number | undefined {
+  if (name.length === 0) {
+    return undefined;
+  }
+  for (let at = line.indexOf(name, from); at >= 0; at = line.indexOf(name, at + 1)) {
+    const before = line[at - 1];
+    const after = line[at + name.length];
+    if (!(before && WORD.test(before)) && !(after && WORD.test(after))) {
+      return at;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A name for each declaration that survives typing.
+ *
+ * Not the line: every keystroke above a declaration moves it. The name, the
+ * kind, and which occurrence of that pair it is, so an interface's `area` and
+ * its class's `area` stay two keys and neither one takes the other's count.
+ */
+export function declarationKeys(symbols: readonly { name: string; kind: number }[]): string[] {
+  const seen = new Map<string, number>();
+  return symbols.map(({ name, kind }) => {
+    const base = `${kind}:${name}`;
+    const nth = seen.get(base) ?? 0;
+    seen.set(base, nth + 1);
+    return `${base}#${nth}`;
+  });
+}
+
+/**
+ * Counts already answered, reused for a while instead of asked again.
+ *
+ * The editor asks for every lens afresh after each edit, and without this each
+ * visible lens was a reference search per burst of typing -- measured
+ * 2026-09-23 at 17 reference and 6 implementation queries for five keystrokes
+ * that changed no declaration, every one of them landing on gopls (twice, with
+ * golang.go installed beside poly). A count is a question about the whole
+ * workspace and it rarely moves because of what is being typed in this file,
+ * so the answer is kept for `reuseMs` and the price is a count that can lag
+ * the file by that long. A click never uses it: that asks again, because the
+ * click is the one moment the answer must be current.
+ */
+export class Answered {
+  private readonly byDocument = new Map<string, Map<string, { count: number; at: number }>>();
+
+  constructor(
+    private readonly reuseMs: number,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  get(document: string, key: string): number | undefined {
+    const found = this.byDocument.get(document)?.get(key);
+    return found && this.now() - found.at < this.reuseMs ? found.count : undefined;
+  }
+
+  set(document: string, key: string, count: number): void {
+    const answers = this.byDocument.get(document) ?? new Map();
+    answers.set(key, { count, at: this.now() });
+    this.byDocument.set(document, answers);
+  }
+
+  /** A closed document's answers, which nothing will ask for again. */
+  forget(document: string): void {
+    this.byDocument.delete(document);
+  }
+}
+
 /** What the reference lens says. */
 export function refLabel(count: number): string {
   if (count === 0) {

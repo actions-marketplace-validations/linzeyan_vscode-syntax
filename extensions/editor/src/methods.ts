@@ -62,19 +62,25 @@ export function receiverOf(name: string): string | undefined {
 }
 
 /**
- * The methods declared on `type`, out of the file's own top-level symbols.
+ * The methods in the file's own top-level symbols, by the type they are on.
  *
  * Top-level only, because that is where the ones worth counting are: a method
  * that is a child of the type is already under the reader's eye, and one
  * nested deeper than the file is somebody's local function.
+ *
+ * One pass for the whole file rather than a filter per type: the lens asks for
+ * every declaration it draws, on every edit, and a filter each was declarations
+ * times symbols -- ninety thousand receiver parses for a generated stub.
  */
-export function methodsOf<T extends MethodSymbol>(
-  type: string,
-  file: readonly T[],
-): T[] {
-  return file.filter(
-    (symbol) => symbol.kind === METHOD && receiverOf(symbol.name) === type,
-  );
+export function methodsByType<T extends MethodSymbol>(file: readonly T[]): Map<string, T[]> {
+  const byType = new Map<string, T[]>();
+  for (const symbol of file) {
+    const type = symbol.kind === METHOD ? receiverOf(symbol.name) : undefined;
+    if (type !== undefined) {
+      byType.set(type, [...(byType.get(type) ?? []), symbol]);
+    }
+  }
+  return byType;
 }
 
 /** What the method lens says. Never zero: no lens is drawn for no methods. */

@@ -4,15 +4,24 @@ import { enclosing, rowPrefix, TreeSymbol } from "./referenceRows";
 
 /** A file with hits in it, or one hit. */
 type Node =
-  | { kind: "file"; uri: vscode.Uri; rows: Row[] }
+  | { kind: "file"; file: File }
   | { kind: "row"; uri: vscode.Uri; row: Row };
+
+interface File {
+  readonly uri: vscode.Uri;
+  readonly rows: Row[];
+  /** Open when the list appears, rather than folded under its name. */
+  readonly expanded: boolean;
+  /** The kind column, asked for once and only when the file is unfolded. */
+  labelled?: Promise<void>;
+}
 
 interface Row {
   readonly range: vscode.Range;
   /** The line's own source, trimmed -- what the built-in tree shows. */
   readonly text: string;
-  /** `func handle`, `var config`, or empty for a hit inside nothing. */
-  readonly kind: string;
+  /** `func handle`, `var config`, or empty for a hit inside nothing or not yet asked. */
+  kind: string;
   /** 1-based, as printed. */
   readonly number: string;
 }
@@ -26,6 +35,17 @@ interface Row {
  * round trip to a language server.
  */
 const MAX_OUTLINES = 60;
+
+/**
+ * How many files arrive unfolded.
+ *
+ * An unfolded file is an outline request, and an outline request opens the
+ * file in every language server the window runs -- measured 2026-09-23, a
+ * click on forty hits in twenty files opened all twenty and took 718ms before
+ * the list appeared. The first ten are the ones on screen anyway; the rest ask
+ * when somebody unfolds them.
+ */
+const MAX_EXPANDED = 10;
 
 /**
  * poly's own references tree.
@@ -45,7 +65,10 @@ export class ReferenceTree implements vscode.TreeDataProvider<Node> {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
 
-  private files: { uri: vscode.Uri; rows: Row[] }[] = [];
+  private files: File[] = [];
+
+  /** Outlines asked for since the list was filled; see `MAX_OUTLINES`. */
+  private outlines = 0;
 
   /** What the view's title should say it is showing. */
   summary = "";
@@ -54,43 +77,39 @@ export class ReferenceTree implements vscode.TreeDataProvider<Node> {
     const byFile = new Map<string, vscode.Location[]>();
     for (const location of locations) {
       const key = location.uri.toString();
-      byFile.set(key, [...(byFile.get(key) ?? []), location]);
+      const hits = byFile.get(key);
+      if (hits) {
+        hits.push(location);
+      } else {
+        byFile.set(key, [location]);
+      }
     }
 
-    const files: { uri: vscode.Uri; rows: Row[] }[] = [];
-    let outlines = 0;
+    const found: { uri: vscode.Uri; rows: Row[] }[] = [];
     for (const [key, hits] of byFile) {
       const uri = vscode.Uri.parse(key);
-      let document: vscode.TextDocument;
-      try {
-        document = await vscode.workspace.openTextDocument(uri);
-      } catch {
+      const lines = await linesOf(uri);
+      if (!lines) {
         // Deleted or unreadable between the search and now. One file missing is
         // not a reason to show none of the others.
         continue;
       }
-      const symbols = outlines++ < MAX_OUTLINES ? await outlineOf(uri) : [];
       const rows = hits
-        .map((hit) => {
-          const { number, kind } = rowPrefix(
-            hit.range.start.line,
-            enclosing(symbols, hit.range.start.line),
-          );
-          return {
-            range: hit.range,
-            text: document.lineAt(hit.range.start.line).text.trim(),
-            kind,
-            number,
-          };
-        })
+        .map((hit) => ({
+          range: hit.range,
+          text: (lines[hit.range.start.line] ?? "").trim(),
+          kind: "",
+          number: `${hit.range.start.line + 1}`,
+        }))
         .sort((a, b) => a.range.start.line - b.range.start.line);
-      files.push({ uri, rows });
+      found.push({ uri, rows });
     }
-    files.sort((a, b) => a.uri.fsPath.localeCompare(b.uri.fsPath));
+    found.sort((a, b) => a.uri.fsPath.localeCompare(b.uri.fsPath));
 
-    this.files = files;
-    const hits = files.reduce((n, file) => n + file.rows.length, 0);
-    this.summary = `${what} — ${hits} in ${files.length} file${files.length === 1 ? "" : "s"}`;
+    this.outlines = 0;
+    this.files = found.map((file, index) => ({ ...file, expanded: index < MAX_EXPANDED }));
+    const hits = found.reduce((n, file) => n + file.rows.length, 0);
+    this.summary = `${what} — ${hits} in ${found.length} file${found.length === 1 ? "" : "s"}`;
     // The view is hidden until there is something in it. An always-present
     // "References" panel sitting empty in the Explorer is a row of chrome for a
     // feature most sessions never use, and the reference lens is off by default
@@ -99,23 +118,61 @@ export class ReferenceTree implements vscode.TreeDataProvider<Node> {
     this.changed.fire();
   }
 
-  getChildren(node?: Node): Node[] {
+  async getChildren(node?: Node): Promise<Node[]> {
     if (!node) {
-      return this.files.map((file) => ({ kind: "file", ...file }));
+      return this.files.map((file) => ({ kind: "file", file }));
     }
-    return node.kind === "file"
-      ? node.rows.map((row) => ({ kind: "row", uri: node.uri, row }))
-      : [];
+    if (node.kind !== "file") {
+      return [];
+    }
+    const { file } = node;
+    // Asked here and not in `show`, because this is the moment the rows are
+    // about to be looked at: a folded file never asks, and a file unfolded
+    // twice asks once.
+    file.labelled ??= this.label(file);
+    await file.labelled;
+    return file.rows.map((row) => ({ kind: "row", uri: file.uri, row }));
+  }
+
+  /**
+   * What the view shows, as data.
+   *
+   * For the checks that click a lens and need to know where it went: a tree's
+   * rows are not readable from outside the extension that owns it, and the
+   * only other witness is a screenshot. Folded files come back without their
+   * kind column, exactly as they are on screen.
+   */
+  shown(): { summary: string; files: { path: string; rows: { line: number; text: string; kind: string }[] }[] } {
+    return {
+      summary: this.summary,
+      files: this.files.map((file) => ({
+        path: file.uri.fsPath,
+        rows: file.rows.map((row) => ({ line: row.range.start.line, text: row.text, kind: row.kind })),
+      })),
+    };
+  }
+
+  private async label(file: File): Promise<void> {
+    if (this.outlines++ >= MAX_OUTLINES) {
+      return;
+    }
+    const symbols = await outlineOf(file.uri);
+    for (const row of file.rows) {
+      row.kind = rowPrefix(row.range.start.line, enclosing(symbols, row.range.start.line)).kind;
+    }
   }
 
   getTreeItem(node: Node): vscode.TreeItem {
     if (node.kind === "file") {
+      const { file } = node;
       const item = new vscode.TreeItem(
-        vscode.workspace.asRelativePath(node.uri),
-        vscode.TreeItemCollapsibleState.Expanded,
+        vscode.workspace.asRelativePath(file.uri),
+        file.expanded
+          ? vscode.TreeItemCollapsibleState.Expanded
+          : vscode.TreeItemCollapsibleState.Collapsed,
       );
-      item.description = `${node.rows.length}`;
-      item.resourceUri = node.uri;
+      item.description = `${file.rows.length}`;
+      item.resourceUri = file.uri;
       item.iconPath = vscode.ThemeIcon.File;
       return item;
     }
@@ -140,6 +197,27 @@ export class ReferenceTree implements vscode.TreeDataProvider<Node> {
       ],
     };
     return item;
+  }
+}
+
+/**
+ * A file's lines, without opening it.
+ *
+ * `openTextDocument` would be simpler and is what this used to do, but an open
+ * document is announced to every language server in the window -- a `didOpen`
+ * that gopls, rust-analyzer and poly's own linter each act on -- to print one
+ * line of it. A document already open is read from the editor instead, so the
+ * row shows what is on screen rather than what was last saved.
+ */
+async function linesOf(uri: vscode.Uri): Promise<string[] | undefined> {
+  const open = vscode.workspace.textDocuments.find((one) => one.uri.toString() === uri.toString());
+  if (open) {
+    return open.getText().split(/\r?\n/);
+  }
+  try {
+    return new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)).split(/\r?\n/);
+  } catch {
+    return undefined;
   }
 }
 
@@ -190,6 +268,9 @@ export function registerReferenceTree(
     tree.onDidChangeTreeData(() => {
       view.description = tree.summary;
     }),
+    // Not contributed, like the lens clicks: nothing in it is for a person.
+    // tools/ref-lens-check and tools/ext-diff read the list through it.
+    vscode.commands.registerCommand("poly.referencesShown", () => tree.shown()),
   );
   return tree;
 }
