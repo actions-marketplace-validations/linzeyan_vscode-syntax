@@ -2335,9 +2335,11 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
     // others, which is a minority of the files an editor opens.
     //
     // From the buffer rather than from disk, unlike spelling: there is no
-    // per-file configuration keyed off the name, and the value of the rule is
-    // that the character is underlined as it is pasted rather than after a
-    // save. `poly check` calls the same function with what it read from disk.
+    // per-file configuration keyed off the name, so the text is all it needs.
+    // That does not make it live. It runs when the rest of lint does -- on
+    // open and on save, since didChange only stores the text -- so a pasted
+    // character is underlined at the next save, not as it lands. `poly check`
+    // calls the same function with what it read from disk.
     let unicode = poly_engines::unicode::check(text);
     let Some(lang) = config.language(path) else {
         // Rare from this client -- its document selector only sends languages

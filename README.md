@@ -241,7 +241,8 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **看起來不是本人的字元**（code 長 `poly/unicode-*`，類別 `confusable-character`，
   等級一律 warning）。不分語言，每個檔案都檢查——這是取代 gremlins 那類編輯器裝飾的部分，
   差別在於它同樣會在 CLI 與 CI 裡紅。五條規則：`-bidi`（雙向控制字元，也就是
-  Trojan Source）、`-invisible`（零寬字元、軟連字號；檔首的 BOM 不算）、`-space`
+  Trojan Source）、`-invisible`（零寬字元、軟連字號、ETX／VT 控制字元、行與段落分隔符號
+  U+2028／U+2029、物件取代字元 U+FFFC；檔首的 BOM 不算）、`-space`
   （不斷行空格、全形空格這類「看起來是空白但不是」）、`-lookalike`（EN DASH 之於 `-`、
   彎引號之於 `'`／`"`）、`-mixed-script`（同一個字裡混了西里爾或希臘字母）。
   界線是**「會被誤認成某個 ASCII 字元」而不是「非 ASCII」**，而且是量出來的：
