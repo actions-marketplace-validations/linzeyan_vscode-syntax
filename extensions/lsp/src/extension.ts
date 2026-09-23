@@ -843,10 +843,12 @@ export async function activate(context: vscode.ExtensionContext) {
     // Global scope: the switch is "I am not in the mood for this right now",
     // which is about the person and not about the project. Writing it at
     // workspace scope would leave a line in somebody's .vscode/settings.json
-    // for the whole team to inherit.
+    // for the whole team to inherit. Switching back on removes the line rather
+    // than writing `true`: on is the default, and a toggle should leave the
+    // settings file as it found it.
     vscode.commands.registerCommand("poly.toggleFormat", async () => {
       const config = vscode.workspace.getConfiguration("poly");
-      await config.update("format.enabled", !mayFormat(), vscode.ConfigurationTarget.Global);
+      await config.update("format.enabled", mayFormat() ? false : undefined, vscode.ConfigurationTarget.Global);
     }),
     vscode.commands.registerCommand("poly.createGoWork", createGoWork),
     vscode.commands.registerCommand("poly.formatFile", async () => {

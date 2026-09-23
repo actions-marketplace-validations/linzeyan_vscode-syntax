@@ -307,6 +307,10 @@ suite("poly-lsp in a real editor", () => {
       assert.strictEqual(value(), false);
       await vscode.commands.executeCommand("poly.toggleFormat");
       assert.strictEqual(value(), true);
+      // Back where it started, which is no line in settings.json at all. A
+      // left-behind `true` looks like a choice and outlives a changed default.
+      const written = vscode.workspace.getConfiguration("poly").inspect<boolean>("format.enabled");
+      assert.strictEqual(written?.globalValue, undefined, "toggling back left a user setting behind");
     } finally {
       await vscode.workspace
         .getConfiguration("poly")
