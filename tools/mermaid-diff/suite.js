@@ -306,7 +306,7 @@ async function measureTheme(theme, rendered, side, builtIn) {
   // the editor still needs a moment to push the variables down to webviews.
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
-  const editorDist = join(process.env.POLY_EDITOR_DIST, "dist");
+  const editorDist = join(process.env.POLY_EXTENSION_ROOT, "dist");
   const roots = [vscode.Uri.file(editorDist)];
   if (builtIn) {
     roots.push(vscode.Uri.file(builtIn.extensionPath));
@@ -361,7 +361,7 @@ async function measureTheme(theme, rendered, side, builtIn) {
 exports.run = async function run() {
   const builtIn = vscode.extensions.getExtension(BUILT_IN);
   const side = builtIn ? "built-in" : "poly";
-  await vscode.extensions.getExtension("ricky.poly-editor").activate();
+  await vscode.extensions.getExtension("ricky.poly-lsp").activate();
   await builtIn?.activate();
 
   // Once, outside the theme loop: what markdown-it makes of a fence does not

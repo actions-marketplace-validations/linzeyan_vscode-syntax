@@ -1,10 +1,10 @@
-// Runs inside a real extension host with poly-editor loaded from source and the
+// Runs inside a real extension host with poly loaded from source and the
 // extensions it replaces installed beside it, asks both the same question, and
 // writes down where the answers differ.
 //
-// This is an audit, not a gate: it is the only way to check poly-editor against
+// This is an audit, not a gate: it is the only way to check poly against
 // the thing it replaced, and it is the only thing in this repo that needs the
-// marketplace. poly-editor's own tests stay where 08 §9 put them -- pure
+// marketplace. The editor features' own tests stay where 08 §9 put them -- pure
 // modules under node's test runner.
 const { existsSync, readFileSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
@@ -26,7 +26,7 @@ function allCases() {
 }
 
 const REQUIRED = [
-  "ricky.poly-editor",
+  "ricky.poly-lsp",
   "yzhang.markdown-all-in-one",
   "ezforo.copy-relative-path-and-line-numbers",
 ];
@@ -153,7 +153,7 @@ async function run() {
 
     const owner = {
       original: test.originalFrom ?? "yzhang.markdown-all-in-one",
-      poly: "ricky.poly-editor",
+      poly: "ricky.poly-lsp",
     };
     const sides = {};
     for (const which of ["original", "poly"]) {
@@ -242,7 +242,7 @@ async function run() {
     // Both directions are a finding: a case that should agree and does not is a
     // defect, and a case that should differ and does not means poly gave up an
     // improvement it was written to have.
-    throw new Error(`${unexpected} case(s) did not match what poly-editor set out to do`);
+    throw new Error(`${unexpected} case(s) did not match what poly set out to do`);
   }
 }
 

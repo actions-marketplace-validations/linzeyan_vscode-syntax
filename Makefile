@@ -34,7 +34,7 @@ export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 .DEFAULT_GOAL := help
 .PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
 	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff ext-diff mermaid-diff engine-diff \
-	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz gutter-cache bump control clean
+	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz gutter-cache bump control clean syntax
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -119,15 +119,23 @@ deadcode: build ## poly deadcode outside Go: knip paths resolve, vulture stays o
 e2e: ## Typecheck and run the extension tests in a real extension host
 	cd extensions/lsp && pnpm run typecheck && pnpm test
 
-# poly-editor has no daemon and no extension host to run in, so its logic
-# lives in modules that do not import vscode and is tested with node's own
-# runner -- no new dependency, and no half-minute boot to find a typo. The
-# package step is the other half: a manifest VSCode would reject is not
-# something to discover during a release.
-editor: ## Typecheck, test, build and package poly-editor
-	cd extensions/editor && pnpm run typecheck && pnpm test && pnpm run build && \
+# The editor features need no daemon, so their logic lives in modules that do
+# not import vscode and is tested with node's own runner -- no new dependency,
+# and no half-minute boot to find a typo. The package step is the other half: a
+# manifest VSCode would reject is not something to discover during a release.
+editor: ## Unit-test the editor features, then build and package the extension
+	cd extensions/lsp && pnpm run typecheck && pnpm run unit && pnpm run build && \
 		pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
-	python3 tools/vsix-check.py extensions/editor
+	python3 tools/vsix-check.py extensions/lsp
+
+# poly-syntax-highlight's one script, the update check it shares with Poly.
+# Packaged as well, so vsix-check sees the bundle `main` points at: the
+# grammars alone never needed a build, and a VSIX without it installs fine
+# and checks for nothing.
+syntax: ## Typecheck, build and package poly-syntax-highlight
+	cd extensions/syntax && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm run build && \
+		pnpm dlx @vscode/vsce package --no-dependencies --allow-missing-repository
+	python3 tools/vsix-check.py extensions/syntax
 
 # A gate and not an audit, unlike the *-diff targets: it asserts about poly
 # alone, and the only real provider it asks -- TypeScript's -- ships inside the
@@ -232,8 +240,8 @@ tokdeps:
 # because somebody upgraded their editor is a gate people learn to ignore.
 #
 # What they answer is the question no fixture can: `tokenize-check` and
-# poly-editor's unit tests both only ever ask poly what it thinks. These ask the
-# thing poly replaced the same question and compare the two answers.
+# the editor features' unit tests both only ever ask poly what it thinks.
+# These ask the thing poly replaced the same question and compare the answers.
 #
 # VSCODE_EXTENSIONS overrides which installation is the reference; running it
 # against two versions is how an upstream improvement is told apart from a
@@ -285,7 +293,7 @@ grammar-real: tokdeps ## grammar-diff over ordinary source files from GRAMMAR_TR
 	POLY_DIFF_CORPUS="$$(node tools/real-corpus.mjs $(GRAMMAR_TREE))" \
 		node tools/grammar-diff.mjs /tmp/poly-tokdeps/node_modules "$(VSCODE_EXTENSIONS)"
 
-editor-diff: ## poly-editor against the extensions it replaces (downloads them)
+editor-diff: ## poly's editor features against the extensions they replace (downloads them)
 	node tools/editor-diff/run.js
 
 # The same question asked of the extensions people had installed before poly
@@ -306,7 +314,7 @@ editor-diff: ## poly-editor against the extensions it replaces (downloads them)
 ext-diff: build ## poly against the extensions it replaced, with screenshots (downloads them)
 	node tools/ext-diff/run.js $(POLY)
 
-# The other half of ref-lens. What it holds down is the half of poly-editor
+# The other half of ref-lens. What it holds down is the half of the lenses
 # that is not poly's code -- five lenses and commands are wired to particular
 # code action kinds and to `textDocument/implementation` read backwards, and
 # each of those is a claim about gopls that was true when measured. ref-lens
@@ -330,7 +338,7 @@ lens-probe: build ## What gopls and buf still offer the lenses poly routes to
 # reached the page, so "the same document renders the same on either side of
 # 1.135" is measured rather than asserted. Needs a 1.135+ build in
 # extensions/lsp/.vscode-test, which `make e2e` downloads.
-mermaid-diff: ## poly-editor's mermaid rendering against VSCode's built-in
+mermaid-diff: ## poly's mermaid rendering against VSCode's built-in
 	node tools/mermaid-diff/run.js
 
 # The third differential, and the only one where poly does not replace the
@@ -378,7 +386,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config nls smoke dogfood version probe lens-probe go tf rust deadcode grammars e2e editor ref-lens gutter-cache toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config nls smoke dogfood version probe lens-probe go tf rust deadcode grammars e2e editor syntax ref-lens gutter-cache toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0

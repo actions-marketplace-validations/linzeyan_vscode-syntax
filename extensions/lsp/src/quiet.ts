@@ -64,6 +64,10 @@ const SETTINGS: Record<Quiet, readonly Setting[]> = {
   ],
   lint: [
     { key: "poly.lintOnSave", off: false },
+    // Not a lint, but gremlins' replacement, and gremlins is the one linter
+    // this switch cannot reach -- leaving poly's copy of it drawing would
+    // keep exactly the marks the switch was pressed to clear.
+    { key: "poly.unicodeHighlight.enabled", off: false },
     { extension: "charliermarsh.ruff", key: "ruff.lint.enable", off: false },
     { extension: "golang.go", key: "go.lintOnSave", off: "off" },
     { extension: "golang.go", key: "go.vetOnSave", off: "off" },

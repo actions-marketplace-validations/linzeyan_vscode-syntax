@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Launches the poly-editor differential: one extension host, poly-editor loaded
+// Launches the editor differential: one extension host, poly loaded
 // from source, and the extensions 08 §4 says it replaces installed beside it.
 //
 // The originals come from the marketplace at whatever version is current --
@@ -14,7 +14,7 @@ const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
 const ROOT = resolve(__dirname, "..", "..");
-const EDITOR = join(ROOT, "extensions", "editor");
+const LSP = join(ROOT, "extensions", "lsp");
 const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
 const { writeCorpus } = require("./corpus.js");
 
@@ -79,8 +79,8 @@ async function main() {
     console.log(`installed ${install(publisher, name)}`);
   }
 
-  // poly-editor is loaded from source, so its bundle has to exist first.
-  execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
+  // poly is loaded from source, so its bundle has to exist first.
+  execFileSync("pnpm", ["run", "build"], { cwd: LSP, stdio: "inherit" });
 
   // The extension host has no network, so the upstream test corpus is fetched
   // and parsed out here and handed over as a file.
@@ -104,7 +104,7 @@ async function main() {
   }
 
   await runTests({
-    extensionDevelopmentPath: EDITOR,
+    extensionDevelopmentPath: LSP,
     extensionTestsPath: resolve(__dirname, "suite.js"),
     extensionTestsEnv: {
       POLY_DIFF_OUT: join(ROOT, ".logs", "audit", "editor-diff.json"),

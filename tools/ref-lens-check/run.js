@@ -20,7 +20,7 @@ const proto = require("./proto");
 const runnable = require("./runnable");
 
 const ROOT = resolve(__dirname, "..", "..");
-const EDITOR = join(ROOT, "extensions", "editor");
+const LSP = join(ROOT, "extensions", "lsp");
 const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
 
 // One scratch root per checkout, agreed in runnable.js -- see there for why.
@@ -161,12 +161,12 @@ async function main() {
 
   const protoEnv = proto.writeFixture(WORKSPACE);
 
-  execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
+  execFileSync("pnpm", ["run", "build"], { cwd: LSP, stdio: "inherit" });
 
   await runTests({
     // poly-syntax alongside, because it is what gives a .proto the `protobuf`
     // language id poly's lens is registered for -- see proto.js.
-    extensionDevelopmentPath: [EDITOR, proto.SYNTAX],
+    extensionDevelopmentPath: [LSP, proto.SYNTAX],
     extensionTestsPath: resolve(__dirname, "suite.js"),
     extensionTestsEnv: {
       POLY_LENS_FIXTURE: fixture,
@@ -306,7 +306,7 @@ async function main() {
   if (click.opened > 0) {
     problems.push(`the click opened ${click.opened} file(s) before the list appeared`);
   }
-  // MAX_EXPANDED in extensions/editor/src/referenceTree.ts: the files that
+  // MAX_EXPANDED in extensions/lsp/src/editor/referenceTree.ts: the files that
   // arrive unfolded, each of which is an outline request.
   if (clickSettled.opened > 10) {
     problems.push(`the list opened ${clickSettled.opened} files, more than it unfolds`);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Do gopls and buf still answer what poly-editor's lenses and commands route to?
+"""Do gopls and buf still answer what poly's lenses and commands route to?
 
-What it holds down is the half of poly-editor that is not poly's code at all:
+What it holds down is the half of the lenses that is not poly's code at all:
 seven features are wired to particular code action kinds, to
 `textDocument/implementation` reading backwards, and to the shape of two
 servers' symbol trees -- each of those a claim about somebody else's server that
@@ -394,7 +394,7 @@ def flatten(symbols, depth=0):
 def probe_buf(check, buf):
     """The .proto half: what `buf lsp serve` reports, which poly routes .proto to.
 
-    Three of poly-editor's decisions rest on this and on nothing else. The
+    Three of poly's decisions rest on this and on nothing else. The
     `go type` / `go server` / `go client` lenses read buf's symbol kinds; the
     `N methods` lens reads its qualified naming; and the implementation lens is
     drawn per language precisely because buf has no implementation provider and
@@ -841,11 +841,11 @@ def main():
 
     print(f"\ngopls {version}, buf {os.path.basename(os.path.dirname(buf))}")
     if problems:
-        print(f"\n{len(problems)} of poly-editor's assumptions no longer hold:")
+        print(f"\n{len(problems)} of poly's lens assumptions no longer hold:")
         for problem in problems:
             print(f"  {problem}")
         return 1
-    print("every question poly-editor routes to a server still has an answer")
+    print("every question poly routes to a server still has an answer")
     return 0
 
 

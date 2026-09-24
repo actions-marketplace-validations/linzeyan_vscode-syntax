@@ -21,8 +21,8 @@ const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 
 const ROOT = resolve(__dirname, "..");
-const EDITOR = join(ROOT, "extensions", "editor");
-const esbuild = require(join(EDITOR, "node_modules", "esbuild"));
+const LSP = join(ROOT, "extensions", "lsp");
+const esbuild = require(join(LSP, "node_modules", "esbuild"));
 
 const SCRATCH = join(tmpdir(), "poly-gutter-cache");
 const WORKSPACE = join(SCRATCH, "workspace");
@@ -194,6 +194,7 @@ const vscode = {
     }
   },
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
+  OverviewRulerLane: { Right: 4 },
   CompletionItemKind: { Snippet: 14 },
   CodeActionKind: { Refactor: "refactor", QuickFix: "quickfix" },
   SymbolKind: new Proxy({}, { get: () => 0 }),
@@ -259,6 +260,7 @@ const vscode = {
     registerCodeLensProvider: () => nothing,
     registerCompletionItemProvider: () => nothing,
     registerCodeActionsProvider: () => nothing,
+    registerHoverProvider: () => nothing,
   },
   extensions: { all: [], getExtension: () => undefined },
   env: { clipboard: { writeText: async () => {} } },
@@ -297,7 +299,7 @@ function fixture() {
 function load() {
   const bundle = join(SCRATCH, "extension.cjs");
   esbuild.buildSync({
-    entryPoints: [join(EDITOR, "src", "extension.ts")],
+    entryPoints: [join(LSP, "src", "editor", "extension.ts")],
     bundle: true,
     outfile: bundle,
     external: ["vscode"],
@@ -323,7 +325,7 @@ async function main() {
   const pinned = openEditor(openDocument(join(WORKSPACE, "pinned.md"), lines.pinned), 0, 1);
   visible = [scroller, pinned];
 
-  extension.activate({ subscriptions: [], extensionUri: Uri.file(EDITOR) });
+  extension.activate({ subscriptions: [], extensionUri: Uri.file(LSP) });
 
   const steps = [];
   for (let top = 0; top + WINDOW <= IMAGES; top += WINDOW) {

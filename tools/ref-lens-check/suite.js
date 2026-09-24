@@ -97,7 +97,7 @@ function registerFlatProvider(uri) {
 }
 
 exports.run = async function run() {
-  await vscode.extensions.getExtension("ricky.poly-editor").activate();
+  await vscode.extensions.getExtension("ricky.poly-lsp").activate();
 
   const flatUri = vscode.Uri.file(process.env.POLY_FLAT_FIXTURE);
   const disposables = registerFlatProvider(flatUri);

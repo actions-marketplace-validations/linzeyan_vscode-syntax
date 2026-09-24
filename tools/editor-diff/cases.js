@@ -1,8 +1,8 @@
-// The scenarios poly-editor and the extension it replaced are both asked to
+// The scenarios poly and the extension it replaced are both asked to
 // answer. One case = one document, one cursor, one command on each side.
 //
 // `expect` records what the difference is *for*, and is the whole point of the
-// table: poly-editor did not set out to clone markdown-all-in-one, it set out
+// table: poly did not set out to clone markdown-all-in-one, it set out
 // to replace it, and three of these behaviours are deliberate improvements
 // (08 §9). A case with `expect: "same"` that differs is a defect; a case with a
 // stated reason that stops differing means poly lost the improvement.
@@ -10,7 +10,7 @@
 //   same      -- the two must produce identical text and selection
 //   <reason>  -- they must differ, and this is why
 //
-// What is not here, and cannot be: poly-editor's indent tint, gutter image
+// What is not here, and cannot be: poly's indent tint, gutter image
 // previews and TODO panel. Those three only ever appear as decorations and a
 // TreeView, and no API reads back what another extension drew. The obvious way
 // round it was measured and does not work -- the `TextEditor` this suite holds

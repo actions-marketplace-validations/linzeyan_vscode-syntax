@@ -7,7 +7,6 @@ node_modules/
 extensions/lsp/bin/
 extensions/lsp/out/
 extensions/lsp/.vscode-test/
-extensions/editor/out/
 # tools/*.py are scripts, never imported -- except that engine-diff's own
 # self-test imports it to tamper with its EXPECTED table, and that writes here.
 __pycache__/

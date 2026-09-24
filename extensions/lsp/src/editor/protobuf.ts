@@ -1,7 +1,7 @@
 /**
  * From a proto declaration to the Go declaration protoc generated for it.
  *
- * The one link in poly-editor that crosses languages, and the only reason it
+ * The one link in poly's editor features that crosses languages, and the only reason it
  * can exist without analysis is that protoc's output is not analysed but
  * *named*: `message HelloRequest` in package `greet.v1` becomes Go's
  * `HelloRequest` in `greet.pb.go`, every time, because that is what

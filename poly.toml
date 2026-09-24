@@ -21,7 +21,7 @@ exclude = [
   "grammars/sources.lock.json",
   "extensions/*/syntaxes/**",
   "extensions/*/dist/**",
-  "extensions/*/THIRD-PARTY-NOTICES.md",
+  "extensions/*/THIRD-PARTY-NOTICES*.md",
   "extensions/*/pnpm-lock.yaml",
 ]
 
@@ -32,7 +32,7 @@ exclude = [
   "grammars/sources.lock.json",
   "extensions/*/syntaxes/**",
   "extensions/*/dist/**",
-  "extensions/*/THIRD-PARTY-NOTICES.md",
+  "extensions/*/THIRD-PARTY-NOTICES*.md",
   "extensions/*/pnpm-lock.yaml",
 ]
 

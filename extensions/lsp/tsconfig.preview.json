@@ -10,6 +10,6 @@
     "module": "ESNext",
     "moduleResolution": "bundler"
   },
-  "include": ["src/preview"],
+  "include": ["src/editor/preview"],
   "exclude": []
 }

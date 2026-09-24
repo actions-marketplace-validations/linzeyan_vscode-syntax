@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// poly-editor's mermaid rendering against VSCode's own, on the same corpus.
+// poly's mermaid rendering against VSCode's own, on the same corpus.
 //
 // The reference is the built-in `mermaid-markdown-features` (1.135+), which is
 // the upstream `bierner.markdown-mermaid` is also built from -- so this asks
@@ -20,7 +20,7 @@ const { dirname, join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
 const ROOT = resolve(__dirname, "..", "..");
-const EDITOR = join(ROOT, "extensions", "editor");
+const LSP = join(ROOT, "extensions", "lsp");
 const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
 
 const SCRATCH = join(tmpdir(), "poly-mermaid-diff");
@@ -88,11 +88,11 @@ function cachedVSCode() {
 
 async function measure(extraArgs, out, version, themes = [THEMES[0]]) {
   await runTests({
-    extensionDevelopmentPath: EDITOR,
+    extensionDevelopmentPath: LSP,
     extensionTestsPath: resolve(__dirname, "suite.js"),
     extensionTestsEnv: {
       POLY_MERMAID_OUT: out,
-      POLY_EDITOR_DIST: EDITOR,
+      POLY_EXTENSION_ROOT: LSP,
       // One launch per side rather than one per theme: booting an extension
       // host costs more than every diagram on the page put together.
       POLY_MERMAID_THEMES: themes.join(","),
@@ -301,7 +301,7 @@ async function main() {
   mkdirSync(join(SCRATCH, "workspace"), { recursive: true });
   mkdirSync(dirname(OUT), { recursive: true });
 
-  execFileSync("pnpm", ["run", "build"], { cwd: EDITOR, stdio: "inherit" });
+  execFileSync("pnpm", ["run", "build"], { cwd: LSP, stdio: "inherit" });
 
   const theirs = await measure([], join(SCRATCH, "built-in.json"), null, THEMES);
   const ours = await measure(["--disable-extension", BUILT_IN], join(SCRATCH, "poly.json"), null, THEMES);

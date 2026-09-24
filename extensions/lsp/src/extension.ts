@@ -2,8 +2,9 @@ import { execFile } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { LanguageClient, State, TransportKind } from "vscode-languageclient/node";
+import { DocumentFormattingRequest, LanguageClient, State, TransportKind } from "vscode-languageclient/node";
 import { firstCodeLine } from "./anchor";
+import { activate as activateEditor } from "./editor/extension";
 import { commonRoot, useLines } from "./gowork";
 import { isOn, type Quiet, stillOn, toggler } from "./quiet";
 import { checkForUpdates, scheduleUpdateCheck } from "./update";
@@ -73,10 +74,10 @@ const LANGUAGES = [
 ];
 
 // `.bats` and `.azcli` are in this extension's `contributes.languages` as well
-// as poly-syntax-highlight's, which is the one place the three extensions
+// as poly-syntax-highlight's, which is the one place the two extensions
 // deliberately repeat each other. VSCode's built-in shellscript claims neither,
 // so without the mapping the file opens as plain text and no formatter is bound
-// to it -- and the three extensions are independent, so someone running only
+// to it -- and the two extensions are independent, so someone running only
 // poly-lsp would get nothing. VSCode merges identical language contributions,
 // and a Rust test compares the two manifests.
 //
@@ -142,6 +143,10 @@ let health: "starting" | "ready" | "failed" = "starting";
 /// Not `editor.formatOnSave` alone, even though the status bar switch writes
 /// that too (see quiet.ts): Format Document does not consult it, and "poly
 /// does not touch my files" has to cover the explicit request as well.
+///
+/// The format shortcut (`poly.formatDocument`) is the one way past it, and it
+/// goes around rather than through: it asks the daemon itself, so there is no
+/// request here to tell apart from a save.
 function mayFormat(): boolean {
   return isOn("format");
 }
@@ -325,6 +330,53 @@ async function runBatchFormat(
   } catch (err) {
     vscode.window.showErrorMessage(`Poly: batch format failed: ${err}`);
   }
+}
+
+/// Format the active document now, whatever the switches say.
+///
+/// A key pressed to format this file is the one request no switch should be
+/// able to swallow. For a file poly formats, the daemon is asked directly:
+/// that never passes the middleware, so the switch cannot see it, and it does
+/// not depend on which editor has focus -- `editor.action.formatDocument` does,
+/// and run as a command it was measured returning without asking any formatter.
+/// Anything else goes to Format Document, which poly never blocked, so the
+/// language's own default formatter is the one that answers.
+async function formatNow(self: string): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return;
+  }
+  const { document } = editor;
+  const chosen = vscode.workspace.getConfiguration("editor", document).get<string>("defaultFormatter");
+  const polys = document.uri.scheme === "file"
+    && LANGUAGES.includes(document.languageId)
+    && (!chosen || chosen === self);
+  if (!polys) {
+    await vscode.commands.executeCommand("editor.action.formatDocument");
+    return;
+  }
+  if (!client || health !== "ready") {
+    await reportDaemonFailure(health);
+    return;
+  }
+  const version = document.version;
+  const edits = await client.sendRequest(DocumentFormattingRequest.type, {
+    textDocument: { uri: document.uri.toString() },
+    options: {
+      tabSize: Number(editor.options.tabSize),
+      insertSpaces: Boolean(editor.options.insertSpaces),
+    },
+  });
+  // Typed into while the daemon was formatting: the edits describe a text
+  // that no longer exists, and applying them would scramble the new one.
+  if (!edits || edits.length === 0 || document.version !== version) {
+    return;
+  }
+  await editor.edit((builder) => {
+    for (const edit of edits) {
+      builder.replace(client!.protocol2CodeConverter.asRange(edit.range), edit.newText);
+    }
+  });
 }
 
 function workspacePaths(): string[] {
@@ -727,6 +779,10 @@ function yieldServers(): Record<string, string> {
 }
 
 export async function activate(context: vscode.ExtensionContext) {
+  // First, and returned on every path below: the editor features need no
+  // daemon, and the markdown preview reads its plugin off this return value --
+  // a binary that fails to start must not take the diagrams down with it.
+  const exports = activateEditor(context);
   const serverPath = resolveServerPath(context);
   let yielded = yieldServers();
   client = new LanguageClient(
@@ -873,6 +929,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("poly.toggleFormat", toggler("format", context.globalState, logLine)),
     vscode.commands.registerCommand("poly.toggleLint", toggler("lint", context.globalState, logLine)),
     vscode.commands.registerCommand("poly.createGoWork", createGoWork),
+    vscode.commands.registerCommand("poly.formatDocument", () => formatNow(context.extension.id)),
     vscode.commands.registerCommand("poly.formatFile", async () => {
       const doc = vscode.window.activeTextEditor?.document;
       if (doc?.uri.scheme === "file") {
@@ -1020,13 +1077,14 @@ export async function activate(context: vscode.ExtensionContext) {
     health = "failed";
     refreshStatus();
     void reportDaemonFailure(`${serverPath}: ${err}`);
-    return;
+    return exports;
   }
   await reportVersionSkew(serverPath, context.extension.packageJSON.version);
   // The editors already open when the window was restored: they fired their
   // events before the daemon could answer, so nothing above has seen them.
   applyIndentationToVisible();
-  scheduleUpdateCheck(context, logLine);
+  scheduleUpdateCheck(context, "poly", logLine);
+  return exports;
 }
 
 /** A line in the "Poly" channel, from code that runs outside the client. */

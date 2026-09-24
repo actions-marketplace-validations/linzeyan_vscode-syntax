@@ -18,7 +18,7 @@ const { writeFileSync } = require("node:fs");
 const { basename, join, resolve } = require("node:path");
 
 /**
- * poly-syntax, loaded beside poly-editor in the same host.
+ * poly-syntax, loaded beside poly-lsp in the same host.
  *
  * Measured 2026-09-21: a bare VSCode has no `protobuf` language id at all --
  * a .proto opens as `plaintext` and `setTextDocumentLanguage` throws `Unknown

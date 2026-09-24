@@ -21,7 +21,7 @@ const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 
 const ROOT = resolve(__dirname, "..", "..");
-const EDITOR = join(ROOT, "extensions", "editor");
+const LSP = join(ROOT, "extensions", "lsp");
 const SCRATCH = join(tmpdir(), "poly-list-fuzz");
 const MODULE = join(SCRATCH, "list.cjs");
 const POLY = process.env.POLY_BIN ?? join(ROOT, "cli", "target", "release", "poly");
@@ -144,9 +144,9 @@ function main() {
   }
   mkdirSync(SCRATCH, { recursive: true });
   execFileSync(
-    join(EDITOR, "node_modules", ".bin", "esbuild"),
+    join(LSP, "node_modules", ".bin", "esbuild"),
     [
-      join(EDITOR, "src", "list.ts"),
+      join(LSP, "src", "editor", "list.ts"),
       "--bundle",
       `--outfile=${MODULE}`,
       "--format=cjs",
