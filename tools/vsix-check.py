@@ -5,11 +5,11 @@ A manifest path is a promise to the editor, and nothing checks it: vsce packages
 whatever `.vscodeignore` leaves behind without reading `contributes`, so a
 preview script that never got built, a `.vscodeignore` line that reaches one
 file too far, and a renamed bundle all produce a VSIX that installs cleanly and
-does nothing. poly-editor's `markdown.previewScripts` is the case that prompted
-this: every test it has loads `dist/preview.js` by path from the source tree, so
+does nothing. `markdown.previewScripts` is the case that prompted this: every
+test the preview has loads `dist/preview.js` by path from the source tree, so
 the packaged copy has never been the thing under test.
 
-Usage: python3 tools/vsix-check.py extensions/editor
+Usage: python3 tools/vsix-check.py extensions/lsp
 """
 
 from __future__ import annotations

@@ -108,7 +108,7 @@ pub const PROXIED: &[(&str, &str)] = &[
     // for gopls, `go generate` on a .go and `go mod tidy` / `govulncheck` on a
     // go.mod. Held back until commands routed, because a lens is a command with
     // a label on it and clicking one that goes nowhere is worse than not
-    // offering it. It coexists with poly-editor's own reference-count lens
+    // offering it. It coexists with poly's own reference-count lens
     // rather than replacing it: that one needs no server at all, and the editor
     // shows every provider's lenses together.
     ("textDocument/codeLens", "codeLensProvider"),

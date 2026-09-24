@@ -4,8 +4,8 @@
 //
 // Every other test in this repo asks poly what it thinks. The ones that ask
 // something else ask the editor's own built-ins (ref-lens, toc-fuzz,
-// mermaid-diff) or two extensions poly-editor replaced (editor-diff). None of
-// them asks the extensions poly-lsp and poly-editor were installed *instead
+// mermaid-diff) or two extensions poly's editor features replaced
+// (editor-diff). None of them asks the extensions poly was installed *instead
 // of*, and that is where "it exists in code but works badly" was found: in use,
 // next to the habit the old extension left behind.
 //
@@ -44,7 +44,6 @@ const { pathToFileURL } = require("node:url");
 
 const ROOT = resolve(__dirname, "..", "..");
 const LSP = join(ROOT, "extensions", "lsp");
-const EDITOR = join(ROOT, "extensions", "editor");
 const SYNTAX = join(ROOT, "extensions", "syntax");
 const CACHE = join(LSP, ".vscode-test");
 const { runTests } = require(join(LSP, "node_modules", "@vscode", "test-electron"));
@@ -53,7 +52,7 @@ const { render } = require("./report");
 /** In the order they were written, which is also the order they are cheapest. */
 const SETS = ["unicode", "format", "shell", "refview"].map((id) => require(`./sets/${id}.js`));
 
-const POLY_IDS = ["ricky.poly-lsp", "ricky.poly-editor", "ricky.poly-syntax-highlight"];
+const POLY_IDS = ["ricky.poly-lsp", "ricky.poly-syntax-highlight"];
 
 /**
  * Keyed by checkout, for the reason ref-lens-check/runnable.js gives: two
@@ -261,7 +260,7 @@ async function main() {
   // Loaded from source, so the bundles are built from source first. Chained by
   // hand: this machine runs npm and pnpm with lifecycle scripts off, and a
   // stale dist/ would measure the last build rather than this tree.
-  for (const dir of [LSP, EDITOR]) {
+  for (const dir of [LSP]) {
     execFileSync("pnpm", ["run", "build"], { cwd: dir, stdio: ["ignore", "inherit", "inherit"] });
   }
   const polyVersion = execFileSync(polyBin, ["--version"], { encoding: "utf8" }).trim();
@@ -321,7 +320,7 @@ async function main() {
       let failure;
       try {
         await runTests({
-          extensionDevelopmentPath: side === "poly" ? [LSP, EDITOR, SYNTAX] : [harness()],
+          extensionDevelopmentPath: side === "poly" ? [LSP, SYNTAX] : [harness()],
           extensionTestsPath: resolve(__dirname, "suite.js"),
           extensionTestsEnv: {
             POLY_EXT_DIFF_SET: set.id,
@@ -333,7 +332,7 @@ async function main() {
             POLY_EXT_DIFF_USER_DATA: userData,
             POLY_EXT_DIFF_EXPECT: JSON.stringify(
               side === "poly"
-                ? { present: ["ricky.poly-lsp", "ricky.poly-editor"], absent: allOriginalIds }
+                ? { present: ["ricky.poly-lsp"], absent: allOriginalIds }
                 : { present: [mine], absent: POLY_IDS },
             ),
             ...(set.launchEnv ? set.launchEnv(side, env) : {}),

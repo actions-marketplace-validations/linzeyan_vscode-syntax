@@ -4,23 +4,25 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
-// Every poly extension releases in lockstep (02 §8); poly-lsp owns the update
-// check for all of them, because it is the one that already runs a daemon and
-// already has a status bar to say something went wrong in.
+// Every poly extension releases in lockstep (02 §8), and each one runs this
+// check on its own schedule, from its own settings section: either can be
+// installed alone, and someone with only the grammars still has to hear about a
+// release. Whichever finds a release first updates every poly extension that is
+// installed, so two extensions still mean one prompt and one reload.
 const REPO = "linzeyan/vscode-syntax";
 
 /**
- * The universal VSIX that ship alongside poly-lsp, and the extension id each
- * one installs as.
+ * Every poly extension, as the release asset it installs from and the id it
+ * installs as. Grammars first, so a reload part-way through an install still
+ * has a grammar and a client that match.
  *
- * Updated only when the user already has them. poly-lsp works standalone (both
- * READMEs document that), and installing an extension somebody deliberately
- * does not have is not an update -- it is poly deciding what belongs on their
- * machine.
+ * Updated only when the user already has them: installing an extension
+ * somebody deliberately does not have is not an update -- it is poly deciding
+ * what belongs on their machine.
  */
-const COMPANIONS: readonly [string, string][] = [
-  ["poly-syntax-highlight", "ricky.poly-syntax-highlight"],
-  ["poly-editor", "ricky.poly-editor"],
+const PACKAGES: readonly [asset: (version: string) => string, id: string][] = [
+  [(version) => `poly-syntax-highlight-${version}.vsix`, "ricky.poly-syntax-highlight"],
+  [(version) => `poly-lsp-${vsceTarget()}-${version}.vsix`, "ricky.poly-lsp"],
 ];
 const LAST_CHECK = "updateCheck.lastCheck";
 const ETAG = "updateCheck.etag";
@@ -138,18 +140,13 @@ async function download(url: string, dest: string): Promise<Buffer> {
   return buf;
 }
 
-/** Download both VSIX, verify against SHA256SUMS, install, prompt reload. */
+/** Download the installed ones' VSIX, verify against SHA256SUMS, install, prompt reload. */
 async function installUpdate(release: Release): Promise<void> {
   const version = release.tag.replace(/^v/, "");
-  // Companions first, so a reload part-way through an install still has a
-  // grammar and a client that match. Filtered before the download rather than
-  // before the install: there is no reason to spend the bytes on a VSIX this
-  // machine will not take.
-  const names = [
-    ...COMPANIONS.filter(([, id]) => vscode.extensions.getExtension(id))
-      .map(([name]) => `${name}-${version}.vsix`),
-    `poly-lsp-${vsceTarget()}-${version}.vsix`,
-  ];
+  // Filtered before the download rather than before the install: there is no
+  // reason to spend the bytes on a VSIX this machine will not take.
+  const names = PACKAGES.filter(([, id]) => vscode.extensions.getExtension(id))
+    .map(([asset]) => asset(version));
   const sumsUrl = release.assets.get("SHA256SUMS");
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "poly-update-"));
   const files: string[] = [];
@@ -243,7 +240,7 @@ export async function checkForUpdates(
       }
       return;
     }
-    if (quiet && state.get<string>(SKIPPED) === release.tag) {
+    if (quiet && (state.get<string>(SKIPPED) === release.tag || !firstToAsk(release.tag))) {
       return;
     }
     const pick = await vscode.window.showInformationMessage(
@@ -272,29 +269,57 @@ export async function checkForUpdates(
 }
 
 /**
- * Deferred background check, at most once per intervalDays (02 §8) -- unless a
- * newer release is already known and was neither installed nor skipped.
+ * The release a background check in this extension host already asked about,
+ * whichever poly extension asked. Both run in one host, so a global is the one
+ * thing they share without either depending on the other being installed.
+ */
+const ASKED = Symbol.for("poly.updateCheck.asked");
+
+function firstToAsk(tag: string): boolean {
+  const host = globalThis as { [ASKED]?: string };
+  if (host[ASKED] === tag) {
+    return false;
+  }
+  host[ASKED] = tag;
+  return true;
+}
+
+/**
+ * Is a background check due: at most once per `days` (02 §8), unless a newer
+ * release is already known and was neither installed nor skipped.
  *
  * The interval is there to spare GitHub's API, not to ration prompts. Once a
  * newer tag is on record, waiting out the week just means a missed prompt costs
  * a week, and the only way to stop hearing about a release is "Skip This
  * Version", which is still honoured.
  */
+export function updateDue(
+  state: vscode.Memento,
+  current: string,
+  days: number,
+  now = Date.now(),
+): boolean {
+  const cachedTag = state.get<string>(CACHED_TAG);
+  const pending = knownNewer(cachedTag, current) && state.get<string>(SKIPPED) !== cachedTag;
+  return pending || now - state.get<number>(LAST_CHECK, 0) >= days * 86_400_000;
+}
+
+/**
+ * Deferred background check, governed by `<section>.updateCheck.enabled` and
+ * `<section>.updateCheck.intervalDays` -- `poly` for Poly, `poly.syntax` for
+ * poly-syntax-highlight.
+ */
 export function scheduleUpdateCheck(
   context: vscode.ExtensionContext,
+  section: string,
   log: (line: string) => void,
 ): void {
-  const config = vscode.workspace.getConfiguration("poly");
+  const config = vscode.workspace.getConfiguration(section);
   if (!config.get<boolean>("updateCheck.enabled", true)) {
     return;
   }
-  const state = context.globalState;
-  const cachedTag = state.get<string>(CACHED_TAG);
-  const pending = knownNewer(cachedTag, context.extension.packageJSON.version as string)
-    && state.get<string>(SKIPPED) !== cachedTag;
-  const days = config.get<number>("updateCheck.intervalDays", 7);
-  const last = state.get<number>(LAST_CHECK, 0);
-  if (!pending && Date.now() - last < days * 86_400_000) {
+  const current = context.extension.packageJSON.version as string;
+  if (!updateDue(context.globalState, current, config.get<number>("updateCheck.intervalDays", 7))) {
     return;
   }
   const timer = setTimeout(() => void checkForUpdates(context, true, log), 10_000);

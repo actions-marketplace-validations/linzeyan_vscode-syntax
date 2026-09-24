@@ -1,7 +1,7 @@
 /**
  * `N methods` over a type whose methods are not inside it.
  *
- * The count every other lens in poly-editor needs a language server for, this
+ * The count every other lens here needs a language server for, this
  * one already has: it is in the document symbols the outline is drawn from. No
  * extra request, and nothing resolved lazily -- the number is known before the
  * lens is handed over.

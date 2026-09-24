@@ -2,7 +2,7 @@
   "name": "poly-syntax-highlight",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.18.2",
+  "version": "0.18.3",
   "publisher": "ricky",
   "license": "MIT",
   "engines": {
@@ -11,7 +11,27 @@
   "categories": [
     "Programming Languages"
   ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
+    "configuration": {
+      "title": "%configuration.title%",
+      "properties": {
+        "poly.syntax.updateCheck.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.updateCheck.enabled.description%"
+        },
+        "poly.syntax.updateCheck.intervalDays": {
+          "type": "number",
+          "default": 7,
+          "minimum": 0,
+          "description": "%config.updateCheck.intervalDays.description%"
+        }
+      }
+    },
     "languages": [
       {
         "id": "markdown",
@@ -1846,5 +1866,16 @@
         "path": "./syntaxes/vyper.tmLanguage.json"
       }
     ]
+  },
+  "packageManager": "pnpm@11.5.3",
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.4.0"
   }
 }

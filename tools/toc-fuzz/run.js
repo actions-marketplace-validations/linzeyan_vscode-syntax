@@ -19,7 +19,7 @@ const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
 const ROOT = resolve(__dirname, "..", "..");
-const EDITOR = join(ROOT, "extensions", "editor");
+const LSP = join(ROOT, "extensions", "lsp");
 const { runTests } = require(join(ROOT, "extensions", "lsp", "node_modules", "@vscode", "test-electron"));
 
 const SCRATCH = join(tmpdir(), "poly-toc-fuzz");
@@ -181,9 +181,9 @@ async function main() {
   // bundle: `dist/extension.js` is minified and exports nothing, and the point
   // is to compare the source of truth rather than a copy of it.
   execFileSync(
-    join(EDITOR, "node_modules", ".bin", "esbuild"),
+    join(LSP, "node_modules", ".bin", "esbuild"),
     [
-      join(EDITOR, "src", "markdown.ts"),
+      join(LSP, "src", "editor", "markdown.ts"),
       "--bundle",
       `--outfile=${MODULE}`,
       "--format=cjs",
@@ -193,7 +193,7 @@ async function main() {
   );
 
   await runTests({
-    extensionDevelopmentPath: EDITOR,
+    extensionDevelopmentPath: LSP,
     extensionTestsPath: resolve(__dirname, "suite.js"),
     extensionTestsEnv: {
       POLY_TOC_OUT: OUT,
@@ -228,7 +228,7 @@ async function main() {
     "dist",
     "serverWorkerMain.js",
   );
-  const disagree = classDisagreements(bundle, join(EDITOR, "src", "markdown.ts"));
+  const disagree = classDisagreements(bundle, join(LSP, "src", "editor", "markdown.ts"));
 
   // The preview has to have written an id at all. Without one every case
   // compares null against a string and the whole run is one failure repeated,

@@ -40,7 +40,6 @@ CARGO = ROOT / "cli" / "Cargo.toml"
 MANIFESTS = [
     ROOT / "extensions" / "lsp" / "package.json",
     ROOT / "extensions" / "syntax" / "package.json",
-    ROOT / "extensions" / "editor" / "package.json",
 ]
 # Listed explicitly rather than globbed: docs/ is a symlink to another repo and
 # its roadmap is full of old version numbers that are evidence of what was
@@ -54,13 +53,11 @@ M = r"(?P<m>\d+\.\d+)"
 # rewritten, and a site that quietly drops off this list is one nothing checks
 # again.
 SITES = [
+    # A new VSIX means a new line here, in the same commit. An empty pattern is
+    # an error, but a pattern nobody wrote is the one thing this cannot catch
+    # itself: poly-editor's install line sat at 0.8.0 through the 0.9.0 bump.
     rf"poly-syntax-highlight-{V}\.vsix",
     rf"poly-lsp-[a-z0-9-]+-{V}\.vsix",
-    # Added a version late: poly-editor arrived at 0.8.0 and its install line
-    # sat at 0.8.0 through the 0.9.0 bump. An empty pattern is an error here,
-    # but a pattern nobody wrote is the one thing this cannot catch itself --
-    # so a new VSIX means a new line here, in the same commit.
-    rf"poly-editor-{V}\.vsix",
     # The asset name the frozen 0.5.0 installer asks for, quoted in both files.
     rf"poly-syntax-{V}\.vsix",
     rf"POLY_VERSION={V}",

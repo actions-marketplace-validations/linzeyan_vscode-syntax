@@ -630,7 +630,7 @@ fn serve(connection: Connection) -> Result<()> {
     while let Ok(message) = server.connection.receiver.recv() {
         match message {
             Message::Request(request) => {
-                if server.connection.handle_shutdown(&request)? {
+                if handle_shutdown(&server.connection, &request)? {
                     break;
                 }
                 let started = Instant::now();
@@ -681,6 +681,40 @@ fn serve(connection: Connection) -> Result<()> {
     // as rust-analyzer's "client exited without proper shutdown sequence".
     server.stop_downstream();
     Ok(())
+}
+
+/// `Connection::handle_shutdown`, without its one rule that does not hold.
+///
+/// lsp-server takes the message after `shutdown` to be `exit` and fails on
+/// anything else. But the editor can still be answering something poly asked
+/// before the shutdown -- the answer to a `client/registerCapability` for a
+/// downstream server that had just started is the one observed -- and that is
+/// not a protocol violation. It made the daemon exit 2 in the middle of a
+/// restart, and the client does not restart a server that dies while it is
+/// being stopped: a toggle of the Lint switch that raced a registration left
+/// the window without poly until a reload.
+fn handle_shutdown(connection: &Connection, request: &lsp_server::Request) -> Result<bool> {
+    if request.method != "shutdown" {
+        return Ok(false);
+    }
+    connection
+        .sender
+        .send(Response::new_ok(request.id.clone(), ()).into())?;
+    // Thirty seconds, as lsp-server waits. An editor that never sends `exit`
+    // has gone, and ending is what it would have asked for anyway.
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match connection
+            .receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(Message::Notification(notification)) if notification.method == "exit" => {
+                return Ok(true)
+            }
+            Ok(_) => continue,
+            Err(_) => return Ok(true),
+        }
+    }
 }
 
 impl Server {
@@ -3610,6 +3644,45 @@ mod tests {
         .unwrap();
         assert!(pinned.contains(why), "{pinned}");
         assert!(!pinned.contains("go install"), "{pinned}");
+    }
+
+    /// The race that took poly out of a window: the editor stopping the daemon
+    /// while answering a registration poly had just asked for. The answer
+    /// lands between `shutdown` and `exit`, and the daemon has to wait for the
+    /// `exit` rather than fail on the answer.
+    #[test]
+    fn an_answer_arriving_during_shutdown_does_not_fail_it() {
+        let (server, editor) = Connection::memory();
+        let shutdown = lsp_server::Request::new(7.into(), "shutdown".to_string(), ());
+        let late = Response::new_ok(
+            lsp_server::RequestId::from("poly:register:gopls".to_string()),
+            (),
+        );
+        editor.sender.send(Message::Response(late)).unwrap();
+        editor
+            .sender
+            .send(Message::Notification(Notification::new(
+                "exit".to_string(),
+                (),
+            )))
+            .unwrap();
+
+        assert!(handle_shutdown(&server, &shutdown).unwrap());
+        let Ok(Message::Response(answered)) = editor.receiver.try_recv() else {
+            panic!("shutdown was not answered");
+        };
+        assert_eq!(answered.id, 7.into());
+    }
+
+    #[test]
+    fn a_request_other_than_shutdown_is_left_to_the_loop() {
+        let (server, editor) = Connection::memory();
+        let hover = lsp_server::Request::new(1.into(), "textDocument/hover".to_string(), ());
+        assert!(!handle_shutdown(&server, &hover).unwrap());
+        assert!(
+            editor.receiver.try_recv().is_err(),
+            "answered a request it does not own"
+        );
     }
 
     /// A session over an in-memory pipe, and the editor's end of it.

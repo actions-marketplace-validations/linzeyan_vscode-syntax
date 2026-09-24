@@ -34,16 +34,19 @@ import {
   refLabel,
 } from "./references";
 import { ReferenceTree, registerReferenceTree } from "./referenceTree";
+import { cacheDir, RefStore } from "./refStore";
 import { entryLine, entryPoints, findsEntryInText, runLine } from "./runnable";
 import { colorSheet, scopesIn } from "./scopes";
 import { offerMessage, serverToOffer } from "./servers";
 import { registerTodoTree } from "./todoTree";
+import { drawsNothing, explain, findSuspects, Level, levelOf, SUSPECTS } from "./unicode";
 
 /** Languages already offered a server this session — see `offerServer`. */
 const offered = new Set<string>();
 
 /**
- * poly-editor's own log, "Poly Editor" in the Output panel.
+ * The editor features' own log, "Poly Editor" in the Output panel -- apart
+ * from "Poly", which is the daemon's and too busy to find a lens decision in.
  *
  * There was none until 0.18.1: a lens that decided to draw nothing said so to
  * nobody, and an exception in one landed in the extension host's log where no
@@ -58,13 +61,13 @@ let log: vscode.LogOutputChannel | undefined;
  *
  * Called only where a provider has already been asked and come back empty, so
  * this never fires for someone whose official extension is answering happily.
- * Silent unless poly-lsp is installed and `poly.languageServers` is off: it is
- * the only setting this can offer, and offering to change one that is already
- * on would be advice that does nothing.
+ * Silent unless `poly.languageServers` is off: it is the only setting this can
+ * offer, and offering to change one that is already on would be advice that
+ * does nothing.
  */
 async function offerServer(what: string, languageId: string): Promise<void> {
   const server = serverToOffer(languageId, offered);
-  if (!server || !vscode.extensions.getExtension("ricky.poly-lsp")) {
+  if (!server) {
     return;
   }
   const config = vscode.workspace.getConfiguration("poly");
@@ -554,6 +557,121 @@ function tintIndentation(context: vscode.ExtensionContext): void {
   vscode.window.visibleTextEditors.forEach(paint);
 }
 
+const UNICODE_COLORS: Readonly<Record<Level, string>> = {
+  error: "poly.unicodeError",
+  warning: "poly.unicodeWarning",
+  info: "poly.unicodeInfo",
+};
+
+/**
+ * The unicode highlight, wired to the editor: gremlins' drawing over poly's
+ * table.
+ *
+ * The whole document rather than the visible lines, unlike the indent tint.
+ * The overview ruler is the point of it -- a zero-width space three screens
+ * down is found by its tick in the scrollbar or not at all.
+ */
+function highlightUnicode(context: vscode.ExtensionContext): void {
+  const on = () =>
+    vscode.workspace
+      .getConfiguration("poly")
+      .get<boolean>("unicodeHighlight.enabled", false);
+  const types = new Map<string, vscode.TextEditorDecorationType>();
+  const typeOf = (level: Level, outline: boolean) => {
+    const key = `${level}:${outline}`;
+    let type = types.get(key);
+    if (!type) {
+      const color = new vscode.ThemeColor(UNICODE_COLORS[level]);
+      type = vscode.window.createTextEditorDecorationType({
+        gutterIconPath: context.asAbsolutePath(`media/unicode-${level}.svg`),
+        gutterIconSize: "contain",
+        overviewRulerColor: color,
+        overviewRulerLane: vscode.OverviewRulerLane.Right,
+        ...(outline
+          ? { borderWidth: "1px", borderStyle: "solid", borderColor: color }
+          : { backgroundColor: color }),
+      });
+      types.set(key, type);
+    }
+    return type;
+  };
+  context.subscriptions.push({ dispose: () => types.forEach((type) => type.dispose()) });
+
+  const paint = (editor: vscode.TextEditor) => {
+    const ranges = new Map<vscode.TextEditorDecorationType, vscode.Range[]>(
+      [...types.values()].map((type) => [type, []]),
+    );
+    if (on()) {
+      const { document } = editor;
+      for (const { offset, suspect } of findSuspects(document.getText())) {
+        const start = document.positionAt(offset);
+        const type = typeOf(levelOf(suspect), drawsNothing(suspect));
+        const list = ranges.get(type) ?? [];
+        list.push(new vscode.Range(start, start.translate(0, 1)));
+        ranges.set(type, list);
+      }
+    }
+    // Every type, including the ones with nothing to draw now: setting an
+    // empty list is the only way to clear what the last paint left.
+    ranges.forEach((list, type) => editor.setDecorations(type, list));
+  };
+
+  // Same debounce as the indent tint, for the same reason.
+  let pending: NodeJS.Timeout | undefined;
+  const repaintAll = () => {
+    clearTimeout(pending);
+    pending = setTimeout(() => vscode.window.visibleTextEditors.forEach(paint), 50);
+  };
+  context.subscriptions.push({ dispose: () => clearTimeout(pending) });
+
+  const code = (d: vscode.Diagnostic) => String(typeof d.code === "object" ? d.code.value : d.code);
+  context.subscriptions.push(
+    vscode.window.onDidChangeVisibleTextEditors(repaintAll),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      if (vscode.window.visibleTextEditors.some((e) => e.document === event.document)) {
+        repaintAll();
+      }
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("poly.unicodeHighlight")) {
+        repaintAll();
+      }
+    }),
+    // A provider rather than a `hoverMessage` on each range: the text is built
+    // for the one character under the pointer instead of for every character
+    // in the file on every keystroke.
+    vscode.languages.registerHoverProvider("*", {
+      provideHover(document, position) {
+        if (!on()) {
+          return undefined;
+        }
+        const text = document.lineAt(position.line).text;
+        const at = (character: number) => {
+          const suspect = SUSPECTS.get(text.charCodeAt(character));
+          const bom = suspect?.codePoint === 0xfeff && position.line === 0 && character === 0;
+          return suspect && !bom ? { suspect, character } : undefined;
+        };
+        // The character under the pointer, or a zero-width one just before
+        // it: something with no width has no glyph to point at.
+        const before = at(position.character - 1);
+        const hit = at(position.character) ?? (before && drawsNothing(before.suspect) ? before : undefined);
+        if (!hit) {
+          return undefined;
+        }
+        const range = new vscode.Range(position.line, hit.character, position.line, hit.character + 1);
+        // Once the daemon has reported the character, its Problems entry is in
+        // this same hover already, and a second paragraph saying it again reads
+        // like two findings.
+        const reported = vscode.languages.getDiagnostics(document.uri).some(
+          (d) => d.source === "poly" && code(d).startsWith("unicode-") && d.range.contains(range.start),
+        );
+        return reported ? undefined : new vscode.Hover(explain(hit.suspect), range);
+      },
+    }),
+  );
+  vscode.window.visibleTextEditors.forEach(paint);
+}
+
 /**
  * The image a line refers to, if exactly one of its candidates is a real file.
  *
@@ -753,7 +871,7 @@ const DECLINED_MS = 60_000;
 /**
  * When to look again at a file that had nothing to count yet.
  *
- * A lens is asked for once when the file opens, and poly-lsp starts a file's
+ * A lens is asked for once when the file opens, and the daemon starts a file's
  * language server on that same open -- so the first answer can come from a
  * server that is not up yet, and until 0.18.1 that empty answer was final:
  * nothing but a settings change asked again. The editor has no event for "a
@@ -851,6 +969,21 @@ async function othersAt(
   position: vscode.Position,
   counts: "refs" | Direction,
 ): Promise<vscode.Location[]> {
+  return (await answerAt(uri, position, counts)) ?? [];
+}
+
+/**
+ * `othersAt`, or `undefined` when no provider said anything at all -- which
+ * for references is no provider rather than no references, since a provider
+ * that answers includes the declaration (see `REFERENCE_PROBES`). Only a
+ * count kept across sessions needs the difference: it must not be replaced by
+ * the silence of a server that is still loading.
+ */
+async function answerAt(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  counts: "refs" | Direction,
+): Promise<vscode.Location[] | undefined> {
   const found = await vscode.commands.executeCommand<
     (vscode.Location | vscode.LocationLink)[]
   >(
@@ -858,10 +991,13 @@ async function othersAt(
     uri,
     position,
   );
+  if (!found || found.length === 0) {
+    return undefined;
+  }
   // A reference provider answers in `Location`s, an implementation provider
   // may answer in `LocationLink`s, and everything below only understands the
   // first.
-  const locations = (found ?? []).map((one) =>
+  const locations = found.map((one) =>
     "targetUri" in one
       ? new vscode.Location(one.targetUri, one.targetSelectionRange ?? one.targetRange)
       : one
@@ -1114,20 +1250,90 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
   const counted = new Answered(REUSE_MS);
   /** Retries already spent per document; see `RETRY_MS`. */
   const retried = new Map<string, number>();
+  /** Counts from earlier sessions; see refStore.ts. */
+  const store = new RefStore(cacheDir());
 
   /** Nothing to count yet: ask again later, a bounded number of times. */
-  const askAgainLater = (document: vscode.TextDocument, why: string) => {
-    const key = document.uri.toString();
+  const askAgainLater = (uri: vscode.Uri, why: string) => {
+    const key = uri.toString();
     const spent = retried.get(key) ?? 0;
     if (spent >= RETRY_MS.length) {
       return;
     }
     retried.set(key, spent + 1);
     log?.debug(
-      `refs: ${why} for ${vscode.workspace.asRelativePath(document.uri)}, asking again in ${RETRY_MS[spent]}ms`,
+      `refs: ${why} for ${vscode.workspace.asRelativePath(uri)}, asking again in ${RETRY_MS[spent]}ms`,
     );
     const timer = setTimeout(() => changed.fire(), RETRY_MS[spent]);
     context.subscriptions.push({ dispose: () => clearTimeout(timer) });
+  };
+
+  /** Where a file's counts are kept: inside a workspace folder, or nowhere. */
+  const placeOf = (uri: vscode.Uri) => {
+    const folder = uri.scheme === "file" ? vscode.workspace.getWorkspaceFolder(uri) : undefined;
+    return folder && { folder: folder.uri.fsPath, file: path.relative(folder.uri.fsPath, uri.fsPath) };
+  };
+
+  // Throttled rather than debounced, both of them: answers trickle in for as
+  // long as a server takes to load, and a debounce would hold every redraw
+  // back until the last one.
+  let saving: NodeJS.Timeout | undefined;
+  const saveSoon = () => {
+    saving ??= setTimeout(() => {
+      saving = undefined;
+      store.save();
+    }, 2_000);
+  };
+  let redrawing: NodeJS.Timeout | undefined;
+  const redrawSoon = () => {
+    redrawing ??= setTimeout(() => {
+      redrawing = undefined;
+      changed.fire();
+    }, 250);
+  };
+  context.subscriptions.push({
+    dispose: () => {
+      clearTimeout(saving);
+      clearTimeout(redrawing);
+      store.save();
+    },
+  });
+
+  /** An answer: reused for `REUSE_MS`, and kept for the next session. */
+  const settle = (at: vscode.Uri, id: string, count: number) => {
+    counted.set(at.toString(), id, count);
+    retried.delete(at.toString());
+    const place = placeOf(at);
+    if (place) {
+      store.set(place.folder, place.file, id, count);
+      saveSoon();
+    }
+  };
+
+  /** Lenses whose kept count is being asked again, so one lens asks once. */
+  const refreshing = new Set<string>();
+  const refresh = (at: vscode.Uri, start: vscode.Position, counts: "refs" | Direction, id: string, shown: number) => {
+    const flight = `${at.toString()}|${id}`;
+    if (refreshing.has(flight)) {
+      return;
+    }
+    refreshing.add(flight);
+    void answerAt(at, start, counts)
+      .then((others) => {
+        // A server still loading says nothing, and the kept count stays up
+        // until it can answer rather than turning into a `no refs` that is
+        // only a guess.
+        if (!others && counts === "refs") {
+          askAgainLater(at, "no reference provider answered");
+          return;
+        }
+        const count = others?.length ?? 0;
+        settle(at, id, count);
+        if (count !== shown) {
+          redrawSoon();
+        }
+      }, () => undefined)
+      .finally(() => refreshing.delete(flight));
   };
 
   const provider: vscode.CodeLensProvider = {
@@ -1154,7 +1360,7 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       // Either way there is nothing to hang a count on yet.
       if (!symbols) {
         void offerServer("the outline", document.languageId);
-        askAgainLater(document, "no outline");
+        askAgainLater(document.uri, "no outline");
         return [];
       }
       const found = lensTargets(symbols, MAX_LENSES);
@@ -1171,7 +1377,19 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       if (targets.length === 0) {
         return [];
       }
-      if (!(await answersReferences(document, targets, refsAnswer, token))) {
+      const place = placeOf(document.uri);
+      const remembered = place ? store.answered(place.folder, document.languageId) : [];
+      if (remembered.includes("refs")) {
+        // Answered in an earlier session. Drawn now, from the counts kept
+        // then, each asked again behind the drawing (`resolveCodeLens`): the
+        // probe would wait on a server that may still be loading, and that
+        // wait is what the store is for.
+      } else if (await answersReferences(document, targets, refsAnswer, token)) {
+        retried.delete(document.uri.toString());
+        if (place) {
+          store.answer(place.folder, document.languageId, "refs");
+        }
+      } else {
         if (token.isCancellationRequested) {
           return [];
         }
@@ -1179,19 +1397,25 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
         // shell function that is the whole feature missing, and it was
         // reported as one.
         void offerServer("references", document.languageId);
-        askAgainLater(document, "no reference provider answered");
+        askAgainLater(document.uri, "no reference provider answered");
         return [];
       }
-      retried.delete(document.uri.toString());
-      const answers = {
-        down: await answersImplementations(document, targets, "down", answered, declined, token),
-        up: await answersImplementations(document, targets, "up", answered, declined, token),
+      const answersDirection = async (direction: Direction) => {
+        if (remembered.includes(direction)) {
+          return true;
+        }
+        const yes = await answersImplementations(document, targets, direction, answered, declined, token);
+        if (yes && place) {
+          store.answer(place.folder, document.languageId, direction);
+        }
+        return yes;
       };
+      const answers = { down: await answersDirection("down"), up: await answersDirection("up") };
       if (token.isCancellationRequested) {
         return [];
       }
       const methods = methodsByType(symbols);
-      return targets.flatMap((target) => {
+      const lenses = targets.flatMap((target) => {
         const range = target.at;
         const lenses: vscode.CodeLens[] = [
           new ReferenceLens(document.uri, "refs", target.key, range),
@@ -1220,22 +1444,42 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
         }
         return lenses;
       });
+      if (place) {
+        const drawn = lenses.filter((lens) => lens instanceof ReferenceLens);
+        store.retain(place.folder, place.file, new Set(drawn.map((lens) => `${lens.counts}|${lens.key}`)));
+        saveSoon();
+      }
+      return lenses;
     },
 
     async resolveCodeLens(lens, token) {
       const { uri: at, counts, key } = lens as ReferenceLens;
       const start = lens.range.start;
-      const document = at.toString();
-      let count = counted.get(document, `${counts}|${key}`);
-      if (count === undefined) {
+      const id = `${counts}|${key}`;
+      let count = counted.get(at.toString(), id);
+      const place = count === undefined ? placeOf(at) : undefined;
+      const kept = place && store.get(place.folder, place.file, id);
+      if (count === undefined && kept !== undefined) {
+        // Drawn now from the last answer, and asked again behind it; a count
+        // that moved is redrawn when the answer lands. See refStore.ts.
+        count = kept;
+        refresh(at, start, counts, id, kept);
+      } else if (count === undefined) {
         // Scrolled past or superseded before it was drawn. The editor asks
         // again for any lens that is still on screen, so leaving this one
         // unresolved costs nothing and saves a search nobody will read.
         if (token.isCancellationRequested) {
           return lens;
         }
-        count = (await othersAt(at, start, counts)).length;
-        counted.set(document, `${counts}|${key}`, count);
+        const others = await answerAt(at, start, counts);
+        // Nothing answered: not a count, and not worth a `no refs` that the
+        // store would then keep. Left unresolved, and asked again shortly.
+        if (!others && counts === "refs") {
+          askAgainLater(at, "no reference provider answered");
+          return lens;
+        }
+        count = others?.length ?? 0;
+        settle(at, id, count);
       }
       lens.command = {
         title: counts === "refs" ? refLabel(count) : implLabel(count, counts),
@@ -1810,6 +2054,7 @@ const extendMarkdownIt = mermaidPlugin(rendersMermaid);
 
 export function activate(context: vscode.ExtensionContext) {
   tintIndentation(context);
+  highlightUnicode(context);
   previewImages(context);
   log = vscode.window.createOutputChannel("Poly Editor", { log: true });
   // Two providers draw lenses that navigate to a list of places, so the
@@ -1921,5 +2166,3 @@ export function activate(context: vscode.ExtensionContext) {
   // `register…` call for it.
   return { extendMarkdownIt };
 }
-
-export function deactivate() {}

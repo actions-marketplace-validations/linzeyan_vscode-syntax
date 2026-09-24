@@ -1,20 +1,16 @@
 # Poly
 
-用「三個 VSCode extension ＋ 一個 CLI」取代為了各語言 highlight／lint／format 而
+用「兩個 VSCode extension ＋ 一個 CLI」取代為了各語言 highlight／lint／format 而
 安裝的一大堆零散 extension。編輯器與 CI 共用同一個 binary、同一份設定，所以本機存
 檔跟 pipeline 的結果一定一致。
 
 | 產出物                  | 職責                                                         |
 | ----------------------- | ------------------------------------------------------------ |
 | `poly-syntax-highlight` | 多語言 syntax highlighting，**接管全部 VSCode 內建語言文法** |
-| `poly-lsp`              | 存檔即時 lint／format，批次命令；背後是 `poly lsp` daemon    |
-| `poly-editor`           | 編輯器端便利功能，沒有 CI 對應物的那些；不需要 poly binary   |
+| `poly-lsp`              | 存檔即時 lint／format、批次命令、編輯器端便利功能            |
 | `poly`                  | 單一 binary CLI，供 CI、pre-commit、終端批次使用             |
 
-三個 extension 同版號一起發版，但彼此不相依：poly-lsp 可以單獨裝，poly-editor 連
-poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 daemon 沒起來就整個失效，
-而它的 VSIX 是分平台六份，純 TypeScript 的功能沒有理由跟著被打包六次，也沒有理由讓
-只想要 lint／format 的人一起收下。
+兩個 extension 同版號一起發版，但彼此不相依，各自可以單獨裝。
 
 ## 功能
 
@@ -85,12 +81,12 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **專案內工具優先**：偵測到專案的 biome／prettier／eslint／rustfmt 就用它們，
   避免和團隊 CI 結果不一致。
 - 背景檢查 GitHub Releases（預設 7 天一次，可調可關），一鍵更新裝了的那幾個
-  extension——沒裝的不會被順手裝上，那不是更新。
+  extension——沒裝的不會被順手裝上，那不是更新。poly-syntax-highlight 也有自己的檢查與
+  間隔設定（`poly.syntax.updateCheck.*`），只裝它一個也收得到新版。
 
-### poly-editor — 編輯器便利功能
+### poly-lsp — 編輯器便利功能
 
-沒有 CI 對應物的那些功能住在這裡，跟 poly binary 完全無關，所以裝不裝、要不要更新
-都可以單獨決定。
+沒有 CI 對應物的那些，不需要 daemon：binary 沒起來它們照樣能用。附加功能預設全關。
 
 - **`Poly: Copy Path with Line Numbers`**：複製 `路徑:行號`；選取多行時是
   `路徑:42-51`。VSCode 內建的 Copy Relative Path 只到路徑為止，`:42` 是唯一的差別，
@@ -130,7 +126,8 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
   開檔案總管裡的 **References** 面板——那是 poly 自己的樹，每一列除了原始碼還帶**行號**與
   **它落在哪個符號裡**（`method Handle`、`func main`），內建的 `references-view` 兩欄都沒有，
   而別人的樹加不了欄位。全部的數字都來自該語言已註冊的 provider，poly 只數與畫。
-  `poly.referencesCodeLens.enabled` 可關。
+  數字存在 `$XDG_CACHE_HOME/poly/refs/`（預設 `~/.cache/poly/refs/`），重開視窗時先畫上次的
+  數字、背景重新問過再更新。`poly.referencesCodeLens.enabled` 可關。
 - **`run | debug` CodeLens**：程式進入點（Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`、
   Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。`run` 存檔後在一個
   叫 `Poly Run` 的終端機裡下命令（`go run .`／`cargo run`／`python3 檔名`／shebang 指定的
@@ -149,6 +146,9 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 - **縮排上色**：每層縮排的空白塗底色，四色循環；**填不滿一層的空白另外標色**，那正是
   「縮排改到一半」的樣子。內建的 indent guides 畫線回答「block 從哪開始」，上色回答的
   是「我在第幾層」。只畫可見範圍，顏色走 theme color。
+- **Unicode 高亮**：gremlins 的替代。不可見字元、雙向控制字元、怪空白、冒充 ASCII 的字元
+  （en dash、彎引號），所有檔案、邊打邊標：gutter 記號、捲軸刻度、hover 說出字元名稱，
+  等級與顏色照 gremlins。`poly.unicodeHighlight.enabled` 打開。
 - **Gutter 圖片預覽**：某行提到的圖檔存在就在 gutter 放縮圖。不寫語法解析器——
   markdown／HTML／CSS 各有寫法，而檔案存不存在才是真正的過濾器。
 - **markdown preview 的 mermaid 圖表**：```mermaid fence 在 preview 裡畫成圖，配色與字型
@@ -306,18 +306,22 @@ poly binary 都不需要。分開是因為失敗模式不同——poly-lsp 的 d
 2. `poly-lsp-<平台>-<版本>.vsix` — **要挑對平台**，內含對應的 poly binary：
    `darwin-arm64`、`darwin-x64`、`linux-arm64`、`linux-x64`、`win32-arm64`、
    `win32-x64`。
-3. `poly-editor-<版本>.vsix` — 通用，**可選**。編輯器便利功能，不含 binary。
 
 安裝方式：VSCode 側邊欄 Extensions → 右上角 `...` → **Install from VSIX...** →
 選檔案 → 重新載入視窗。或用命令列：
 
 ```sh
-code --install-extension poly-syntax-highlight-0.18.2.vsix
-code --install-extension poly-lsp-darwin-arm64-0.18.2.vsix
-code --install-extension poly-editor-0.18.2.vsix
+code --install-extension poly-syntax-highlight-0.18.3.vsix
+code --install-extension poly-lsp-darwin-arm64-0.18.3.vsix
 ```
 
-之後的版本由 poly-lsp 自己提示更新，不必再手動抓——它只更新你已經裝了的那幾個。
+之後的版本由 extension 自己提示更新，不必再手動抓——兩個各自照自己的間隔檢查，哪個先發現
+就一起更新你已經裝了的那幾個。
+
+### 從 0.18.2 以前升上來
+
+`poly-editor` 在 0.18.3 併進了 `poly-lsp`。舊的 **Poly Editor** 要自己解除安裝，否則同一份
+功能會跑兩份（兩排 lens、Enter 接兩次清單）。
 
 ### 從 0.5.0 以前升上來
 
@@ -328,7 +332,7 @@ extension，只能手動裝。
 0.5.0 的更新提示還是會跳，但按下 Install 一定失敗，而且訊息會騙你：
 
 > Poly: automatic install failed (Error: release has no asset
-> poly-syntax-0.18.2.vsix). The VSIX files were downloaded — install them
+> poly-syntax-0.18.3.vsix). The VSIX files were downloaded — install them
 > manually via "Extensions: Install from VSIX".
 
 其實一個檔都沒下載（它在第一個找不到的 asset 就放棄了），所以「Show Files」按下
@@ -362,7 +366,7 @@ irm https://raw.githubusercontent.com/linzeyan/vscode-syntax/main/install.ps1 | 
 版本就設環境變數——`irm | iex` 沒辦法傳參數，所以兩邊都認得：
 
 ```sh
-POLY_VERSION=0.18.2 POLY_INSTALL_DIR=~/bin sh install.sh
+POLY_VERSION=0.18.3 POLY_INSTALL_DIR=~/bin sh install.sh
 ```
 
 Windows on ARM 上會裝 arm64 版，即使腳本本身跑在 x64 模擬層裡（從 ssh 或某些
@@ -388,7 +392,7 @@ SmartScreen 擋，處理方式見
 - run: poly check --strict .
 ```
 
-`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.18.2" }`——poly
+`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.18.3" }`——poly
 會改寫檔案，所以新版本自己跑進來有可能把綠的分支變紅。
 
 Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、放進 PATH。順便
@@ -401,7 +405,7 @@ Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、
 docker run --rm -v "$PWD:/work" ghcr.io/linzeyan/poly check --strict .
 ```
 
-`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.18.2`、`0.18`；pre-release
+`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.18.3`、`0.18`；pre-release
 不會動到 `latest`。image 裡的 binary 就是 release 附的那一支，不是另外編的。
 
 image **不含任何語言 toolchain**，只含 poly 自己會下載的那些 linter。所以 Rust

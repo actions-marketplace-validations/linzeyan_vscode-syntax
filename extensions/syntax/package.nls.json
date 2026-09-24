@@ -1,4 +1,7 @@
 {
   "extension.displayName": "Poly Syntax Highlight",
-  "extension.description": "Unified syntax highlighting pack: every VSCode built-in grammar plus additions, synced from pinned upstreams."
+  "extension.description": "Unified syntax highlighting pack: every VSCode built-in grammar plus additions, synced from pinned upstreams.",
+  "configuration.title": "Poly Syntax Highlight",
+  "config.updateCheck.enabled.description": "Periodically check GitHub Releases for a new poly-syntax-highlight. An update also installs Poly (poly-lsp) when it is installed, and a release one of the two already asked about in this window is not asked about again.",
+  "config.updateCheck.intervalDays.description": "Days between this extension's automatic update checks; 0 checks on every startup. Separate from Poly's own poly.updateCheck.intervalDays."
 }

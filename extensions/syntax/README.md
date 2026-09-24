@@ -1,7 +1,7 @@
 # Poly Syntax Highlight
 
 153 份 syntax highlighting 文法，一個 extension。輸出標準 TextMate scope，任何 VSCode
-color theme 直接生效；**零執行期程式碼**，不佔 extension host 資源。
+color theme 直接生效。唯一的執行期程式碼是更新檢查，平常不做任何事。
 
 ## 涵蓋
 
@@ -22,14 +22,14 @@ THIRD-PARTY-NOTICES.md。文法一律從上游 repo／marketplace VSIX 以 pinne
 `.claude/agents/**` 這些 VSCode 1.120 起不再算 `markdown` 的檔案上。
 
 號碼不會遞增，空項目按 Enter 也不會結束清單——語言設定檔只能接一段固定文字。**裝了
-poly-editor 的話 Enter 由它接管**，兩者都有。
+Poly（poly-lsp）的話 Enter 由它接管**，兩者都有。
 
 ## 配色與開關
 
 poly 不帶配色：文法只替 token 取名（scope），顏色是主題給的。
 
 要改某個 scope 的顏色，用 VSCode 本來就有的 `editor.tokenColorCustomizations.textMateRules`。
-scope 名稱哪裡查：裝了 poly-editor 就用 `Poly: Syntax Colors for This Language`（一次列出
+scope 名稱哪裡查：裝了 Poly 就用 `Poly: Syntax Colors for This Language`（一次列出
 這個語言的全部 scope），沒裝就用內建的 `Developer: Inspect Editor Tokens and Scopes`
 （一次一個，游標下的那個）。
 
@@ -38,8 +38,15 @@ scope 名稱哪裡查：裝了 poly-editor 就用 `Poly: Syntax Colors for This 
 
 ## 設定與更新
 
-這個 extension 沒有設定項。更新提示由 poly-lsp 代管（兩者同版號發佈、一鍵同時更新）；
-只裝這一個的話，請自行從 GitHub Releases 下載新版 VSIX。
+背景檢查 GitHub Releases，有新版就提示一鍵更新。
+
+| 設定                                   | 預設   | 作用                         |
+| -------------------------------------- | ------ | ---------------------------- |
+| `poly.syntax.updateCheck.enabled`      | `true` | 背景檢查新版                 |
+| `poly.syntax.updateCheck.intervalDays` | `7`    | 檢查間隔，`0` 是每次啟動都查 |
+
+跟 Poly（poly-lsp）的 `poly.updateCheck.*` 各自獨立。兩個都裝的話，哪一邊先發現新版就一起
+更新兩個（同版號發佈），同一個視窗裡另一邊不會再問同一個版本。
 
 ## 授權
 

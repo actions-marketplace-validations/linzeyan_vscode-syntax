@@ -3,7 +3,7 @@
 // Both sides end at the same program -- bash-language-server -- and that is
 // why this is worth asking: bash-ide starts it itself, with its own settings,
 // and poly-lsp starts it from PATH behind a proxy that rewrites what passes
-// through. Whatever differs here, the proxy did. On top of that poly-editor
+// through. Whatever differs here, the proxy did. On top of that poly
 // draws its reference count from the answers, which is the part of the
 // feature a user actually looks at.
 //

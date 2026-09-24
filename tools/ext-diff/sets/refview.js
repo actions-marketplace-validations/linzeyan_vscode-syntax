@@ -212,7 +212,7 @@ module.exports = {
         polyLens: poly.lens?.title ?? null,
         polyLensOnScreen: poly.lens?.onScreen?.join(" | ") || null,
         rowDisagreements: rows.filter((row) => !row.agree).length,
-        polyShownCommand: poly.shown === null ? "not registered by the loaded poly-editor" : "read",
+        polyShownCommand: poly.shown === null ? "not registered by the loaded poly-lsp" : "read",
       },
       notes: [
         `both sides asked at ${target} (\`area\`); the location list is the reference provider's answer, the rows are what each tree drew.`,

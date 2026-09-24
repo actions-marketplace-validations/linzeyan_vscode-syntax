@@ -1,30 +1,15 @@
 import * as assert from "node:assert";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import * as vscode from "vscode";
 
+import { cacheDir, RefStore } from "../../editor/refStore";
 import { commonRoot, useLines } from "../../gowork";
-import { knownNewer, revalidates } from "../../update";
+import { knownNewer, revalidates, updateDue } from "../../update";
 
 const EXTENSION_ID = "ricky.poly-lsp";
-
-const COMMANDS = [
-  "poly.formatFile",
-  "poly.formatPath",
-  "poly.formatWorkspace",
-  "poly.formatGitRepo",
-  "poly.formatGitChanged",
-  "poly.lintPath",
-  "poly.analyzeDeadCode",
-  "poly.minify",
-  "poly.toggleFormat",
-  "poly.toggleLint",
-  "poly.checkForUpdates",
-  "poly.showOutput",
-  "poly.createGoWork",
-];
 
 function workspaceRoot(): string {
   const folder = vscode.workspace.workspaceFolders?.[0];
@@ -114,9 +99,13 @@ suite("poly-lsp in a real editor", () => {
     );
   });
 
+  // Read off the manifest: a hand-kept list is the one place a new command is
+  // guaranteed to be missing from.
   test("contributes every command it declares", async () => {
+    const pkg = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON;
+    const declared = (pkg.contributes.commands as { command: string }[]).map((entry) => entry.command);
     const registered = await vscode.commands.getCommands(true);
-    const missing = COMMANDS.filter((id) => !registered.includes(id));
+    const missing = declared.filter((id) => !registered.includes(id));
     assert.deepStrictEqual(missing, [], "declared but never registered");
   });
 
@@ -128,16 +117,27 @@ suite("poly-lsp in a real editor", () => {
   // Read off the manifest rather than by pressing the keys: what a keystroke
   // resolves to depends on the user's own keybindings.json, which the test
   // host has none of and a real machine may have anything in.
-  test("every command is in the palette, and minify has a shortcut", () => {
+  test("every command is in the palette, and minify and format have shortcuts", () => {
     const pkg = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON;
+    const bindings = pkg.contributes.keybindings as { command: string; key: string }[];
+    // The one exception is a command that is a keystroke rather than an action:
+    // continuing a list is what Enter does, and run from the palette it would
+    // act on whatever line the cursor was left on.
+    const keystrokes = new Set(
+      bindings.filter((binding) => ["enter", "tab", "shift+tab"].includes(binding.key)).map((binding) =>
+        binding.command
+      ),
+    );
     const hidden = (pkg.contributes.menus?.commandPalette ?? [])
       .filter((entry: { when?: string }) => entry.when === "false")
-      .map((entry: { command: string }) => entry.command);
+      .map((entry: { command: string }) => entry.command)
+      .filter((id: string) => !keystrokes.has(id));
     assert.deepStrictEqual(hidden, [], "declared but kept out of the palette");
 
-    const keys = (pkg.contributes.keybindings as { command: string; key: string }[])
-      .filter((binding) => binding.command === "poly.minify");
-    assert.strictEqual(keys.length, 1, "minify has no keybinding to show");
+    for (const command of ["poly.minify", "poly.formatDocument"]) {
+      const keys = bindings.filter((binding) => binding.command === command);
+      assert.strictEqual(keys.length, 1, `${command} has no keybinding to show`);
+    }
   });
 
   // VSCode ships no formatter for either language, so any edit at all can only
@@ -260,6 +260,31 @@ suite("poly-lsp in a real editor", () => {
     assert.strictEqual(revalidates("W/\"etag\"", undefined, "0.18.0"), false);
   });
 
+  // What an interval setting promises -- a check at most every N days, 0 being
+  // every start -- and the two things allowed to override it: a newer release
+  // already on record that nobody acted on, and "Skip This Version". Both
+  // extensions ask this with their own section's numbers, so it is the whole
+  // of what poly.syntax.updateCheck.intervalDays means.
+  test("an update check is due by its own interval, sooner for a release nobody acted on", () => {
+    const day = 86_400_000;
+    const now = 100 * day;
+    const memento = (values: Record<string, unknown>) =>
+      ({
+        keys: () => Object.keys(values),
+        get: (key: string, fallback?: unknown) => (key in values ? values[key] : fallback),
+        update: async () => {},
+      }) as unknown as vscode.Memento;
+    const checkedYesterday = memento({ "updateCheck.lastCheck": now - day });
+    assert.strictEqual(updateDue(checkedYesterday, "0.18.3", 7, now), false);
+    assert.strictEqual(updateDue(checkedYesterday, "0.18.3", 1, now), true);
+    assert.strictEqual(updateDue(checkedYesterday, "0.18.3", 0, now), true, "0 is every start");
+    const unacted = { "updateCheck.lastCheck": now - day, "updateCheck.cachedTag": "v0.18.4" };
+    assert.strictEqual(updateDue(memento(unacted), "0.18.3", 7, now), true);
+    assert.strictEqual(updateDue(memento(unacted), "0.18.4", 7, now), false, "installed since");
+    const skipped = memento({ ...unacted, "updateCheck.skippedVersion": "v0.18.4" });
+    assert.strictEqual(updateDue(skipped, "0.18.3", 7, now), false);
+  });
+
   test("registers a formatter for sql", async () => {
     const text = await formatted(writeFile("messy.sql", "select a,b from t\n"));
     assert.strictEqual(text, "select a, b from t\n");
@@ -297,6 +322,94 @@ suite("poly-lsp in a real editor", () => {
       assert.deepStrictEqual(edits ?? [], [], "poly formatted a file while suspended");
     } finally {
       await config.update("format.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  // The switch stops everything that formats on its own, and the shortcut is
+  // the one thing it must not stop: a key pressed to format this file now is
+  // not a save. Run through the command the keybinding runs, because the hole
+  // is in the client -- the provider asked directly still refuses, which the
+  // test above holds down.
+  test("the format shortcut formats a file while formatting is stopped", async () => {
+    const messy = "select a,b from t\n";
+    const config = vscode.workspace.getConfiguration("poly");
+    await config.update("format.enabled", false, vscode.ConfigurationTarget.Workspace);
+    try {
+      const document = await vscode.workspace.openTextDocument(writeFile("shortcut.sql", messy));
+      await vscode.window.showTextDocument(document);
+      const text = await eventually("the shortcut to format the file", async () => {
+        await vscode.commands.executeCommand("poly.formatDocument");
+        return document.getText() === messy ? undefined : document.getText();
+      });
+      assert.strictEqual(text, "select a, b from t\n");
+    } finally {
+      await config.update("format.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  // What the highlight exists for, and the two things the daemon's unicode
+  // rules cannot do: a file type they are never sent, and a character nobody
+  // has saved yet.
+  test("the unicode highlight names a character typed into a plain-text file", async () => {
+    const config = vscode.workspace.getConfiguration("poly");
+    await config.update("unicodeHighlight.enabled", true, vscode.ConfigurationTarget.Workspace);
+    try {
+      const document = await vscode.workspace.openTextDocument(writeFile("gremlin.txt", "plain line\n"));
+      const editor = await vscode.window.showTextDocument(document);
+      await editor.edit((edit) => edit.insert(new vscode.Position(0, 5), "\u200b"));
+      const said = await eventually("a hover on the typed character", async () => {
+        const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+          "vscode.executeHoverProvider",
+          document.uri,
+          new vscode.Position(0, 5),
+        );
+        const text = hovers
+          .flatMap((hover) => hover.contents)
+          .map((part) => (typeof part === "string" ? part : part.value))
+          .find((value) => value.startsWith("U+200B"));
+        return text;
+      });
+      assert.strictEqual(said, "U+200B ZERO WIDTH SPACE does not render as what it is");
+      assert.ok(document.isDirty, "the file was saved, so this no longer shows the unsaved case");
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+      await config.update("unicodeHighlight.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  // What the kept counts are for: a number on screen before the language
+  // server has said anything -- here a deliberately wrong one, so that where
+  // it came from is not in doubt -- and the server's own once it has.
+  test("a reference count kept from last session is drawn at once, then corrected", async () => {
+    const uri = writeFile("kept.ts", "export function kept(): number {\n  return 1;\n}\n");
+    const folder = workspaceRoot();
+    const store = new RefStore(cacheDir());
+    store.set(folder, "kept.ts", `refs|${vscode.SymbolKind.Function}:kept#0`, 42);
+    store.save();
+    const config = vscode.workspace.getConfiguration("poly");
+    await config.update("referencesCodeLens.enabled", true, vscode.ConfigurationTarget.Workspace);
+    try {
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+      const titles = async () => {
+        const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
+          "vscode.executeCodeLensProvider",
+          uri,
+          10,
+        );
+        // The reference lens alone: the dead-code lens is on in this suite
+        // and sits on the same line.
+        const said = lenses.flatMap((lens) => lens.command?.title ?? []).filter((title) => / refs?$/.test(title));
+        return said.length > 0 ? said : undefined;
+      };
+      assert.deepStrictEqual(await eventually("a lens", titles), ["42 refs"]);
+      const corrected = await eventually("the server's count", async () => {
+        const said = await titles();
+        return said && !said.includes("42 refs") ? said : undefined;
+      });
+      assert.deepStrictEqual(corrected, ["no refs"]);
+    } finally {
+      await config.update("referencesCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+      rmSync(store.fileFor(folder), { force: true });
     }
   });
 

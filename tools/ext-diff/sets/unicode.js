@@ -5,13 +5,21 @@
 //   * which characters each flags. gremlins' list is its settings default and
 //     poly's is four tables in unicode.rs; both are read from where they live,
 //     so the fixture grows when either list does.
-//   * when. gremlins redraws on every keystroke; poly lints on open and on
-//     save. A character pasted into a buffer and looked at before saving is
-//     the case where that difference is the whole difference.
+//   * when. gremlins redraws on every keystroke. poly has two halves: its
+//     lint rules run on open and on save, and only for files the client sends
+//     to the daemon, and the editor's unicode highlight redraws on every
+//     keystroke in every file. A character pasted into a buffer and looked at
+//     before saving is the case the second half exists for.
 //
 // Five file types: three poly lints and two it does not, because "the rule has
 // no language" (lsp.rs, above `unicode::check`) is only true for files the
 // client sends to the daemon in the first place.
+//
+// poly's side counts a character as flagged when either half says so: a
+// Problems entry, or the highlight's hover. The hover is the part of the
+// highlight the extension API can see -- a decoration is invisible to it -- and
+// it steps aside where the lint already reported the same character, so
+// neither half alone is the whole answer.
 const { existsSync, readFileSync, writeFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
 
@@ -96,7 +104,7 @@ module.exports = {
         // Off by default: gremlins only decorates unless told to report, and a
         // decoration is invisible to the extension API.
         ? { "gremlins.showInProblemPane": true }
-        : { "poly.lintOnSave": true }),
+        : { "poly.lintOnSave": true, "poly.unicodeHighlight.enabled": true }),
     };
   },
 
@@ -137,6 +145,20 @@ module.exports = {
     const mine = side === "original"
       ? (d) => d.source === "Gremlins tracker"
       : (d) => d.source === "poly" && /^unicode-/.test(String(code(d)));
+    // The highlight's hover at one position, recognised by how it starts:
+    // other providers (a language server, markdown) can answer there too.
+    const highlight = async (uri, line, col) => {
+      if (side === "original") return undefined;
+      const hovers = await vscode.commands.executeCommand(
+        "vscode.executeHoverProvider",
+        uri,
+        new vscode.Position(line, col),
+      );
+      return hovers
+        .flatMap((hover) => hover.contents)
+        .map((part) => (typeof part === "string" ? part : part.value))
+        .find((value) => /^U\+[0-9A-F]{4} /.test(value));
+    };
     const shape = (d) => ({
       line: d.range.start.line,
       col: d.range.start.character,
@@ -151,6 +173,22 @@ module.exports = {
       const uri = vscode.Uri.joinPath(folder, file.name);
       const editor = await ctx.openAlone(uri);
       const settled = await ctx.settleDiagnostics(uri, mine, { first: 20_000 });
+      const flagged = settled.diagnostics.map(shape);
+      const rows = manifest.files.find((one) => one.name === file.name).rows;
+      for (const row of rows) {
+        if (flagged.some((d) => d.line === row.line)) continue;
+        const said = await highlight(uri, row.line, row.col);
+        if (said) {
+          flagged.push({
+            line: row.line,
+            col: row.col,
+            endCol: row.col + 1,
+            severity: null,
+            code: "highlight",
+            message: said,
+          });
+        }
+      }
       files.push({
         file: file.name,
         language: editor.document.languageId,
@@ -159,7 +197,7 @@ module.exports = {
         others: vscode.languages.getDiagnostics(uri).filter((d) => !mine(d)).length,
         waitedMs: settled.ms,
         timedOut: settled.timedOut,
-        flagged: settled.diagnostics.map(shape).sort((a, b) => a.line - b.line || a.col - b.col),
+        flagged: flagged.sort((a, b) => a.line - b.line || a.col - b.col),
       });
       // "unicode" is in every gremlins message and in every poly code, and in
       // nothing the other linters on these files say.
@@ -182,16 +220,25 @@ module.exports = {
       await editor.edit((edit) =>
         edit.insert(new vscode.Position(line, character), String.fromCodePoint(manifest.typed.char))
       );
+      // Either half of poly, the highlight first because it answers at once: a
+      // hover is computed when asked, a lint is a round trip to the daemon.
+      const flaggedHere = async (wait) => {
+        const started = Date.now();
+        const shown = await highlight(uri, line, character);
+        return shown
+          ? { diagnostics: [shown], ms: Date.now() - started }
+          : ctx.settleDiagnostics(uri, here, { first: wait });
+      };
       // Five seconds is longer than either side takes to answer anything it is
       // going to answer, and short enough that "no" costs little.
-      const before = await ctx.settleDiagnostics(uri, here, { first: 5_000 });
+      const before = await flaggedHere(5_000);
       await ctx.problems("unicode");
       await ctx.shot(
         `typed-${name.replace(".", "-")}-unsaved`,
         `${name}: U+200B typed at 1:${character + 1}, not saved`,
       );
       await vscode.commands.executeCommand("workbench.action.files.save");
-      const after = await ctx.settleDiagnostics(uri, here, { first: 10_000 });
+      const after = await flaggedHere(10_000);
       typed.push({
         file: name,
         language: editor.document.languageId,

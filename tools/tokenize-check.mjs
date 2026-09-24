@@ -80,7 +80,7 @@ const CASES = {
   // The markdown family VSCode 1.120 split out of `markdown`: `SKILL.md`,
   // `*.instructions.md` and `*.agent.md` get their own language ids and their
   // own grammar file, which is a copy of markdown's with frontmatter added.
-  // Nothing else in this table reaches it, and poly-editor's list behaviour is
+  // Nothing else in this table reaches it, and poly's list behaviour is
   // keyed on those same ids.
   "SKILL.md": [
     "text.html.markdown.prompt",

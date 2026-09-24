@@ -2,7 +2,7 @@
   "name": "poly-lsp",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.18.2",
+  "version": "0.18.3",
   "publisher": "ricky",
   "license": "MIT",
   "engines": {
@@ -10,10 +10,12 @@
   },
   "categories": [
     "Formatters",
-    "Linters"
+    "Linters",
+    "Other"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
+    "onStartupFinished",
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
     "onLanguage:javascript",
@@ -56,6 +58,10 @@
     "workspaceContains:.editorconfig"
   ],
   "contributes": {
+    "markdown.markdownItPlugins": true,
+    "markdown.previewScripts": [
+      "./dist/preview.js"
+    ],
     "languages": [
       {
         "id": "shellscript",
@@ -72,6 +78,10 @@
       }
     ],
     "commands": [
+      {
+        "command": "poly.formatDocument",
+        "title": "%command.formatDocument.title%"
+      },
       {
         "command": "poly.formatFile",
         "title": "%command.formatFile.title%"
@@ -123,8 +133,113 @@
       {
         "command": "poly.createGoWork",
         "title": "%command.createGoWork.title%"
+      },
+      {
+        "command": "poly.copyPathWithLine",
+        "title": "%command.copyPathWithLine.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.insertTableOfContents",
+        "title": "%command.insertTableOfContents.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.toggleBold",
+        "title": "%command.toggleBold.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.toggleItalic",
+        "title": "%command.toggleItalic.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.refreshTodos",
+        "title": "%command.refreshTodos.title%",
+        "category": "%command.category%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "poly.runFile",
+        "title": "%command.runFile.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.extractVariable",
+        "title": "%command.extractVariable.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.inlineVariable",
+        "title": "%command.inlineVariable.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.moveToNewFile",
+        "title": "%command.moveToNewFile.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.changeSignature",
+        "title": "%command.changeSignature.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.implementInterface",
+        "title": "%command.implementInterface.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.nextChangedFile",
+        "title": "%command.nextChangedFile.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.previousChangedFile",
+        "title": "%command.previousChangedFile.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.syntaxColors",
+        "title": "%command.syntaxColors.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.revertAndSave",
+        "title": "%command.revertAndSave.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.continueList",
+        "title": "%command.continueList.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.indentListItem",
+        "title": "%command.indentListItem.title%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "poly.outdentListItem",
+        "title": "%command.outdentListItem.title%",
+        "category": "%command.category%"
       }
     ],
+    "views": {
+      "explorer": [
+        {
+          "id": "polyTodos",
+          "name": "%view.polyTodos.name%",
+          "when": "config.poly.todo.enabled"
+        },
+        {
+          "id": "polyReferences",
+          "name": "%view.polyReferences.name%",
+          "when": "poly.hasReferences"
+        }
+      ]
+    },
     "menus": {
       "explorer/context": [
         {
@@ -135,14 +250,107 @@
           "command": "poly.lintPath",
           "group": "7_modification@11"
         }
+      ],
+      "editor/context": [
+        {
+          "command": "poly.copyPathWithLine",
+          "group": "9_cutcopypaste"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "poly.refreshTodos",
+          "when": "view == polyTodos",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "poly.refreshTodos",
+          "when": "config.poly.todo.enabled"
+        },
+        {
+          "command": "poly.continueList",
+          "when": "false"
+        },
+        {
+          "command": "poly.indentListItem",
+          "when": "false"
+        },
+        {
+          "command": "poly.outdentListItem",
+          "when": "false"
+        }
       ]
     },
     "keybindings": [
+      {
+        "command": "poly.formatDocument",
+        "key": "shift+alt+f",
+        "linux": "ctrl+shift+i",
+        "when": "editorHasDocumentFormattingProvider && editorTextFocus && !editorReadonly && !inCompositeEditor"
+      },
       {
         "command": "poly.minify",
         "key": "ctrl+alt+m",
         "mac": "cmd+alt+m",
         "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(json|jsonc|css|html|xml|javascript|javascriptreact|typescript|typescriptreact)$/"
+      },
+      {
+        "command": "poly.toggleBold",
+        "key": "ctrl+b",
+        "mac": "cmd+b",
+        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill)$/"
+      },
+      {
+        "command": "poly.toggleItalic",
+        "key": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "editorTextFocus && !editorReadonly && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill)$/"
+      },
+      {
+        "command": "poly.continueList",
+        "key": "enter",
+        "when": "editorTextFocus && !editorReadonly && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inSnippetMode && !inlineSuggestionVisible && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill|yaml)$/"
+      },
+      {
+        "command": "poly.indentListItem",
+        "key": "tab",
+        "when": "editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inSnippetMode && !inlineSuggestionVisible && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill)$/"
+      },
+      {
+        "command": "poly.outdentListItem",
+        "key": "shift+tab",
+        "when": "editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inSnippetMode && !inlineSuggestionVisible && editorLangId =~ /^(markdown|prompt|instructions|chatagent|skill)$/"
+      },
+      {
+        "command": "poly.nextChangedFile",
+        "key": "ctrl+alt+z",
+        "mac": "cmd+alt+z",
+        "when": "config.git.enabled && !git.missing"
+      },
+      {
+        "command": "poly.previousChangedFile",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a",
+        "when": "config.git.enabled && !git.missing"
+      },
+      {
+        "command": "poly.revertAndSave",
+        "key": "alt+q",
+        "when": "editorTextFocus && !editorReadonly && config.git.enabled && !git.missing && resourceScheme == file"
+      },
+      {
+        "command": "poly.extractVariable",
+        "key": "ctrl+alt+v",
+        "mac": "cmd+alt+v",
+        "when": "editorTextFocus && !editorReadonly"
+      },
+      {
+        "command": "poly.inlineVariable",
+        "key": "ctrl+alt+shift+v",
+        "mac": "cmd+alt+shift+v",
+        "when": "editorTextFocus && !editorReadonly"
       }
     ],
     "configuration": {
@@ -193,9 +401,142 @@
           "default": 7,
           "minimum": 0,
           "description": "%config.updateCheck.intervalDays.description%"
+        },
+        "poly.indentTint.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.indentTint.enabled.description%"
+        },
+        "poly.imagePreview.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.imagePreview.enabled.description%"
+        },
+        "poly.unicodeHighlight.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.unicodeHighlight.enabled.description%"
+        },
+        "poly.referencesCodeLens.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.referencesCodeLens.enabled.description%"
+        },
+        "poly.protobufCodeLens.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.protobufCodeLens.enabled.description%"
+        },
+        "poly.runCodeLens.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.runCodeLens.enabled.description%"
+        },
+        "poly.markdownMermaid.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.markdownMermaid.enabled.description%"
+        },
+        "poly.postfixCompletion.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.postfixCompletion.enabled.description%"
+        },
+        "poly.todo.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.todo.enabled.description%"
+        },
+        "poly.todo.tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "TODO",
+            "FIXME",
+            "HACK",
+            "XXX",
+            "BUG"
+          ],
+          "description": "%config.todo.tags.description%"
         }
       }
     },
+    "colors": [
+      {
+        "id": "poly.indentLevel1",
+        "description": "%color.indentLevel1.description%",
+        "defaults": {
+          "dark": "#FFFF4012",
+          "light": "#FFFF4012",
+          "highContrast": "#FFFF4020"
+        }
+      },
+      {
+        "id": "poly.indentLevel2",
+        "description": "%color.indentLevel2.description%",
+        "defaults": {
+          "dark": "#7FFF7F12",
+          "light": "#7FFF7F12",
+          "highContrast": "#7FFF7F20"
+        }
+      },
+      {
+        "id": "poly.indentLevel3",
+        "description": "%color.indentLevel3.description%",
+        "defaults": {
+          "dark": "#FF7FFF12",
+          "light": "#FF7FFF12",
+          "highContrast": "#FF7FFF20"
+        }
+      },
+      {
+        "id": "poly.indentLevel4",
+        "description": "%color.indentLevel4.description%",
+        "defaults": {
+          "dark": "#4FECEC12",
+          "light": "#4FECEC12",
+          "highContrast": "#4FECEC20"
+        }
+      },
+      {
+        "id": "poly.indentPartial",
+        "description": "%color.indentPartial.description%",
+        "defaults": {
+          "dark": "#80202099",
+          "light": "#80202066",
+          "highContrast": "#802020CC"
+        }
+      },
+      {
+        "id": "poly.unicodeError",
+        "description": "%color.unicodeError.description%",
+        "defaults": {
+          "dark": "#A94442BF",
+          "light": "#A94442BF",
+          "highContrast": "#A94442"
+        }
+      },
+      {
+        "id": "poly.unicodeWarning",
+        "description": "%color.unicodeWarning.description%",
+        "defaults": {
+          "dark": "#8A6D3BBF",
+          "light": "#8A6D3BBF",
+          "highContrast": "#8A6D3B"
+        }
+      },
+      {
+        "id": "poly.unicodeInfo",
+        "description": "%color.unicodeInfo.description%",
+        "defaults": {
+          "dark": "#3C763DBF",
+          "light": "#3C763DBF",
+          "highContrast": "#3C763D"
+        }
+      }
+    ],
     "configurationDefaults": {
       "[typescript]": { "editor.defaultFormatter": "ricky.poly-lsp" },
       "[typescriptreact]": { "editor.defaultFormatter": "ricky.poly-lsp" },
@@ -240,12 +581,15 @@
   },
   "packageManager": "pnpm@11.5.3",
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
-    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify && esbuild src/editor/preview/mermaid.ts --bundle --outfile=dist/preview.js --format=iife --platform=browser --minify",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.preview.json --noEmit",
+    "unit": "tsc -p tsconfig.test.json && node --test out/editor/*.test.js",
     "test:build": "pnpm run build && tsc -p tsconfig.test.json",
     "test": "pnpm run test:build && node out/test/runTest.js"
   },
   "dependencies": {
+    "@mermaid-js/layout-tidy-tree": "^1.0.0",
+    "mermaid": "^11.17.2",
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {

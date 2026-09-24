@@ -8,8 +8,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  // Everything that runs in the extension host, which is node and has no DOM.
-  // The preview script is the exception and carries its own config.
-  "include": ["src"],
-  "exclude": ["src/preview"]
+  "include": ["src"]
 }
