@@ -3,13 +3,14 @@
 // document to it — activation events, the client's documentSelector and the
 // contributed commands all live outside the protocol, and both times we broke
 // them the protocol tests stayed green.
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { runTests } from "@vscode/test-electron";
+import { downloadAndUnzipVSCode, runTests } from "@vscode/test-electron";
 
 /// A VSCode integrated terminal exports its own bootstrap variables, and the
 /// test instance inherits them: `VSCODE_ESM_ENTRYPOINT` makes the fresh copy
@@ -66,6 +67,42 @@ function cacheHome(): Record<string, string> {
   mkdirSync(join(home, "poly"));
   symlinkSync(tools, join(home, "poly", "tools"));
   return { XDG_CACHE_HOME: home, XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), "poly-e2e-config-")) };
+}
+
+/// `runTests` on a folder the editor does not trust.
+///
+/// `runTests` puts `--disable-workspace-trust` on every launch and has no
+/// option to leave it off, so this starts the editor itself, with the
+/// arguments `runTests` would give it but that one.
+async function runUntrusted(
+  folder: string,
+  userData: string,
+  extensionDevelopmentPath: string,
+  extensionTestsPath: string,
+  env: Record<string, string>,
+): Promise<void> {
+  const executable = await downloadAndUnzipVSCode();
+  const args = [
+    `--folder-uri=${pathToFileURL(folder).toString()}`,
+    `--user-data-dir=${userData}`,
+    `--extensions-dir=${resolve(".vscode-test", "extensions")}`,
+    "--no-sandbox",
+    "--disable-gpu-sandbox",
+    "--disable-updates",
+    "--skip-welcome",
+    "--skip-release-notes",
+    "--no-cached-data",
+    `--extensionTestsPath=${extensionTestsPath}`,
+    `--extensionDevelopmentPath=${extensionDevelopmentPath}`,
+  ];
+  const code = await new Promise<number | null>((done, fail) => {
+    const editor = spawn(executable, args, { env: { ...process.env, ...env }, stdio: "inherit" });
+    editor.on("error", fail);
+    editor.on("exit", done);
+  });
+  if (code !== 0) {
+    throw new Error(`the Restricted Mode run exited with ${code}`);
+  }
 }
 
 async function main(): Promise<void> {
@@ -183,6 +220,55 @@ async function main(): Promise<void> {
       "--disable-extension=vscode.git",
     ],
     extensionTestsEnv: { ...cache, POLY_E2E_SUITE: "no-git" },
+  });
+
+  // Restricted Mode. The folder's own settings name a poly that does not
+  // exist, so a daemon starts only if they are ignored, and it brings a
+  // prettier poly would take over markdown with, which leaves a mark if run.
+  const untrusted = mkdtempSync(join(tmpdir(), "poly-e2e-"));
+  mkdirSync(join(untrusted, ".vscode"));
+  writeFileSync(
+    join(untrusted, ".vscode", "settings.json"),
+    JSON.stringify({ poly: { serverPath: join(untrusted, "no-such-poly") } }, null, 2),
+  );
+  const ran = join(untrusted, "prettier.ran");
+  const bin = join(untrusted, "node_modules", ".bin");
+  mkdirSync(bin, { recursive: true });
+  // It reads what poly sends and answers with its own text, so a run of it is
+  // a formatting result the test can name rather than a formatter that hung.
+  if (process.platform === "win32") {
+    writeFileSync(
+      join(bin, "prettier.cmd"),
+      `@echo off\r\nmore > nul\r\necho ran> "${ran}"\r\necho the folder's prettier ran\r\n`,
+    );
+  } else {
+    writeFileSync(
+      join(bin, "prettier"),
+      `#!/bin/sh\ncat > /dev/null\necho ran > '${ran}'\necho "the folder's prettier ran"\n`,
+    );
+    chmodSync(join(bin, "prettier"), 0o755);
+  }
+  writeFileSync(join(untrusted, ".prettierrc"), "{}\n");
+  // A profile of its own: the trust setting below stays out of the launches
+  // above, and their poly block out of this one.
+  const restricted = join(dirname(userDataDir(repo)), "untrusted");
+  mkdirSync(join(restricted, "User"), { recursive: true });
+  writeFileSync(
+    join(restricted, "User", "settings.json"),
+    JSON.stringify(
+      {
+        // Restricted Mode without the dialog asking whether to leave it.
+        "security.workspace.trust.startupPrompt": "never",
+        poly: { serverPath, updateCheck: { enabled: false }, codeRunner: { enabled: true } },
+      },
+      null,
+      2,
+    ),
+  );
+  await runUntrusted(untrusted, restricted, extensionDevelopmentPath, extensionTestsPath, {
+    ...cache,
+    POLY_E2E_SUITE: "restricted",
+    POLY_E2E_PRETTIER_RAN: ran,
   });
 }
 

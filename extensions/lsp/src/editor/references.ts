@@ -280,6 +280,24 @@ export function s3Methods(namespace: string): Set<string> {
 }
 
 /**
+ * A markdown outline, flattened into headings `lensTargets` counts.
+ *
+ * Measured 2026-10-14 (VSCode 1.139): the built-in markdown server reports a
+ * heading as a `String` and nests each level under the one above it, so a
+ * heading failed both the kind test and the depth test. Its reference provider
+ * answers anywhere on the heading's line with every `#slug` link to it in the
+ * workspace -- who links to this section, which is the count worth having.
+ * A Constant because that kind is counted and asked nothing about
+ * implementations.
+ */
+export function markdownHeadings<T extends LensSymbol>(symbols: readonly T[]): T[] {
+  return symbols.flatMap((symbol) => [
+    { ...symbol, kind: 13 /* Constant */ },
+    ...markdownHeadings((symbol.children ?? []) as readonly T[]),
+  ]);
+}
+
+/**
  * Answers about a declaration that are not the declaration itself.
  *
  * `vscode.executeReferenceProvider` asks with `includeDeclaration: true`, so

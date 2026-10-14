@@ -450,6 +450,35 @@ pub fn default_off(name: &str) -> bool {
     DEFAULT_OFF.contains(&name)
 }
 
+// ── Restricted Mode ────────────────────────────────────────────────────────
+
+static RESTRICTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// From here on, run nothing and download nothing: what poly embeds is all it
+/// uses. For an editor in Restricted Mode, whose folder is not trusted.
+///
+/// Every tool poly could start is one the folder can choose or steer: a
+/// `node_modules/.bin` it ships, a `[tools]` path, a rustup proxy obeying its
+/// `rust-toolchain.toml`, a `go` obeying its `toolchain` line, golangci-lint
+/// loading the plugins its config names. So nothing is started rather than
+/// some things, which is the one rule that cannot miss a case. Schemas are not
+/// fetched either: the folder names those URLs too.
+///
+/// Process-wide and one-way, because trust only ever moves the other way
+/// mid-session, and the editor restarts the daemon when it does.
+pub fn restrict() {
+    RESTRICTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See `restrict`.
+pub fn restricted() -> bool {
+    RESTRICTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What a restricted poly says instead of running something.
+pub const RESTRICTED_REASON: &str =
+    "the workspace is not trusted, so poly runs only what it embeds";
+
 // ── resolution ─────────────────────────────────────────────────────────────
 
 /// The binary a `[tools]` value points at, or None when the value is not a
@@ -511,6 +540,9 @@ impl Resolved {
 /// asks for it. One grammar for every tool, rather than a value that only means
 /// something for the tools that happen to be off today.
 pub fn resolve(name: &str, config: &poly_core::Config, offline: bool) -> Resolved {
+    if restricted() {
+        return Resolved::Missing(RESTRICTED_REASON.to_string());
+    }
     let setting = config.tools.get(name).map(String::as_str);
     if setting == Some("off") {
         return Resolved::Disabled;
@@ -637,6 +669,9 @@ fn major(text: &str) -> Option<u64> {
 /// servers the LSP daemon proxies, all of which have to match the project's
 /// own toolchain.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    if restricted() {
+        return None;
+    }
     let exe = if cfg!(windows) {
         format!("{name}.exe")
     } else {
@@ -897,6 +932,9 @@ const SCHEMA_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 /// back to that copy however old it is -- a stale schema is a better answer on
 /// a train than "could not check", and the fallback says so on stderr.
 pub fn schema(url: &str) -> Result<String> {
+    if restricted() {
+        bail!("{url} not fetched: {RESTRICTED_REASON}");
+    }
     let file = cache_dir()
         .with_file_name("schemas")
         .join(format!("{:x}.json", sha2::Sha256::digest(url.as_bytes())));

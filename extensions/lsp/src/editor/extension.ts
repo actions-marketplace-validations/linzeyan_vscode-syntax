@@ -55,6 +55,7 @@ import {
   LensTarget,
   lensTargets,
   luaDeclarations,
+  markdownHeadings,
   nameStart,
   rDeclarations,
   refLabel,
@@ -1602,6 +1603,8 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
         ? luaDeclarations(symbols)
         : document.languageId === "r"
         ? rDeclarations(symbols, await namespaceOf(document.uri.fsPath))
+        : MARKDOWN_LANGUAGES.has(document.languageId)
+        ? markdownHeadings(symbols)
         : symbols;
       const found = lensTargets(declared, MAX_LENSES);
       const keys = declarationKeys(found.map((target) => target.symbol));
@@ -1612,8 +1615,8 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       }));
       // Before any lens is drawn, because a file full of `no refs` over a
       // language nothing can answer for is worse than no lens: it reads as an
-      // answer. JSON and markdown never reach here (their symbols are not the
-      // kinds this counts); CSS and YAML do, and this is what decides them.
+      // answer. JSON never reaches here (its symbols are not the kinds this
+      // counts); CSS and YAML do, and this is what decides them.
       if (targets.length === 0) {
         return [];
       }
@@ -1652,9 +1655,24 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
         return [];
       }
       const methods = methodsByType(symbols);
+      const markdown = MARKDOWN_LANGUAGES.has(document.languageId);
       const lenses = targets.flatMap((target) => {
         const range = target.at;
         const direction = target.implementation;
+        // An unlinked heading is most headings, so `no refs` over one is noise
+        // where over code it is news. Like the upward count, it is drawn only
+        // once known to be above zero, and asked for behind the drawing.
+        // ponytail: every heading is asked, not just those on screen; filter by
+        // visible range if a long document makes that slow.
+        if (markdown) {
+          const id = `refs|${target.key}`;
+          if (counted.get(document.uri.toString(), id) === undefined) {
+            refresh(document.uri, range.start, "refs", id, known(document.uri, id));
+          }
+          if (known(document.uri, id) === 0) {
+            return [];
+          }
+        }
         // `no interfaces` is not news -- most types and methods satisfy
         // nothing -- and a lens cannot be taken back once it is resolved, so
         // the upward count is drawn only once it is known to be above zero.

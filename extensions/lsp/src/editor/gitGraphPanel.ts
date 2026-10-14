@@ -22,6 +22,7 @@ import {
   commitDetails,
   comparison,
   type Git,
+  GitError,
   gitIn,
   loadGraph,
   remotesOf,
@@ -37,6 +38,7 @@ import {
   UNCOMMITTED,
   type ViewOptions,
 } from "./gitGraphProtocol";
+import { mayRun } from "./trust";
 
 const VIEW_TYPE = "poly.gitGraph";
 const INITIAL = 300;
@@ -152,7 +154,17 @@ let poly = "poly";
  * tool -- is offered.
  */
 let readOnly = false;
-const gitAt = (repo: string): Git => (readOnly ? gitIn(poly, repo, ["git"]) : gitIn(api?.git.path || "git", repo));
+/**
+ * `poly git` included: a repository's config can name programs for git to run
+ * (`core.fsmonitor`, a filter's `clean`), and an untrusted one is not read.
+ */
+const UNTRUSTED = "Git History runs git, so it waits until this folder is trusted (Manage Workspace Trust).";
+const gitAt = (repo: string): Git =>
+  !vscode.workspace.isTrusted
+    ? () => Promise.reject(new GitError(UNTRUSTED))
+    : readOnly
+    ? gitIn(poly, repo, ["git"])
+    : gitIn(api?.git.path || "git", repo);
 
 /** The commands that only read, copy or arrange the panel: all that runs without git. */
 export const READS = new Set([
@@ -669,6 +681,9 @@ async function copy(text: string, what: string): Promise<void> {
 }
 
 function terminal(repo: string, name: string, command: string): void {
+  if (!mayRun("Git History")) {
+    return;
+  }
   const shell = vscode.window.createTerminal({ name, cwd: repo });
   shell.show();
   shell.sendText(command);

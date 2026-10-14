@@ -16,6 +16,7 @@ const { join } = require("node:path");
 const vscode = require("vscode");
 
 const { measure: measureCost } = require("./cost");
+const { observeMarkdown } = require("./markdown");
 const { observeNavigate } = require("./navigate");
 const { observeProto } = require("./proto");
 const runnable = require("./runnable");
@@ -236,12 +237,13 @@ exports.run = async function run() {
   const proto = await observeProto();
   // And GraphQL and nginx, whose providers are poly's daemon.
   const navigate = await observeNavigate(lensesFor);
+  const markdown = await observeMarkdown(lensesFor);
 
   writeFileSync(
     process.env.POLY_LENS_OUT,
     `${
       JSON.stringify(
-        { vscode: vscode.version, lenses: lines, flat, flatSymbols, upward, outline, proto, navigate },
+        { vscode: vscode.version, lenses: lines, flat, flatSymbols, upward, outline, proto, navigate, markdown },
         null,
         2,
       )

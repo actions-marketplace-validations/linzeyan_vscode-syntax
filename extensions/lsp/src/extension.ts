@@ -12,6 +12,7 @@ import {
 import { firstCodeLine } from "./anchor";
 import { activate as activateEditor } from "./editor/extension";
 import { toolsEnv } from "./editor/toolsEnv";
+import { mayRun } from "./editor/trust";
 import { commonRoot, useLines } from "./gowork";
 import { isOn, type Quiet, stillOn, syncSnapshots, toggler } from "./quiet";
 import { affects, initSettings, keepBlock, openSettingsMenu } from "./settings";
@@ -135,6 +136,8 @@ const MINIFIABLE = [
 ];
 
 let client: LanguageClient | undefined;
+/** The "Poly" channel itself, for lines below info; see `daemonLog`. */
+let polyLog: vscode.LogOutputChannel | undefined;
 let status: vscode.StatusBarItem | undefined;
 let formatToggle: vscode.StatusBarItem | undefined;
 let lintToggle: vscode.StatusBarItem | undefined;
@@ -363,6 +366,12 @@ async function formatNow(self: string): Promise<void> {
     && LANGUAGES.includes(document.languageId)
     && (!chosen || chosen === self);
   if (!polys) {
+    const why = !(document.uri.scheme === "file" || textOnly)
+      ? `a ${document.uri.scheme}: document`
+      : !LANGUAGES.includes(document.languageId)
+      ? `${document.languageId}, which poly does not format`
+      : `formatted by ${chosen} (editor.defaultFormatter)`;
+    polyLog?.debug(`[format] ${document.uri.toString(true)} is ${why}; handing it to Format Document`);
     await vscode.commands.executeCommand("editor.action.formatDocument");
     return;
   }
@@ -383,6 +392,9 @@ async function formatNow(self: string): Promise<void> {
   // Typed into while the daemon was formatting: the edits describe a text
   // that no longer exists, and applying them would scramble the new one.
   if (!edits || edits.length === 0 || document.version !== version) {
+    if (edits?.length && document.version !== version) {
+      polyLog?.debug(`[format] ${document.uri.fsPath}: typed into while poly formatted it, edits dropped`);
+    }
     return;
   }
   await editor.edit((builder) => {
@@ -654,6 +666,11 @@ async function reportVersionSkew(
 /// afterwards rather than waiting for a watcher is for the same reason: a file
 /// outside the workspace is a file the editor is not watching.
 async function createGoWork(): Promise<void> {
+  // `go` obeys the `toolchain` line of the go.mod it finds, and fetches and
+  // runs the one named there.
+  if (!mayRun("Create go.work")) {
+    return;
+  }
   const found = await vscode.workspace.findFiles(
     "**/go.mod",
     "**/{vendor,node_modules,testdata}/**",
@@ -842,11 +859,12 @@ export async function activate(context: vscode.ExtensionContext) {
         lintOnSave: vscode.workspace
           .getConfiguration("poly")
           .get<boolean>("lintOnSave", true),
-        // The daemon reads it once, so turning it on mid-session logs nothing
-        // until the window reloads.
-        memoryLog: vscode.workspace
-          .getConfiguration("poly")
-          .get<boolean>("memoryLog", false),
+        // The channel's level, so a window opened at Debug logs its first
+        // requests too; later moves arrive as `poly/logLevel`.
+        logLevel: polyLog?.logLevel ?? vscode.LogLevel.Info,
+        // Restricted Mode: the daemon keeps to the engines it embeds. Granting
+        // trust restarts it (below), so this is asked again.
+        trusted: vscode.workspace.isTrusted,
       }),
       // The suspend switch, applied here rather than in the daemon: the daemon
       // would have to be told about the setting and would still answer the
@@ -855,9 +873,9 @@ export async function activate(context: vscode.ExtensionContext) {
       // rewrite is not the same as not wanting to know.
       middleware: {
         provideDocumentFormattingEdits: (document, options, token, next) =>
-          mayFormat() ? next(document, options, token) : [],
+          mayFormat() ? next(document, options, token) : skipped(document),
         provideDocumentRangeFormattingEdits: (document, range, options, token, next) =>
-          mayFormat() ? next(document, range, options, token) : [],
+          mayFormat() ? next(document, range, options, token) : skipped(document),
       },
     },
   );
@@ -909,6 +927,13 @@ export async function activate(context: vscode.ExtensionContext) {
         server.options.env = { ...process.env, ...toolsEnv() };
         void client?.restart();
       }
+    }),
+    // The workspace's own poly settings were ignored until now (they are
+    // `restrictedConfigurations`), so the binary and its tools are asked again.
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      server.command = resolveServerPath(context);
+      server.options.env = { ...process.env, ...toolsEnv() };
+      void client?.restart();
     }),
     vscode.window.onDidChangeActiveTextEditor(() => {
       refreshStatus();
@@ -993,7 +1018,7 @@ export async function activate(context: vscode.ExtensionContext) {
       "poly.lintPath",
       (uri?: vscode.Uri) => {
         const target = uri?.fsPath ?? workspacePaths()[0];
-        if (!target) {
+        if (!target || !mayRun("Lint")) {
           return;
         }
         const terminal = vscode.window.createTerminal({ name: "poly check", env: toolsEnv() });
@@ -1013,7 +1038,7 @@ export async function activate(context: vscode.ExtensionContext) {
         const target = uri?.fsPath
           ?? vscode.window.activeTextEditor?.document.uri.fsPath
           ?? workspacePaths()[0];
-        if (!target) {
+        if (!target || !mayRun("Analyze Dead Code")) {
           return;
         }
         const terminal = vscode.window.createTerminal({ name: "poly deadcode", env: toolsEnv() });
@@ -1128,7 +1153,18 @@ const LEVELS = { Error: "error", Warn: "warn", Info: "info", Debug: "debug", Tra
  */
 function daemonLog(context: vscode.ExtensionContext): vscode.OutputChannel {
   const log = vscode.window.createOutputChannel("Poly", { log: true });
-  context.subscriptions.push(log);
+  polyLog = log;
+  context.subscriptions.push(
+    log,
+    // The gear on the Output panel is the only level switch, so the daemon is
+    // told when it moves and writes debug and trace lines only while they are
+    // shown. See LOG_LEVEL in lsp.rs.
+    log.onDidChangeLogLevel((level) => {
+      if (client?.isRunning()) {
+        void client.sendNotification("poly/logLevel", { level });
+      }
+    }),
+  );
   let partial = "";
   return {
     name: log.name,
@@ -1136,7 +1172,15 @@ function daemonLog(context: vscode.ExtensionContext): vscode.OutputChannel {
       const lines = (partial + chunk).split("\n");
       partial = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) log.info(line.replace(/\r$/, ""));
+        const text = line.replace(/\r$/, "");
+        // `[poly:debug] …` is the daemon naming its level, `[poly] …` is info;
+        // see `say!` in lsp.rs.
+        const tagged = /^\[poly:(trace|debug|warn)\] /.exec(text);
+        if (tagged) {
+          log[tagged[1] as "trace" | "debug" | "warn"](`[poly] ${text.slice(tagged[0].length)}`);
+        } else if (text.trim()) {
+          log.info(text);
+        }
       }
     },
     appendLine(message: string) {
@@ -1168,6 +1212,13 @@ function daemonLog(context: vscode.ExtensionContext): vscode.OutputChannel {
 /** A line in the "Poly" channel, from code that runs outside the client. */
 function logLine(line: string): void {
   client?.outputChannel.appendLine(line);
+}
+
+/// A format request the Format switch swallowed. From the editor it looks
+/// exactly like a file that was already formatted, so the log says which.
+function skipped(document: vscode.TextDocument): [] {
+  polyLog?.debug(`[format] ${document.uri.fsPath}: skipped, the Format switch is off`);
+  return [];
 }
 
 export function deactivate(): Thenable<void> | undefined {

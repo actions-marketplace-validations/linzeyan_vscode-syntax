@@ -47,7 +47,11 @@ fn the_committed_example_is_what_the_binary_generates() {
     let root = repo_root();
     let (code, stdout, stderr) = poly(&root, &["config", "export"]);
     assert_eq!(code, 0, "{stderr}");
-    let committed = std::fs::read_to_string(root.join("poly.example.toml")).unwrap();
+    // A Windows checkout with core.autocrlf has CRLF on disk; the generator
+    // writes LF, and the endings are git's business, not the contract's.
+    let committed = std::fs::read_to_string(root.join("poly.example.toml"))
+        .unwrap()
+        .replace("\r\n", "\n");
     assert_eq!(
         stdout, committed,
         "poly.example.toml is stale; run `poly config export > poly.example.toml`"

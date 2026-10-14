@@ -16,6 +16,7 @@ const { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } = requ
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
+const markdown = require("./markdown");
 const navigate = require("./navigate");
 const proto = require("./proto");
 const runnable = require("./runnable");
@@ -166,6 +167,7 @@ async function main() {
 
   const protoEnv = proto.writeFixture(WORKSPACE);
   const navigateEnv = navigate.writeFixture(WORKSPACE);
+  const markdownEnv = markdown.writeFixture(WORKSPACE);
 
   execFileSync("pnpm", ["run", "build"], { cwd: LSP, stdio: "inherit" });
 
@@ -181,6 +183,7 @@ async function main() {
       POLY_COST_OUT: COST_OUT,
       ...protoEnv,
       ...navigateEnv,
+      ...markdownEnv,
     },
     ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
     launchArgs: [
@@ -282,6 +285,7 @@ async function main() {
 
   problems.push(...proto.checkProto(report.proto));
   problems.push(...navigate.checkNavigate(report.navigate));
+  problems.push(...markdown.checkMarkdown(report.markdown));
 
   console.log(
     `\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens; `

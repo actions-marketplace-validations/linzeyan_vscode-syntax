@@ -281,11 +281,14 @@ fn hidden_files_need_asking_for_by_flag_or_config() {
     assert_eq!(code, 1, "{stdout}");
     assert!(!stdout.contains(".config"), "hidden by default: {stdout}");
 
+    // Windows prints `.config\a.json`; the path is the point, not its separator.
     let (_, stdout, _) = poly(root, &["fmt", "--check", "--hidden", "."]);
+    let stdout = stdout.replace('\\', "/");
     assert!(stdout.contains(".config/a.json"), "{stdout}");
 
     std::fs::write(root.join("poly.toml"), "[walk]\ninclude-hidden = true\n").unwrap();
     let (_, stdout, _) = poly(root, &["fmt", "--check", "."]);
+    let stdout = stdout.replace('\\', "/");
     assert!(
         stdout.contains(".config/a.json"),
         "config ignored: {stdout}"

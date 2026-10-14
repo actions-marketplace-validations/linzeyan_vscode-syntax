@@ -2607,7 +2607,14 @@ mod tests {
                 walk_files(&[root.to_path_buf()], &["vendor/**".into()], None, options).unwrap();
             files
                 .iter()
-                .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap().to_string())
+                // `/` on Windows too, so one expectation serves both.
+                .map(|p| {
+                    p.strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/")
+                })
                 .collect::<Vec<_>>()
         };
 
@@ -2645,7 +2652,14 @@ mod tests {
             walk_files(&[root.to_path_buf()], &[], None, options)
                 .unwrap()
                 .iter()
-                .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap().to_string())
+                // `/` on Windows too, so one expectation serves both.
+                .map(|p| {
+                    p.strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/")
+                })
                 .collect::<Vec<_>>()
         };
 

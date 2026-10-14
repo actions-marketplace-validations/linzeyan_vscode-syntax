@@ -14,6 +14,15 @@
     "Other"
   ],
   "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "%capabilities.untrustedWorkspaces.description%",
+      "restrictedConfigurations": [
+        "poly"
+      ]
+    }
+  },
   "activationEvents": [
     "onStartupFinished",
     "onLanguage:typescript",
@@ -2332,7 +2341,6 @@
               "strictPathResolutionDuringExport": false,
               "themes": []
             },
-            "memoryLog": false,
             "pasteImage": {
               "basePath": "${currentFileDir}",
               "defaultName": "Y-MM-DD-HH-mm-ss",
@@ -4807,10 +4815,6 @@
                   "markdownDescription": "%config.marp.themes.description%"
                 }
               }
-            },
-            "memoryLog": {
-              "type": "boolean",
-              "description": "%config.memoryLog.description%"
             },
             "pasteImage": {
               "type": "object",

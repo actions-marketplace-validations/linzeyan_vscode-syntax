@@ -10,6 +10,7 @@ import * as os from "os";
 import { dirname, extname, join } from "path";
 import * as vscode from "vscode";
 
+import { mayRun } from "../trust";
 import { commandLine, Executor, fallbackPython, resolveExecutor } from "./executor";
 
 const TmpDir = os.tmpdir();
@@ -278,6 +279,10 @@ export class CodeManager implements vscode.Disposable {
   }
 
   private async executeCommand(executor: string, appendFile = true) {
+    // Every run, the lens's and the custom command's included, starts here.
+    if (!mayRun("Code Runner")) {
+      return;
+    }
     if (this._config.get<boolean>("runInTerminal")) {
       await this.executeCommandInTerminal(executor, appendFile);
     } else {

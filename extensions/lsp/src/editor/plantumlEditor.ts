@@ -65,6 +65,11 @@ const EXTENSIONS = /\.(wsd|pu|puml|plantuml|iuml)$/i;
 const PATTERN = "**/*.{wsd,pu,puml,plantuml,iuml}";
 
 const NO_SERVER = "No PlantUML server, specify one with \"poly.plantuml.server\".";
+/**
+ * In place of a picture rather than in a notification: a preview renders on
+ * its own, and twenty diagrams would be twenty of them.
+ */
+const UNTRUSTED = "PlantUML runs Java, so it waits until this folder is trusted (Manage Workspace Trust).";
 
 export function isPlantumlDocument(document: vscode.TextDocument): boolean {
   return document.languageId === "plantuml" || EXTENSIONS.test(document.fileName);
@@ -297,7 +302,11 @@ class Renderer {
     return includePath(file ? path.dirname(file) : undefined, config.get<string[]>("includepaths", []), folder, root);
   }
 
+  /** The only way to a JVM, and to `poly tools install` before it. */
   async java(origin: Origin): Promise<{ java: string; run: JavaRun }> {
+    if (!vscode.workspace.isTrusted) {
+      throw new RenderError(UNTRUSTED);
+    }
     const config = settings(origin.uri);
     return {
       java: config.get<string>("java", "java") || "java",

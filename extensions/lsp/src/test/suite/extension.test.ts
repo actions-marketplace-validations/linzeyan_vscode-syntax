@@ -1,7 +1,7 @@
 import * as assert from "node:assert";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import { findNodeAtLocation, parseTree } from "jsonc-parser";
 import * as vscode from "vscode";
@@ -95,12 +95,31 @@ function outputSaying(text: string): string | undefined {
     ?.getText();
 }
 
-/// Long enough for a run of `runnable`'s script to have left its marker, had
-/// one started: the command has resolved by then, and the process takes
-/// milliseconds.
-async function notRun(marker: string, why: string): Promise<void> {
+/// Whether `runnable`'s scripts can run here. Windows has no `/bin/sh`, so
+/// there a run is seen starting -- Code Runner was handed the right file -- and
+/// what the script itself does is not looked for.
+const SH = existsSync("/bin/sh");
+
+/// The output panel's line naming `script`, which Code Runner prints first.
+const started = (script: vscode.Uri) => outputSaying(`${basename(script.fsPath)}"`);
+
+/// Code Runner started `script` and, where it can run, it ran: the marker is
+/// there and `said` is in the output panel. That panel's text.
+async function ran(script: vscode.Uri, marker: string, said: string): Promise<string> {
+  const output = await eventually("Code Runner to start the script", () => started(script));
+  if (!SH) {
+    return output;
+  }
+  await eventually("the script to run", () => existsSync(marker) || undefined);
+  return eventually("the run in the output panel", () => outputSaying(said));
+}
+
+/// Long enough for a run of `runnable`'s script to have started and left its
+/// marker, had one started: the command has resolved by then, and the process
+/// takes milliseconds.
+async function notRun(script: vscode.Uri, marker: string, why: string): Promise<void> {
   await new Promise((done) => setTimeout(done, 2_000));
-  assert.ok(!existsSync(marker), why);
+  assert.ok(!existsSync(marker) && !started(script), why);
 }
 
 /// The `run` lens on `uri`, invoked the way a click does.
@@ -281,19 +300,21 @@ suite("poly-lsp in a real editor", () => {
   });
 
   test("a go.work goes to the deepest directory covering every module", () => {
-    const root = commonRoot([join("/a", "liba"), join("/a", "appb")]);
-    assert.strictEqual(root, "/a");
-    assert.deepStrictEqual(useLines(root!, [join("/a", "liba"), join("/a", "appb")]), [
+    // Resolved, because that is what the folders are: on Windows `/a` is `C:\a`.
+    const a = resolve("/a");
+    const root = commonRoot([join(a, "liba"), join(a, "appb")]);
+    assert.strictEqual(root, a);
+    assert.deepStrictEqual(useLines(root!, [join(a, "liba"), join(a, "appb")]), [
       "./appb",
       "./liba",
     ]);
 
     // A module at the root itself is `.`, which is what go writes.
-    assert.deepStrictEqual(useLines("/a", ["/a", join("/a", "sub")]), [".", "./sub"]);
+    assert.deepStrictEqual(useLines(a, [a, join(a, "sub")]), [".", "./sub"]);
 
     // One module is its own root; nested modules resolve to the outer one.
-    assert.strictEqual(commonRoot([join("/a", "one")]), join("/a", "one"));
-    assert.strictEqual(commonRoot([join("/a", "one"), join("/a", "one", "in")]), join("/a", "one"));
+    assert.strictEqual(commonRoot([join(a, "one")]), join(a, "one"));
+    assert.strictEqual(commonRoot([join(a, "one"), join(a, "one", "in")]), join(a, "one"));
 
     // Nothing to cover, and nothing in common: both have to say so rather than
     // return a root that would put the file somewhere arbitrary.
@@ -1435,10 +1456,13 @@ suite("poly-lsp in a real editor", () => {
       assert.strictEqual(tab.label, `Swagger Preview - ${document.fileName}`);
       assert.strictEqual(tab.group.viewColumn, vscode.ViewColumn.Two);
 
-      // The extension's own instance of the server: require shares it.
+      // The extension's own instance of the server: require shares it, keyed
+      // by the path as spelled, and on Windows `extensionPath` spells the
+      // drive `c:` where the extension's own require said `C:`.
       const root = vscode.extensions.getExtension(EXTENSION_ID)!.extensionPath;
+      const file = join(root, "dist", "swaggerPreview.js");
       const server: typeof import("../../editor/swaggerPreview") = require(
-        join(root, "dist", "swaggerPreview.js"),
+        Object.keys(require.cache).find((one) => one.toLowerCase() === file.toLowerCase()) ?? file,
       );
       const address = server.url(document.fileName);
       const html = await (await fetch(address)).text();
@@ -1655,17 +1679,16 @@ suite("poly-lsp in a real editor", () => {
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script));
 
     await vscode.commands.executeCommand("poly.codeRunner.run");
-    await notRun(marker, "Run Code ran with Code Runner switched off");
+    await notRun(script, marker, "Run Code ran with Code Runner switched off");
 
     await setPoly("codeRunner.enabled", true, vscode.ConfigurationTarget.Workspace);
     try {
       await vscode.commands.executeCommand("poly.codeRunner.run");
-      await eventually("the script to run", () => existsSync(marker) || undefined);
-      const output = await eventually("the run in the output panel", () => outputSaying("poly-code-runner-says-hello"));
+      const output = await ran(script, marker, "poly-code-runner-says-hello");
       // The line upstream prints first: the command it ran, shebang and all.
       assert.match(output, /\[Running\] \/bin\/sh ".*code-runner\.sh"/);
       // Finished, so the lens test below is not told "Code is already running!".
-      await eventually("the run to end", () => outputSaying("[Done] exited with code=0"));
+      await eventually("the run to end", () => outputSaying(`[Done] exited with code=${SH ? "0" : ""}`));
     } finally {
       await setPoly("codeRunner.enabled", undefined, vscode.ConfigurationTarget.Workspace);
     }
@@ -1683,8 +1706,7 @@ suite("poly-lsp in a real editor", () => {
       const script = runnable("run-lens.sh", marker, "poly-run-lens-says-hello");
       await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script));
       await clickRunLens(script);
-      await eventually("the script to run", () => existsSync(marker) || undefined);
-      await eventually("the run in the output panel", () => outputSaying("poly-run-lens-says-hello"));
+      await ran(script, marker, "poly-run-lens-says-hello");
     } finally {
       await setPoly("runCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);
     }
@@ -1846,10 +1868,34 @@ suite("Code Runner beside formulahendry.code-runner", () => {
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script));
 
     await vscode.commands.executeCommand("poly.codeRunner.run");
-    await notRun(marker, "Run Code ran beside formulahendry.code-runner");
+    await notRun(script, marker, "Run Code ran beside formulahendry.code-runner");
 
     await clickRunLens(script);
-    await eventually("the script to run", () => existsSync(marker) || undefined);
-    await eventually("the run in the output panel", () => outputSaying("poly-yield-says-hello"));
+    await ran(script, marker, "poly-yield-says-hello");
+  });
+});
+
+suite("poly in Restricted Mode", () => {
+  suiteSetup(async function() {
+    this.timeout(120_000);
+    await vscode.extensions.getExtension(EXTENSION_ID)?.activate();
+  });
+
+  // Every other launch passes --disable-workspace-trust, so this is the one
+  // place a folder is not trusted, and the first assertion is what makes the
+  // rest mean anything.
+  test("poly in Restricted Mode formats with what it embeds and runs nothing the folder chose", async function() {
+    this.timeout(120_000);
+    assert.strictEqual(vscode.workspace.isTrusted, false, "the folder is trusted");
+    // The daemon answering at all says the folder's serverPath was ignored.
+    const text = await formatted(writeFile("untrusted.md", "# Title\nText\n"));
+    assert.ok(!existsSync(process.env.POLY_E2E_PRETTIER_RAN!), "the folder's own prettier ran");
+    assert.strictEqual(text, "# Title\n\nText\n");
+
+    const marker = join(workspaceRoot(), "restricted.ran");
+    const script = runnable("restricted.sh", marker, "poly-restricted-says-hello");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script));
+    await vscode.commands.executeCommand("poly.codeRunner.run");
+    await notRun(script, marker, "Run Code ran in a folder that is not trusted");
   });
 });

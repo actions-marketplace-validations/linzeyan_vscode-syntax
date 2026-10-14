@@ -284,8 +284,8 @@ marp-team.marp-vscode 的替代：front matter 寫了 `marp: true` 的 Markdown 
   Markdown），以及編輯器標題列 Marp 按鈕開出的 `Show Marp Commands...`。
 
 和 marp-team.marp-vscode 不同的地方：它舊版的 `enableHtml`、`chromePath` 不支援，改用 `html`、
-`browserPath`；命令與 Copilot Chat 工具的名稱都帶 poly。poly 在不信任的工作區整個停用，所以連預覽也沒有，
-它則只停用匯出，並忽略工作區裡的 `html` 與 `themes` 設定；也沒有網頁版（vscode.dev）。和它一樣的地方：
+`browserPath`；命令與 Copilot Chat 工具的名稱都帶 poly。不信任的工作區裡兩者都只停用匯出，它忽略工作區裡的
+`html` 與 `themes` 設定，poly 忽略整個工作區的 `poly` 設定（見〈未信任的資料夾〉）；也沒有網頁版（vscode.dev）。和它一樣的地方：
 投影片內容超出範圍的警告（`diagnostics.slideContentOverflow`）在目前的 VSCode 上兩者都不會出現，它借用的
 預覽內部通道已經不在了。兩者都裝著時，poly 整個讓出，預覽、檢查與命令都只有它的。
 
@@ -353,7 +353,7 @@ $fullFileName`，用 Python extension 選的直譯器，沒有時用 `python3`�
   印的、CI annotation 連過去的、終端機點得動的那個形狀。
 - **引用與實作 CodeLens**（設定）：每個宣告一行 `11 refs`；interface 多一顆 `3 impls`，
   具體型別有滿足 interface 才多一顆 `1 interface`，方法寫在型別外面的語言（Go）再多一顆
-  `4 methods`。
+  `4 methods`。Markdown 有人連結的標題也有一行，數的是整個 workspace 連到它的 `#錨點` 連結。
   數字全部來自該語言已註冊的 provider，poly 只數與畫。
   - `N refs`、`N impls`、`N methods` 點下去都一樣：只有一筆就直接跳過去，多筆開檔案總管裡的
     **References** 面板。那是 poly 自己的樹，
@@ -462,7 +462,6 @@ $fullFileName`，用 Python extension 選的直譯器，沒有時用 `python3`�
 | `poly.lintOnSave`                  | `true`    | 開檔與存檔時跑 lint，改了立即生效；Lint 開關也寫這一項                                |
 | `poly.format.enabled`              | `true`    | 關掉後 poly 的改寫都不動作（`Poly: Format Document` 除外）；Format 開關也寫它         |
 | `poly.deadCodeCodeLens.enabled`    | `false`   | 每個 Go／TS／JS／Python 檔第一行上方一條 `analyze dead code`                          |
-| `poly.memoryLog`                   | `false`   | 每開關一個檔寫一行 daemon 握著什麼（RSS、文件數、各快取）                             |
 | `poly.updateCheck.enabled`         | `true`    | 背景檢查新版，有就直接安裝                                                            |
 | `poly.updateCheck.intervalDays`    | `7`       | 檢查間隔，`0` 是每次啟動都查                                                          |
 | `poly.indentTint.enabled`          | `false`   | 縮排上色                                                                              |
@@ -512,11 +511,33 @@ markdown 的 Enter／Tab／粗體斜體與 `Copy Path with Line Numbers`、重�
 同一個工具兩邊都有寫時以這裡為準。專案層的格式化設定，以及要讓 CI 也照著跑的工具版本，寫在
 `poly.toml`——見專案根目錄的 README。
 
+## 未信任的資料夾
+
+VSCode 以 Restricted Mode 開啟的資料夾裡，poly 照樣格式化與 lint，只是只用內嵌的引擎，不執行任何其他程式：
+
+- 專案內的 prettier／biome／eslint、PATH 上的 rustfmt／golangci-lint 這類外部工具、`[tools]` 指到的路徑都不跑，
+  也不下載工具與 JSON schema。rustfmt、clang-format 這類只有外部工具的語言，要等信任後才會格式化。
+- Code Runner、`Poly: Lint (poly check)`、`Poly: Analyze Dead Code`、`Create go.work`、Git History、
+  PlantUML、Markdown 的 PDF／PNG／JPEG 匯出都要等信任；點下去會說明原因，並提供「Manage Workspace Trust」。
+- 資料夾 `.vscode/settings.json` 裡的 `poly` 設定不採用，只用使用者層的；`poly.toml` 的格式化選項照讀。
+
+這些東西都可能由資料夾本身指定要跑什麼：`node_modules/.bin` 裡的腳本、`rust-toolchain.toml` 指定的工具鏈、
+repo 的 git 設定裡的 `core.fsmonitor`。信任之後 poly 會重啟 daemon，不必重開視窗。
+
 ## Log
 
 兩個輸出面板：**Poly** 是 daemon 的（啟動、每次 lint／format），
-**Poly Editor** 是編輯器功能的（lens 為什麼沒畫之類，細節在 debug 層級，用 `Developer: Set Log
-Level` 打開）。兩者都寫到磁碟上，是 `Developer: Open Extension Logs Folder` 打開的資料夾裡
+**Poly Editor** 是編輯器功能的（lens 為什麼沒畫之類）。要記多細，在輸出面板選好該面板後按右上的
+齒輪（或 `Developer: Set Log Level`）選層級，即時生效，poly 沒有另外的設定：
+
+- **Info**（預設）：啟動、每次 lint、失敗。
+- **Debug**：Poly 面板每個請求一行，帶檔案路徑與編輯器顯示的 `行:欄`、回了什麼、花多久；開檔、
+  存檔、關檔；每次送出的診斷逐筆列出 `行:欄 來源/規則`（前 10 筆）；format 沒有改動時說為什麼
+  （`[format] exclude` 排除了、poly 不格式化這個語言、Format 開關關著）；每開關一個檔一行 daemon 握著
+  什麼（RSS、文件數、各快取）。
+- **Trace**：再加上 daemon 收發的每則 LSP 訊息原文，每則截在 4 KB。
+
+兩者都寫到磁碟上，是 `Developer: Open Extension Logs Folder` 打開的資料夾裡
 `ricky.poly-lsp/` 底下的 `Poly.log` 與 `Poly Editor.log`，回報問題時附這兩個檔就夠了。WSL、SSH 的
 遠端視窗裡 poly-lsp 跑在遠端，這兩個檔也在遠端的 `~/.vscode-server/data/logs/` 底下，不在本機；拿不到
 時從輸出面板匯出。

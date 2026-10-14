@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -36,6 +37,171 @@ const EDITOR_CONFIG: &str = "poly.editorConfig";
 const FORMAT_TEXT: &str = "poly.formatText";
 pub(crate) const EXECUTE_COMMANDS: &[&str] = &[FORMAT_PATHS, MINIFY, EDITOR_CONFIG, FORMAT_TEXT];
 
+/// How much the daemon says on stderr, numbered as `vscode.LogLevel` is (0 is
+/// Off).
+///
+/// The extension files each line under the "Poly" channel's level of the same
+/// name, and that channel's own level -- the gear on the Output panel -- is the
+/// one switch: it arrives in `initializationOptions` and again as
+/// `poly/logLevel` whenever it moves. A setting of poly's own would be a second
+/// answer to the same question, and a debug line the channel then drops is a
+/// line written for nobody. Global rather than on `Server` because the
+/// package-lint worker logs from its own thread.
+static LOG_LEVEL: AtomicU8 = AtomicU8::new(INFO);
+const TRACE: u8 = 1;
+const DEBUG: u8 = 2;
+const INFO: u8 = 3;
+const WARN: u8 = 4;
+
+/// The longest trace line, in bytes. A didOpen carries the whole file, and a
+/// trace of typing into a large one would otherwise be the file per keystroke.
+/// ponytail: a fixed cut; raise it if a trace ever needs a whole document.
+const TRACE_BYTES: usize = 4096;
+
+/// How many findings a publish line names before it only counts the rest.
+const PUBLISH_NAMED: usize = 10;
+
+/// The channel's level, as the extension sends it: a `vscode.LogLevel` number.
+fn set_log_level(level: &serde_json::Value) {
+    if let Some(level) = level.as_u64().and_then(|level| u8::try_from(level).ok()) {
+        LOG_LEVEL.store(level, Ordering::Relaxed);
+    }
+}
+
+fn logs(level: u8) -> bool {
+    let shown = LOG_LEVEL.load(Ordering::Relaxed);
+    shown != 0 && level >= shown
+}
+
+/// A stderr line the extension files at `$level`, formatted only when shown.
+macro_rules! say {
+    ($level:expr, $($arg:tt)*) => {
+        if logs($level) {
+            let tag = match $level {
+                TRACE => ":trace",
+                DEBUG => ":debug",
+                WARN => ":warn",
+                _ => "",
+            };
+            eprintln!("[poly{tag}] {}", format_args!($($arg)*));
+        }
+    };
+}
+
+/// A message as JSON for a trace line, cut to `TRACE_BYTES`.
+fn capped(mut json: String) -> String {
+    if json.len() > TRACE_BYTES {
+        let total = json.len();
+        let mut cut = TRACE_BYTES;
+        while !json.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        json.truncate(cut);
+        json.push_str(&format!("… ({total} bytes)"));
+    }
+    json
+}
+
+/// Where a request was asked: ` path:line:column`, 1-based as the editor
+/// prints them, or ` path`, or the command it runs and what it runs on.
+///
+/// Read off the raw params rather than each handler's typed ones, so every
+/// method gets it -- including the ones that fail to parse, which are the ones
+/// someone is looking at the log for.
+fn place_of(params: &serde_json::Value) -> String {
+    let text = |pointer: &str| params.pointer(pointer).and_then(serde_json::Value::as_str);
+    if let Some(command) = text("/command") {
+        let target = text("/arguments/0/path").or_else(|| text("/arguments/0/uri"));
+        return target.map_or_else(
+            || format!(" {command}"),
+            |target| format!(" {command} {target}"),
+        );
+    }
+    let Some(uri) = text("/textDocument/uri") else {
+        return String::new();
+    };
+    let path = Url::parse(uri).map_or_else(
+        |_| uri.to_string(),
+        |uri| uri_path(&uri).display().to_string(),
+    );
+    let at = params
+        .get("position")
+        .or_else(|| params.pointer("/range/start"))
+        .and_then(|at| Some((at.get("line")?.as_u64()?, at.get("character")?.as_u64()?)));
+    match at {
+        Some((line, character)) => format!(" {path}:{}:{}", line + 1, character + 1),
+        None => format!(" {path}"),
+    }
+}
+
+/// What a successful answer amounted to, in a word or a count.
+fn outcome_of(response: &Response) -> String {
+    match &response.result {
+        Some(serde_json::Value::Array(items)) => format!("{} items", items.len()),
+        None | Some(serde_json::Value::Null) => "nothing".to_string(),
+        Some(_) => "an answer".to_string(),
+    }
+}
+
+/// A publishDiagnostics for the editor, said in the log as places.
+///
+/// Problems shows the same findings, but not which publish they came from or
+/// when -- and that is the question when a squiggle will not go away, or when
+/// one never arrives. Both publishers come through here: the main loop and the
+/// package-lint worker.
+fn publication(uri: Url, diagnostics: Vec<lsp_types::Diagnostic>) -> Message {
+    if logs(DEBUG) {
+        let named: Vec<String> = diagnostics
+            .iter()
+            .take(PUBLISH_NAMED)
+            .map(|found| {
+                let code = match &found.code {
+                    Some(lsp_types::NumberOrString::String(code)) => code.clone(),
+                    Some(lsp_types::NumberOrString::Number(code)) => code.to_string(),
+                    None => String::new(),
+                };
+                format!(
+                    "{}:{} {}/{code}",
+                    found.range.start.line + 1,
+                    found.range.start.character + 1,
+                    found.source.as_deref().unwrap_or("?"),
+                )
+            })
+            .collect();
+        let more = diagnostics.len().saturating_sub(PUBLISH_NAMED);
+        say!(
+            DEBUG,
+            "diagnostics {}: {}{}{}",
+            uri_path(&uri).display(),
+            diagnostics.len(),
+            if named.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", named.join(", "))
+            },
+            if more > 0 {
+                format!(", {more} more")
+            } else {
+                String::new()
+            },
+        );
+    }
+    let message = Message::Notification(Notification::new(
+        "textDocument/publishDiagnostics".to_string(),
+        PublishDiagnosticsParams {
+            uri,
+            diagnostics,
+            version: None,
+        },
+    ));
+    say!(
+        TRACE,
+        "→ {}",
+        capped(serde_json::to_string(&message).unwrap_or_default())
+    );
+    message
+}
+
 pub fn run() -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
     // The connection must be dropped before joining: the writer thread only
@@ -54,10 +220,6 @@ struct Server {
     /// with it, which is why `log_memory` does not count it separately.
     language_ids: HashMap<Url, String>,
     lint_on_save: bool,
-    /// Whether every document opened and closed writes a line saying what poly
-    /// is holding. Off by default: it is a line per file in a log people read
-    /// to find out why a lint did not run.
-    memory_log: bool,
     /// The editor's own InitializeParams, kept for the workspace folders
     /// `crate::navigate::root_of` searches -- updated as folders come and go.
     init_params: serde_json::Value,
@@ -266,11 +428,16 @@ fn serve(connection: Connection) -> Result<()> {
     match crate::settings::write_global() {
         Ok(Some(path)) => eprintln!("[poly] wrote {}", path.display()),
         Ok(None) => {}
-        Err(e) => eprintln!("[poly] could not write the global poly.toml: {e:#}"),
+        Err(e) => say!(WARN, "could not write the global poly.toml: {e:#}"),
     }
 
     // A receive error means the editor closed the pipe: nothing left to serve.
     while let Ok(message) = server.connection.receiver.recv() {
+        say!(
+            TRACE,
+            "← {}",
+            capped(serde_json::to_string(&message).unwrap_or_default())
+        );
         match message {
             Message::Request(request) => {
                 if handle_shutdown(&server.connection, &request)? {
@@ -278,6 +445,13 @@ fn serve(connection: Connection) -> Result<()> {
                 }
                 let started = Instant::now();
                 let method = request.method.clone();
+                // Taken before the handler consumes the params: where the
+                // request was asked is what makes a failure a line to open.
+                let place = if logs(DEBUG) {
+                    place_of(&request.params)
+                } else {
+                    String::new()
+                };
                 let response = match method.as_str() {
                     "textDocument/formatting" => server.on_formatting(request),
                     "textDocument/rangeFormatting" => server.on_range_formatting(request),
@@ -296,9 +470,26 @@ fn serve(connection: Connection) -> Result<()> {
                         format!("poly does not handle {method}"),
                     ),
                 };
-                eprintln!(
-                    "[poly] {method} {:.1}ms",
-                    started.elapsed().as_secs_f64() * 1000.0
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                match &response.error {
+                    Some(error) => say!(
+                        WARN,
+                        "{method}{place} failed in {ms:.1}ms: {}",
+                        error.message
+                    ),
+                    // Info keeps the bare timing every request has always had;
+                    // debug replaces it with where it was asked and what came back.
+                    None if logs(DEBUG) => say!(
+                        DEBUG,
+                        "{method}{place}: {} in {ms:.1}ms",
+                        outcome_of(&response)
+                    ),
+                    None => say!(INFO, "{method} {ms:.1}ms"),
+                }
+                say!(
+                    TRACE,
+                    "→ {}",
+                    capped(serde_json::to_string(&response).unwrap_or_default())
                 );
                 server.connection.sender.send(Message::Response(response))?;
             }
@@ -307,8 +498,9 @@ fn serve(connection: Connection) -> Result<()> {
             // navigation registration. Only a refusal is worth a line.
             Message::Response(response) => {
                 if let Some(error) = &response.error {
-                    eprintln!(
-                        "[poly] the editor rejected a registration: {}",
+                    say!(
+                        WARN,
+                        "the editor rejected a registration: {}",
                         error.message
                     );
                 }
@@ -367,14 +559,27 @@ impl Server {
                 .unwrap_or(default)
         };
         let lint_on_save = option("lintOnSave", true);
-        let memory_log = option("memoryLog", false);
+        if let Some(level) = init_params.pointer("/initializationOptions/logLevel") {
+            set_log_level(level);
+        }
+        // VSCode in Restricted Mode. Trusted unless told otherwise, because an
+        // editor with no notion of trust has always had every tool. Never sent
+        // as false by a test here: the switch is process-wide, so it gets a
+        // test process of its own (poly-tools/tests/restricted.rs).
+        if !option("trusted", true) {
+            poly_tools::restrict();
+            say!(
+                INFO,
+                "workspace not trusted: {}",
+                poly_tools::RESTRICTED_REASON
+            );
+        }
 
         Server {
             connection,
             documents: HashMap::new(),
             language_ids: HashMap::new(),
             lint_on_save,
-            memory_log,
             init_params,
             lint_hashes: HashMap::new(),
             package_roots: HashSet::new(),
@@ -428,6 +633,11 @@ impl Server {
         let Some(text) = self.documents.get(&uri).cloned() else {
             // Nothing opened for this uri: no edits rather than an error, so a
             // race with didClose degrades to a no-op save.
+            say!(
+                DEBUG,
+                "format {}: not open here, so no edits",
+                uri_path(&uri).display()
+            );
             return Response::new_ok(id, serde_json::json!([]));
         };
         match formatted_text(&uri_path(&uri), &text) {
@@ -448,9 +658,15 @@ impl Server {
             // clicked; as a diagnostic it lands in Problems with a squiggle
             // where the parser stopped, which is what every other linter does.
             Err(error) => {
-                self.lock()
-                    .format
-                    .insert(uri.clone(), format_diagnostic(&error.to_string(), &text));
+                let found = format_diagnostic(&error.to_string(), &text);
+                say!(
+                    WARN,
+                    "format {}:{}:{}: {error}",
+                    uri_path(&uri).display(),
+                    found.range.start.line + 1,
+                    found.range.start.character + 1
+                );
+                self.lock().format.insert(uri.clone(), found);
                 let _ = self.publish_all(&uri);
                 Response::new_ok(id, serde_json::json!([]))
             }
@@ -636,6 +852,12 @@ impl Server {
                 let params: DidOpenTextDocumentParams =
                     serde_json::from_value(notification.params)?;
                 let uri = params.text_document.uri;
+                say!(
+                    DEBUG,
+                    "opened {} as {}",
+                    uri_path(&uri).display(),
+                    params.text_document.language_id
+                );
                 self.language_ids
                     .insert(uri.clone(), params.text_document.language_id);
                 self.documents
@@ -657,6 +879,16 @@ impl Server {
             "textDocument/didSave" => {
                 let params: DidSaveTextDocumentParams =
                     serde_json::from_value(notification.params)?;
+                say!(
+                    DEBUG,
+                    "saved {}{}",
+                    uri_path(&params.text_document.uri).display(),
+                    if self.lint_on_save {
+                        ""
+                    } else {
+                        "; lint on save is off"
+                    }
+                );
                 if self.lint_on_save {
                     self.publish_lint(&params.text_document.uri)?;
                     self.queue_package_lint(&params.text_document.uri, true);
@@ -671,6 +903,7 @@ impl Server {
                 let params: DidCloseTextDocumentParams =
                     serde_json::from_value(notification.params)?;
                 let uri = params.text_document.uri;
+                say!(DEBUG, "closed {}", uri_path(&uri).display());
                 self.documents.remove(&uri);
                 self.language_ids.remove(&uri);
                 self.lint_hashes.remove(&uri);
@@ -678,6 +911,12 @@ impl Server {
                 // Clear diagnostics so closed files don't linger in Problems.
                 self.publish(&uri, Vec::new())?;
                 self.log_memory("didClose");
+            }
+            // The "Poly" channel's level moved; see `LOG_LEVEL`.
+            "poly/logLevel" => {
+                if let Some(level) = notification.params.get("level") {
+                    set_log_level(level);
+                }
             }
             _ => {}
         }
@@ -726,8 +965,11 @@ impl Server {
     /// Diagnostics are counted, not weighed: knowing that the package map holds
     /// 4,000 findings is what points at golangci-lint, and a byte count of the
     /// same thing would need every one of them serialized to produce it.
+    ///
+    /// At Debug, because it is a line per file in a log people read at Info to
+    /// find out why a lint did not run.
     fn log_memory(&self, event: &str) {
-        if !self.memory_log {
+        if !logs(DEBUG) {
             return;
         }
         let text: usize = self.documents.values().map(String::len).sum();
@@ -740,8 +982,9 @@ impl Server {
             .map(Vec::len)
             .sum();
         let lint: usize = diagnostics.lint.values().map(Vec::len).sum();
-        eprintln!(
-            "[poly] memory after {event}: rss {}; {} documents {}; {} lint hashes; \
+        say!(
+            DEBUG,
+            "memory after {event}: rss {}; {} documents {}; {} lint hashes; \
              {} package scopes; findings lint {lint} package {package_found} over {package} files, \
              format {}",
             rss_kb().map_or_else(|| "?".to_string(), human_kb),
@@ -808,17 +1051,9 @@ impl Server {
     }
 
     fn publish(&mut self, uri: &Url, diagnostics: Vec<lsp_types::Diagnostic>) -> Result<()> {
-        let params = PublishDiagnosticsParams {
-            uri: uri.clone(),
-            diagnostics,
-            version: None,
-        };
         self.connection
             .sender
-            .send(Message::Notification(Notification::new(
-                "textDocument/publishDiagnostics".to_string(),
-                params,
-            )))?;
+            .send(publication(uri.clone(), diagnostics))?;
         Ok(())
     }
 }
@@ -930,13 +1165,30 @@ fn formatted_text(path: &Path, text: &str) -> Result<Option<String>> {
     // well: without this, opening one of those files and saving rewrites on the
     // spot exactly what CI is required never to touch, and `pnpm install
     // --frozen-lockfile` fails on a file nobody edited.
+    // Each early return said at debug, because all of them and an already
+    // formatted file look the same from the editor: no edits.
     if config.excluded(path, poly_core::Scope::Format) {
+        say!(
+            DEBUG,
+            "format {}: excluded by [format] in poly.toml",
+            path.display()
+        );
         return Ok(None);
     }
     let Some(lang) = config.language(path) else {
+        say!(
+            DEBUG,
+            "format {}: poly detects no language for it",
+            path.display()
+        );
         return Ok(None);
     };
     if !crate::fmt::formattable(&lang) {
+        say!(
+            DEBUG,
+            "format {}: poly does not format {lang}",
+            path.display()
+        );
         return Ok(None);
     }
     crate::fmt::format_text(&lang, path, text, &config)
@@ -1067,23 +1319,20 @@ fn line_start(lines: &[&str], i: usize) -> Position {
 }
 
 /// Tool resolution memoized for the daemon's lifetime: resolution can hit
-/// the network (managed download), which must not run on every save.
+/// the network (managed download), which must not run on every save. One slot
+/// per tool, so one tool's download holds up no other's; see `tool_slot`.
 fn resolved_tool(name: &str, config: &poly_core::Config) -> Option<PathBuf> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    static CACHE: Mutex<Option<HashMap<String, Option<PathBuf>>>> = Mutex::new(None);
-    let mut cache = CACHE.lock().expect("tool cache lock");
-    let cache = cache.get_or_insert_with(HashMap::new);
-    if let Some(hit) = cache.get(name) {
-        return hit.clone();
-    }
-    let resolved = poly_tools::resolve(name, config, false);
-    let path = resolved.command().map(Path::to_path_buf);
-    if path.is_none() {
-        eprintln!("[poly] lint tool {name}: unavailable ({resolved:?})");
-    }
-    cache.insert(name.to_string(), path.clone());
-    path
+    static CACHE: crate::fmt::ToolSlots = std::sync::Mutex::new(None);
+    crate::fmt::tool_slot(&CACHE, name)
+        .get_or_init(|| {
+            let resolved = poly_tools::resolve(name, config, false);
+            let path = resolved.command().map(Path::to_path_buf);
+            if path.is_none() {
+                say!(WARN, "lint tool {name}: unavailable ({resolved:?})");
+            }
+            path
+        })
+        .clone()
 }
 
 fn external_lint(
@@ -1298,7 +1547,7 @@ fn run_package_lint(job: &PackageJob, store: &Mutex<Diagnostics>, send: &impl Fn
     let found = match job.linter.run(&cmd, &job.root) {
         Ok(found) => found,
         Err(e) => {
-            eprintln!("[poly] {} {}: {e:#}", job.linter.tool(), job.root.display());
+            say!(WARN, "{} {}: {e:#}", job.linter.tool(), job.root.display());
             return;
         }
     };
@@ -1351,14 +1600,7 @@ fn run_package_lint(job: &PackageJob, store: &Mutex<Diagnostics>, send: &impl Fn
             .collect::<Vec<_>>()
     };
     for (uri, diagnostics) in publishes {
-        send(Message::Notification(Notification::new(
-            "textDocument/publishDiagnostics".to_string(),
-            PublishDiagnosticsParams {
-                uri,
-                diagnostics,
-                version: None,
-            },
-        )));
+        send(publication(uri, diagnostics));
     }
 }
 
@@ -1416,7 +1658,7 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
         Some(_) => match poly_engines::lint::lint(&lang, path, text) {
             Ok(issues) => issues,
             Err(e) => {
-                eprintln!("[poly] lint error {}: {e:#}", path.display());
+                say!(WARN, "lint error {}: {e:#}", path.display());
                 Vec::new()
             }
         },
@@ -1433,7 +1675,7 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
         poly_tools::schema,
     ) {
         Ok(found) => issues.extend(found.into_iter().flatten()),
-        Err(e) => eprintln!("[poly] schema error {}: {e:#}", path.display()),
+        Err(e) => say!(WARN, "schema error {}: {e:#}", path.display()),
     }
     // Spelling is asked separately because it has no language to dispatch on,
     // and from disk rather than from the buffer: on stdin the document is
@@ -1443,12 +1685,12 @@ fn lint_document(path: &Path, text: &str) -> Vec<lsp_types::Diagnostic> {
     // current one — the same trade biome makes in `external_lint`.
     match poly_engines::lint::spell(path) {
         Ok(found) => issues.extend(found),
-        Err(e) => eprintln!("[poly] spell error {}: {e:#}", path.display()),
+        Err(e) => say!(WARN, "spell error {}: {e:#}", path.display()),
     }
     issues.extend(unicode);
     match external_lint(&lang, path, text, &config) {
         Ok(more) => issues.extend(more),
-        Err(e) => eprintln!("[poly] external lint error {}: {e:#}", path.display()),
+        Err(e) => say!(WARN, "external lint error {}: {e:#}", path.display()),
     }
     // Same two calls `poly check` makes, so a rule silenced in poly.toml or in
     // the file itself is silent in Problems too. A suppression only one side
@@ -2534,6 +2776,48 @@ mod tests {
         assert_eq!(range.end, Position::new(2, 0));
         let range = full_range("ab\ncdé");
         assert_eq!(range.end, Position::new(1, 3));
+    }
+
+    /// A debug line names the place a request was asked about the way the
+    /// editor prints it, so it can be pasted into Go to Line: LSP counts from
+    /// zero and the status bar from one. A command has no document, so it is
+    /// named by what it runs on instead.
+    #[test]
+    fn a_request_is_logged_at_the_line_the_editor_shows() {
+        let uri = Url::from_file_path(std::env::temp_dir().join("a.go")).expect("uri");
+        let path = uri_path(&uri).display().to_string();
+        let hover = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 11, "character": 4 },
+        });
+        assert_eq!(place_of(&hover), format!(" {path}:12:5"));
+        let selection = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 3, "character": 0 } },
+        });
+        assert_eq!(place_of(&selection), format!(" {path}:1:1"));
+        let whole = serde_json::json!({ "textDocument": { "uri": uri } });
+        assert_eq!(place_of(&whole), format!(" {path}"));
+        let command = serde_json::json!({
+            "command": FORMAT_TEXT,
+            "arguments": [{ "path": "/w/Untitled-1.md", "text": "#  x" }],
+        });
+        assert_eq!(
+            place_of(&command),
+            format!(" {FORMAT_TEXT} /w/Untitled-1.md")
+        );
+    }
+
+    /// A trace line is cut, and cut on a character: a didOpen of a large file
+    /// is otherwise the whole file in the log, and slicing a UTF-8 string
+    /// mid-character panics the daemon.
+    #[test]
+    fn a_trace_line_is_cut_where_a_character_ends() {
+        let long = "字".repeat(TRACE_BYTES);
+        let cut = capped(long.clone());
+        assert!(cut.len() < long.len());
+        assert!(cut.ends_with(&format!("… ({} bytes)", long.len())));
+        assert_eq!(capped("short".to_string()), "short");
     }
 
     #[test]

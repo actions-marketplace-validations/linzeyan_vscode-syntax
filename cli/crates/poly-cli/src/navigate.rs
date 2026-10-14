@@ -368,7 +368,10 @@ mod tests {
     #[test]
     fn references_span_the_folder_and_prefer_open_buffers() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        // Not canonicalized: on Windows that is a `\\?\C:\` path, which no
+        // URL turns back into, so the open buffer and its file on disk would
+        // count as two files. The editor never sends one.
+        let root = dir.path().to_path_buf();
         std::fs::write(root.join("user.graphql"), "type User { id: ID! }\n").unwrap();
         std::fs::write(root.join("post.graphql"), "type Post { author: User }\n").unwrap();
         std::fs::write(

@@ -33,6 +33,7 @@ import { markdownItNamedHeaders } from "./markdownPdf/markdown-it-named-headers"
 import { installSanitizeRules } from "./markdownPdf/markdown-it-sanitize";
 import { renderMath } from "./markdownPdf/math-renderer";
 import * as utils from "./markdownPdf/utils";
+import { mayRun } from "./trust";
 
 const SECTION = "poly.markdownPdf";
 /** Upstream's styles, template and emoji names, with KaTeX's and highlight.js's files, as the build lays them out. */
@@ -449,6 +450,11 @@ function exportPdf(
         return;
       }
 
+      // Chrome runs whatever HTML and script the markdown carries, with this
+      // machine's files a `file://` away.
+      if (!mayRun(`${type.toUpperCase()} export`)) {
+        return;
+      }
       // create temporary file
       tmpfilename = utils.generateTmpHtmlFilename(filename);
       await fs.promises.writeFile(tmpfilename, data, "utf-8");

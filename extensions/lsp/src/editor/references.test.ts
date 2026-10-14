@@ -9,6 +9,7 @@ import {
   implLabel,
   lensTargets,
   luaDeclarations,
+  markdownHeadings,
   nameStart,
   rDeclarations,
   refLabel,
@@ -178,6 +179,28 @@ test("a Go method is asked too, though it is nobody's child", () => {
   assert.deepEqual(
     lensTargets(file, 100).map((t) => [t.symbol.name, t.implementation]),
     [["Circle", "up"], ["(Circle).Area", "up"]],
+  );
+});
+
+test("every markdown heading gets a lens, however deep, and no implementation question", () => {
+  // The built-in server's shape: headings are Strings, each level a child of
+  // the one above. Read as it comes, `### From source` is too deep and every
+  // heading the wrong kind, so not one of them was counted.
+  const STRING = 14;
+  const file = [
+    symbol("# Guide", STRING, [
+      symbol("## Install", STRING, [symbol("### From source", STRING)]),
+      symbol("## Usage", STRING),
+    ]),
+  ];
+  assert.deepEqual(
+    lensTargets(markdownHeadings(file), 100).map((t) => [t.symbol.name, t.implementation]),
+    [
+      ["# Guide", undefined],
+      ["## Install", undefined],
+      ["### From source", undefined],
+      ["## Usage", undefined],
+    ],
   );
 });
 

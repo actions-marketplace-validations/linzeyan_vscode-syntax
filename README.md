@@ -38,6 +38,9 @@
   File／Folder／Workspace／Git Repo／Git Changed Files。專案有 `.editorconfig`
   的話直接沿用，縮排與行寬不必再抄一份到 `poly.toml`。
 - **Format Selection**：只格式化選取的範圍，其餘的行原封不動。
+- **未信任的資料夾（Restricted Mode）**：照樣格式化與 lint，但只用內嵌的引擎，不執行其他程式
+  （專案內或 PATH 上的工具、下載、git、Code Runner、PlantUML、PDF／圖片匯出），也不讀資料夾
+  `.vscode/settings.json` 裡的 `poly` 設定；信任之後全部回來，不必重開視窗。
 - **Lint**：存檔即時 diagnostics 進 Problems panel；`Poly: Lint (poly check)`
   在終端跑完整 CLI。
 - **`Poly: Minify`**（`cmd+alt+m`／`ctrl+alt+m`）：把當前 buffer 壓成一行，涵蓋
@@ -48,7 +51,7 @@
 - **規則說明**：滑鼠移到 SQL 的波浪線上會顯示 sqruff 該條規則的 anti-pattern／
   best-practice 全文。sqruff 沒有文件站可連，那份說明編在 binary 裡，版本精確、
   離線可讀。其他工具有自己的規則頁，走規則代碼上的超連結。
-- **`poly.memoryLog`（預設關閉）**：每開一個檔、關一個檔，寫一行 daemon 現在握著什麼：
+- **記憶體明細**：Poly 輸出面板開到 Debug 時，每開一個檔、關一個檔，寫一行 daemon 現在握著什麼：
   常駐記憶體、幾份文件與多少位元組、lint 與整包快取、各來源留著幾筆診斷。RSS 只有一個數字，而 poly 有六個地方放東西——這一行的用處是讓漲上去的
   數字歸到某一個快取頭上。`tools/lsp-smoke.py` 的 soak 也讀它：120 輪開關之後，poly
   握著的每一項都必須跟第 1 輪一樣多（實測把 `lint_hashes` 的清除拿掉，RSS 只漂
@@ -177,8 +180,8 @@
   「補上缺的方法」，**要先有一個編不過的斷言**（Go 是 `var _ Shape = Triangle{}`），因為
   server 是對著診斷提供那條修正的。
 - **引用與實作 CodeLens**：每個宣告一行 `11 refs`；interface 多一顆 `3 impls`，具體型別有滿足
-  interface 才多一顆 `1 interface`，方法寫在型別外面的語言（Go）再多一顆 `4 methods`。
-  只有一筆就直接跳過去，多筆開檔案總管裡的 **References** 面板——那是 poly 自己的樹，每一列除了
+  interface 才多一顆 `1 interface`，方法寫在型別外面的語言（Go）再多一顆 `4 methods`；
+  Markdown 有人連結的標題也有，數的是整個 workspace 連到它的 `#錨點` 連結。只有一筆就直接跳過去，多筆開檔案總管裡的 **References** 面板——那是 poly 自己的樹，每一列除了
   原始碼還帶**行號**與
   **它落在哪個符號裡**（`method Handle`、`func main`），內建的 `references-view` 兩欄都沒有，
   而別人的樹加不了欄位。數字來自該語言已註冊的 provider，poly 只數與畫。**GraphQL 與 nginx**

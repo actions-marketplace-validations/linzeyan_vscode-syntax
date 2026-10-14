@@ -6,11 +6,13 @@ import Mocha from "mocha";
 const ONLY: Record<string, string> = {
   "code-runner-yield": "Code Runner beside formulahendry.code-runner",
   "no-git": "Git History without git",
+  restricted: "poly in Restricted Mode",
 };
 
 export function run(): Promise<void> {
   // runTest.ts launches the editor once for everything, then once per entry in
-  // ONLY: beside a stand-in for formulahendry.code-runner, and without vscode.git.
+  // ONLY: beside a stand-in for formulahendry.code-runner, without vscode.git,
+  // and on a folder it does not trust.
   const suite = process.env.POLY_E2E_SUITE;
   const mocha = new Mocha({
     ui: "tdd",

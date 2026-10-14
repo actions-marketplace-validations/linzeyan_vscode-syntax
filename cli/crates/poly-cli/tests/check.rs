@@ -282,6 +282,8 @@ fn a_proto_is_linted_without_a_buf_module() {
     .unwrap();
 
     let (code, stdout, stderr) = poly(root, &["check", "--compact", "."]);
+    // Windows prints `acme\v1\thing.proto`; the position is the point here.
+    let stdout = stdout.replace('\\', "/");
     // 1-based, as `report.rs` prints: the message name is line 3 column 9 and
     // the field name line 4 column 10, which is where buf 1.72 underlines them.
     assert!(

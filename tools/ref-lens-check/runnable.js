@@ -28,9 +28,17 @@ const { join, resolve } = require("node:path");
  * Agreed here because both processes of this check load this module -- see
  * `OUT` -- and they have to land on the same directory.
  */
+const CHECKOUT = resolve(__dirname, "..", "..");
+// Lowercased on Windows: the host loads this module by the path the editor
+// spells, `c:\`, where the runner's node said `C:\`, and both have to hash alike.
 const SCRATCH = join(
   tmpdir(),
-  `poly-ref-lens-${createHash("sha1").update(resolve(__dirname, "..", "..")).digest("hex").slice(0, 8)}`,
+  `poly-ref-lens-${
+    createHash("sha1")
+      .update(process.platform === "win32" ? CHECKOUT.toLowerCase() : CHECKOUT)
+      .digest("hex")
+      .slice(0, 8)
+  }`,
 );
 
 /**
