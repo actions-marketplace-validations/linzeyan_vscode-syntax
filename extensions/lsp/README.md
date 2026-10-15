@@ -46,6 +46,9 @@ CI 跑的是同一個 binary、同一份設定，所以本機存檔跟 pipeline 
   否則會大聲跳過。
 - **Jupyter notebook**（`.ipynb`）由內嵌的 ruff 整份處理，outputs 與 markdown cell 原樣保留。
   VSCode 的 notebook editor 不走 LSP 文字文件，所以要用批次命令或 `poly fmt`。
+- **PowerShell 與批次檔**（`.ps1`／`.psm1`／`.psd1`、`.bat`／`.cmd`）由 poly 自己的格式器處理：
+  只調整縮排、行尾空白與連續空行，行內的空格與大括號位置照你寫的。here-string、跨行字串、
+  `^` 續行原樣保留；批次檔的行尾空白不動（`set x=a ` 的空白是值的一部分）。
 - 背景檢查 GitHub Releases，有新版就自己下載安裝，只問要不要重新載入視窗。
 
 ## 語言功能

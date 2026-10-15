@@ -5,6 +5,7 @@
 
 pub mod lint;
 mod proto;
+mod reindent;
 pub mod schema;
 pub mod shell;
 pub mod symbols;
@@ -43,6 +44,8 @@ pub fn supported_language(lang: &str) -> bool {
             | "dockerfile"
             | "lua"
             | "php"
+            | "powershell"
+            | "bat"
     )
 }
 
@@ -60,6 +63,8 @@ fn honored(lang: &str) -> (bool, bool, bool) {
         // YAML indentation must be spaces, so pretty_yaml exposes no useTabs.
         "yaml" => (true, true, false),
         "dockerfile" => (true, true, false),
+        // Re-indentation only: no line is ever wrapped.
+        "powershell" | "bat" => (false, true, true),
         _ => (true, true, true),
     }
 }
@@ -127,6 +132,8 @@ pub fn format(lang: &str, path: &Path, text: &str, opts: FormatOptions) -> Resul
         "php" => format_php(path, text, opts),
         "dockerfile" => format_dockerfile(path, text, opts),
         "lua" => format_lua(text, opts),
+        "powershell" => reindent::format_powershell(text, opts),
+        "bat" => Ok(reindent::format_batch(text, opts)),
         other => Err(anyhow!("no embedded formatter for language {other:?}")),
     }
 }

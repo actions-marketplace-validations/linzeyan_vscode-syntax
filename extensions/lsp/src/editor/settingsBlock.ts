@@ -56,7 +56,6 @@ export interface Words {
   choices: (allowed: string, fallback: string) => string;
   unset: string;
   below: string;
-  unknown: string;
   sep: string;
   or: string;
   types: Record<string, string>;
@@ -85,7 +84,6 @@ export const WORDS: Record<"en" | "zh", Words> = {
     choices: (allowed, fallback) => `Allowed: ${allowed}. Default: ${fallback}.`,
     unset: "unset",
     below: "the commented-out value below",
-    unknown: "Poly does not know this key and never reads it.",
     sep: " | ",
     or: " or ",
     types: { string: "string", number: "number", integer: "integer", array: "array", object: "object" },
@@ -110,7 +108,6 @@ export const WORDS: Record<"en" | "zh", Words> = {
     choices: (allowed, fallback) => `可選：${allowed}；預設：${fallback}`,
     unset: "未設",
     below: "見下方註解掉的值",
-    unknown: "Poly 不認得這個鍵，也不會讀它。",
     sep: "｜",
     or: "或",
     types: { string: "字串", number: "數字", integer: "整數", array: "陣列", object: "物件" },
@@ -222,11 +219,10 @@ function entries(
       ...(mine !== undefined ? valueLines(name, mine, pad, "", ctx) : []),
     );
   }
-  for (const [name, value] of Object.entries(isObject(user) ? user : {})) {
-    if (!(name in props)) {
-      lines.push(...comment(ctx.words.unknown, pad), ...valueLines(name, value, pad, "", ctx));
-    }
-  }
+  // A key the schema does not have is not written back: it is one an older
+  // version had, which nothing reads any more. A misspelling goes the same way,
+  // but the schema's `additionalProperties: false` has the editor flag it
+  // while it is being typed.
   return lines;
 }
 

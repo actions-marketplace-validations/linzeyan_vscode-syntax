@@ -257,7 +257,9 @@
   hadolint 預設關閉，因為它跟 poly 的規則大部分重疊——見下面的外部工具），
   Lua（格式化 stylua、lint selene）、
   PHP（格式化與 lint 都是 mago，lint 是它 190 條規則裡的 7 條——見下面的說明）、
-  Protobuf（lint 是 poly 自己寫的規則，code 長 `poly/proto-*`；格式化仍是 buf）。
+  Protobuf（lint 是 poly 自己寫的規則，code 長 `poly/proto-*`；格式化仍是 buf）、
+  PowerShell／批次檔（`.ps1`／`.psm1`／`.psd1`、`.bat`／`.cmd`，格式化是 poly 自己寫的，
+  只重新縮排、清行尾空白與連續空行，行內照你寫的；批次檔的行尾空白不動）。
   這些都是編進 binary 的 Rust library，
   不再下載。拼字檢查（typos）也在裡面，而且不分語言——它讀的是每一個檔案，
   包含 poly 認不出語言的那些。

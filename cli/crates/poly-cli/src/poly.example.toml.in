@@ -114,6 +114,7 @@ fail-on = "hint"
 #   graphql                       80          2             false
 #   yaml                          80          2             (rejected)
 #   xml                           (rejected)  2             (rejected)
+#   powershell / bat              (rejected)  4             false
 #   sql                           (rejected)  (rejected)    (rejected)
 #
 # sql is sqruff's: it owns its layout rules, so configure it in .sqruff rather

@@ -379,6 +379,16 @@ suite("poly-lsp in a real editor", () => {
     assert.strictEqual(text, "def f(a, b):\n    return a + b\n");
   });
 
+  // Both ids are VSCode's own, and until poly re-indented them a .ps1 or a
+  // .cmd had no formatter at all.
+  test("formats PowerShell and batch files", async () => {
+    assert.strictEqual(
+      await formatted(writeFile("messy.ps1", "if ($a) {\nWrite-Host a\n}\n")),
+      "if ($a) {\n    Write-Host a\n}\n",
+    );
+    assert.strictEqual(await formatted(writeFile("messy.cmd", "if x (\necho a\n)\n")), "if x (\n    echo a\n)\n");
+  });
+
   // A buffer that was never saved is outside the client's selector, so the
   // formatter for it is the extension's own and the text travels with the
   // request. Before it, a new markdown note had no formatter at all -- the
@@ -408,6 +418,30 @@ suite("poly-lsp in a real editor", () => {
       assert.strictEqual(await formatted(document.uri), "{\n  // kept\n  \"a\": 1,\n}\n");
     } finally {
       await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+    }
+  });
+
+  // A remote window's extension host sees a local file (File > Open File >
+  // Show Local) as `vscode-local:`. This host is local, so the scheme is stood
+  // up by hand; before poly served it, Format Document on such a file said no
+  // formatter was installed.
+  test("formats a local file opened in a remote window", async () => {
+    const content = vscode.workspace.registerTextDocumentContentProvider("vscode-local", {
+      provideTextDocumentContent: () => "#  Title\n\n\n\ntext\n",
+    });
+    try {
+      const uri = vscode.Uri.from({ scheme: "vscode-local", path: "/c:/Users/me/note.md" });
+      assert.strictEqual((await vscode.workspace.openTextDocument(uri)).languageId, "markdown");
+      await eventually("a formatter for a vscode-local: file", async () => {
+        const edits = await vscode.commands.executeCommand<vscode.TextEdit[]>(
+          "vscode.executeFormatDocumentProvider",
+          uri,
+          { tabSize: 2, insertSpaces: true },
+        );
+        return edits && edits.length > 0 ? edits : undefined;
+      }, 15_000);
+    } finally {
+      content.dispose();
     }
   });
 
@@ -668,6 +702,55 @@ suite("poly-lsp in a real editor", () => {
         return said.length > 0 && !said.includes("no refs") ? said : undefined;
       });
       assert.deepStrictEqual(drawn, ["1 ref"]);
+    } finally {
+      subscriptions.forEach((one) => one.dispose());
+      await setPoly("referencesCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  // A lens click does not move the cursor, so Go Back after `1 ref` went back
+  // to wherever the cursor had been rather than to the declaration clicked.
+  // The cursor starts more than 10 lines from both ends, the distance VSCode's
+  // history needs before it tells two places in one file apart.
+  test("Go Back after a lens jump returns to the declaration whose lens was clicked", async () => {
+    const filler = Array.from({ length: 20 }, (_, i) => `# ${i}`);
+    const uri = writeFile("back.R", ["add <- function(a, b) a + b", ...filler, "add(1, 2)", ""].join("\n"));
+    const document = await vscode.workspace.openTextDocument(uri);
+    const declared = new vscode.Range(0, 0, 0, 3);
+    const use = new vscode.Range(21, 0, 21, 3);
+    await setPoly("referencesCodeLens.enabled", true, vscode.ConfigurationTarget.Workspace);
+    const subscriptions = [
+      vscode.languages.registerDocumentSymbolProvider({ language: "r" }, {
+        provideDocumentSymbols: () => [
+          new vscode.DocumentSymbol("add", "", vscode.SymbolKind.Function, new vscode.Range(0, 0, 0, 27), declared),
+        ],
+      }),
+      vscode.languages.registerReferenceProvider({ language: "r" }, {
+        provideReferences: () => [new vscode.Location(uri, declared), new vscode.Location(uri, use)],
+      }),
+    ];
+    try {
+      const editor = await vscode.window.showTextDocument(document, { selection: new vscode.Range(11, 0, 11, 0) });
+      const lens = await eventually("the 1 ref lens", async () => {
+        const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
+          "vscode.executeCodeLensProvider",
+          uri,
+          10,
+        );
+        return lenses.find((one) => one.command?.title === "1 ref")?.command;
+      });
+      await vscode.commands.executeCommand(lens.command, ...(lens.arguments ?? []));
+      await eventually(
+        "the jump to the one reference",
+        () => editor.selection.active.line === use.start.line || undefined,
+        5_000,
+      );
+      await vscode.commands.executeCommand("workbench.action.navigateBack");
+      const back = await eventually("Go Back to land", () => {
+        const line = vscode.window.activeTextEditor?.selection.active.line;
+        return line !== use.start.line ? line : undefined;
+      }, 5_000);
+      assert.strictEqual(back, declared.start.line, "Go Back returned to the old cursor, not the declaration");
     } finally {
       subscriptions.forEach((one) => one.dispose());
       await setPoly("referencesCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);

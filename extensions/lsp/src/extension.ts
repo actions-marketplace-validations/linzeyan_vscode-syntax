@@ -74,6 +74,10 @@ const LANGUAGES = [
   "jsonnet",
   // Built-in id; poly only adds the formatter (markup_fmt's Mustache parser).
   "handlebars",
+  // Built-in ids; poly's own re-indentation formats both (poly-engines'
+  // reindent.rs), since neither language has a formatter to embed.
+  "powershell",
+  "bat",
   // Neither id is poly's, and neither is guaranteed to exist -- they arrive
   // with ms-azuretools.vscode-docker and github.vscode-github-actions. Listing
   // an id nothing declares costs nothing (the selector simply never matches),
@@ -412,7 +416,11 @@ async function formatNow(self: string): Promise<void> {
 /// formatter named for a language the extension cannot serve in that scheme is
 /// not skipped but refused, so the user's settings.json had no formatter at all.
 /// Under a remote window the file is not even on the daemon's machine.
-const TEXT_ONLY = ["untitled", "vscode-userdata"];
+///
+/// Nor is a local file opened in a remote window (File > Open File > Show
+/// Local): the remote extension host sees it as `vscode-local:`, and without
+/// that scheme here Format Document said no formatter was installed.
+const TEXT_ONLY = ["untitled", "vscode-userdata", "vscode-local"];
 
 /// The daemon's edits for a `TEXT_ONLY` buffer.
 ///

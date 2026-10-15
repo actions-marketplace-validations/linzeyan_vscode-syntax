@@ -1031,7 +1031,21 @@ const ASKED: Readonly<Record<"refs" | Direction, string>> = {
  * the thing that felt broken. The quick pick also showed a name and nothing
  * else, where the tree has a line number and a file.
  */
-async function present(title: string, locations: readonly vscode.Location[]): Promise<void> {
+async function present(
+  title: string,
+  locations: readonly vscode.Location[],
+  uri?: vscode.Uri,
+  position?: vscode.Position,
+): Promise<void> {
+  // `uri` and `position` are the clicked lens's declaration. A click on a lens
+  // leaves the cursor where it was, so Go Back returned to that cursor rather
+  // than to the declaration the reader acted on. VSCode files any cursor move
+  // in the active editor under that editor's history entry (measured in 1.141's
+  // workbench), so the cursor is put there first.
+  const editor = vscode.window.activeTextEditor;
+  if (editor && uri && position && locations.length > 0 && editor.document.uri.toString() === uri.toString()) {
+    editor.selection = new vscode.Selection(position, position);
+  }
   const only = locations.length === 1 ? locations[0] : undefined;
   if (only) {
     await vscode.window.showTextDocument(only.uri, { selection: only.range });
@@ -1066,9 +1080,12 @@ async function showReferences(
   uri: vscode.Uri,
   position: vscode.Position,
   counts: "refs" | Direction,
+  // The lens's own declaration, for `present`: the rpc's lens asks elsewhere.
+  lensUri = uri,
+  lensPosition = position,
 ): Promise<void> {
   const others = await othersAt(uri, position, counts);
-  await present(ASKED[counts], others);
+  await present(ASKED[counts], others, lensUri, lensPosition);
 }
 
 /**
@@ -1702,6 +1719,8 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
               arguments: [
                 "Methods",
                 mine.map((method) => new vscode.Location(document.uri, method.selectionRange)),
+                document.uri,
+                range.start,
               ],
             }),
           );
@@ -1857,7 +1876,7 @@ function runFromGutter(context: vscode.ExtensionContext, codeRunner: CodeManager
  * generated `GreeterServer.SayHello` that gopls knows about.
  */
 class ProtoImplLens extends vscode.CodeLens {
-  constructor(readonly generated: vscode.Location, range: vscode.Range) {
+  constructor(readonly generated: vscode.Location, range: vscode.Range, readonly proto: vscode.Uri) {
     super(range);
   }
 }
@@ -1934,7 +1953,7 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
               new vscode.CodeLens(symbol.selectionRange, {
                 title: link.label,
                 command: "poly.showLocations",
-                arguments: ["Generated Go", found],
+                arguments: ["Generated Go", found, document.uri, symbol.selectionRange.start],
               }),
             ]
             : [];
@@ -1945,7 +1964,7 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
         const method = goServerMethod(symbol.name, pkg);
         const at = method ? generated.get(method)?.[0] : undefined;
         return at
-          ? [...links, new ProtoImplLens(at, symbol.selectionRange)]
+          ? [...links, new ProtoImplLens(at, symbol.selectionRange, document.uri)]
           : links;
       });
     },
@@ -1954,14 +1973,14 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
       if (token.isCancellationRequested) {
         return lens;
       }
-      const { generated } = lens as ProtoImplLens;
+      const { generated, proto } = lens as ProtoImplLens;
       // The generated interface declares the method; it does not implement it,
       // and `othersAt` subtracts it for that reason.
       const count = (await othersAt(generated.uri, generated.range.start, "down")).length;
       lens.command = {
         title: implLabel(count, "down"),
         command: count > 0 ? "poly.showReferences" : "",
-        arguments: [generated.uri, generated.range.start, "down"],
+        arguments: [generated.uri, generated.range.start, "down", proto, lens.range.start],
       };
       return lens;
     },

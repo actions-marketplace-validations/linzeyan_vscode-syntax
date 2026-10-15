@@ -85,13 +85,19 @@ test("a value set through the block is live, kept on rewrite, and unsetting it r
   );
 });
 
-// A setting an older version had, or a misspelled one: either way the user
-// wrote it, and only they can tell which.
-test("a key poly does not know is kept, not silently dropped", () => {
-  const retired = write(USER).replace("\"poly\": {", "\"poly\": {\n    \"languageServers\": true,");
-  const out = write(retired);
-  assert.equal((jsonc(out).poly as Record<string, unknown>).languageServers, true);
-  assert.ok(out.includes(WORDS.zh.unknown));
+// The block is rewritten on every activation, so that is the upgrade: a key an
+// older version had and this one dropped (memoryLog went with the daemon's log
+// levels) must not outlive it as a live line nothing reads.
+test("a key the installed version no longer has is gone after the rewrite, the keys it has are kept", () => {
+  const set = write(USER, { key: "format.enabled", value: false });
+  assert.ok(set.includes("\n    \"format\": {\n"));
+  const retired = set
+    .replace("\"poly\": {", "\"poly\": {\n    \"memoryLog\": true,")
+    .replace("\n    \"format\": {\n", "\n    \"format\": {\n      \"gone\": 1,\n");
+  assert.deepEqual(setKeys(jsonc(retired).poly), ["memoryLog", "format.gone", "format.enabled"]);
+  const poly = jsonc(write(retired)).poly as Record<string, unknown>;
+  assert.equal(poly.memoryLog, undefined);
+  assert.deepEqual(setKeys(poly), ["format.enabled"]);
 });
 
 test("uncommenting any one-line default gives valid settings that set exactly that key", () => {

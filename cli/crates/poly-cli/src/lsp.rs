@@ -3025,6 +3025,7 @@ mod tests {
             ("a.json", "{\n  \"a\": 1,\n  \"b\": ,\n}\n", (3, 8)),
             ("a.toml", "[table\nkey = \"v\"\n", (1, 7)),
             ("a.ts", "function f(a: number {\n  return a;\n}\n", (1, 22)),
+            ("a.ps1", "function f {\n  1\n", (1, 12)),
         ];
         for (name, broken, want) in cases {
             let message = poly_engines::format_file(Path::new(name), broken)

@@ -47,10 +47,10 @@
 # Default: empty. Built-in detection covers these ids, and they are the values
 # this table accepts:
 #
-#   astro, c, cpp, css, dockerfile, go, graphql, handlebars, hcl, html,
-#   jinja, json, jsonnet, jupyter, less, lua, markdown, php, protobuf,
-#   python, r, rust, scss, shellscript, sql, svelte, swift, terraform, toml,
-#   typescript, vue, xml, yaml, zsh
+#   astro, bat, c, cpp, css, dockerfile, go, graphql, handlebars, hcl, html,
+#   jinja, json, jsonnet, jupyter, less, lua, markdown, php, powershell,
+#   protobuf, python, r, rust, scss, shellscript, sql, svelte, swift,
+#   terraform, toml, typescript, vue, xml, yaml, zsh
 #
 # Mapping to an id poly has no formatter or linter for is not an error -- the
 # file is simply skipped.
@@ -118,6 +118,7 @@ fail-on = "hint"
 #   graphql                       80          2             false
 #   yaml                          80          2             (rejected)
 #   xml                           (rejected)  2             (rejected)
+#   powershell / bat              (rejected)  4             false
 #   sql                           (rejected)  (rejected)    (rejected)
 #
 # sql is sqruff's: it owns its layout rules, so configure it in .sqruff rather

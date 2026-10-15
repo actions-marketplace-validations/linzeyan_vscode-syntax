@@ -116,6 +116,13 @@ const EXTENSIONS: &[(&str, &str)] = &[
     ("hcl", "hcl"),
     ("jsonnet", "jsonnet"),
     ("libsonnet", "jsonnet"),
+    // VSCode's built-in powershell and bat extensions own both ids and these
+    // exact lists.
+    ("ps1", "powershell"),
+    ("psm1", "powershell"),
+    ("psd1", "powershell"),
+    ("bat", "bat"),
+    ("cmd", "bat"),
 ];
 
 /// Formatter knobs inherited from whatever `.editorconfig` covers `path`.
@@ -650,6 +657,8 @@ pub const ACTIONLINT_REPLACED: &[(&str, &str, &str)] = &[
 /// no inline suppression at all rather than a guess: `[lint.per-file-ignores]`
 /// still works there, and the finding continuing to appear says so.
 const COMMENT_PREFIXES: &[(&str, &[&str])] = &[
+    // `rem` in the two spellings scripts use; `::` is the label trick.
+    ("bat", &["::", "rem", "REM"]),
     ("c", &["//"]),
     ("cpp", &["//"]),
     ("dockerfile", &["#"]),
@@ -668,6 +677,7 @@ const COMMENT_PREFIXES: &[(&str, &[&str])] = &[
     ("lua", &["--"]),
     // Both spellings are PHP's own, like HCL's.
     ("php", &["//", "#"]),
+    ("powershell", &["#"]),
     ("protobuf", &["//"]),
     ("python", &["#"]),
     ("r", &["#"]),

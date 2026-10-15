@@ -63,6 +63,8 @@
     "onLanguage:r",
     "onLanguage:jsonnet",
     "onLanguage:handlebars",
+    "onLanguage:powershell",
+    "onLanguage:bat",
     "onLanguage:dockercompose",
     "onLanguage:github-actions-workflow",
     "onWebviewPanel:poly.dataPreview",
@@ -5677,6 +5679,12 @@
         "editor.defaultFormatter": "ricky.poly-lsp"
       },
       "[handlebars]": {
+        "editor.defaultFormatter": "ricky.poly-lsp"
+      },
+      "[powershell]": {
+        "editor.defaultFormatter": "ricky.poly-lsp"
+      },
+      "[bat]": {
         "editor.defaultFormatter": "ricky.poly-lsp"
       },
       "[dockercompose]": {
