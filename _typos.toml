@@ -35,3 +35,6 @@ rela = "rela"
 # highlight.js's MikroTik RouterOS theme, one of the values
 # poly.markdownPdf.highlightStyle accepts; the enum is upstream's, verbatim.
 routeros = "routeros"
+# `.mak`, one of the two extensions VS Code's built-in make language claims
+# (`navigate::is_file_of`).
+mak = "mak"

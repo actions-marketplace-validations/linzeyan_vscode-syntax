@@ -57,14 +57,6 @@ dprint-plugin-json = "0.23"
 # breaks none.
 dprint-plugin-markdown = "0.24"
 dprint-plugin-toml = "0.8"
-# The parser behind Makefile and shell navigation (`symbols`). Neither language
-# has a language server most people have installed, and both are hard to read
-# by hand: a recipe line is shell, a heredoc swallows `$X`, and `$(call f,x)`
-# nests. One library for the two grammars, both from the tree-sitter project,
-# MIT like the rest.
-tree-sitter = "0.27"
-tree-sitter-bash = "0.25"
-tree-sitter-make = "1.1"
 dprint-plugin-typescript = "0.96"
 # .editorconfig parsing. Worth a dependency rather than a hand-rolled INI
 # reader: the format's globs are their own dialect ({a,b} and {n1..n2}, which
@@ -287,6 +279,14 @@ toml = "0.8"
 # drops: where each key and value was written. A schema finding has to land on
 # a line, and this is the version `toml` 0.8 already links.
 toml_edit = "0.22"
+# The parser behind Makefile and shell navigation (`symbols`). Neither language
+# has a language server most people have installed, and both are hard to read
+# by hand: a recipe line is shell, a heredoc swallows `$X`, and `$(call f,x)`
+# nests. One library for the two grammars, both from the tree-sitter project,
+# MIT like the rest.
+tree-sitter = "0.27"
+tree-sitter-bash = "0.25"
+tree-sitter-make = "1.1"
 # The spell checker's engine: tokenizer, `Typo`, `Status`. Named directly
 # because `typos_cli` takes and returns these types and re-exports none of them.
 typos = "0.10"

@@ -113,8 +113,8 @@ function languageOf(file) {
  * reading the folder. `$NAME` and `$who` are the same-file case.
  */
 const DEFINITIONS = [
-  { file: "run.sh", line: 'greet "$who"', name: "greet", want: ["lib.sh", "greet() {"] },
-  { file: "run.sh", line: 'greet "$who"', name: "who", want: ["run.sh", "local who=$NAME"] },
+  { file: "run.sh", line: "greet \"$who\"", name: "greet", want: ["lib.sh", "greet() {"] },
+  { file: "run.sh", line: "greet \"$who\"", name: "who", want: ["run.sh", "local who=$NAME"] },
   { file: "run.sh", line: "local who=$NAME", name: "NAME", want: ["run.sh", "NAME=world"] },
   { file: "Makefile", line: "$(CC) $(CFLAGS) -o app main.c", name: "CC", want: ["common.mk", "CC ?= cc"] },
   { file: "Makefile", line: "all: build", name: "build", want: ["Makefile", "build:"] },
@@ -268,7 +268,9 @@ exports.checkNavigate = function checkNavigate(navigate) {
     }
     if (JSON.stringify(one.landed) !== JSON.stringify([one.want])) {
       problems.push(
-        `definition of ${one.name} in ${one.file} — expected ${JSON.stringify([one.want])}, got ${JSON.stringify(one.landed)}`,
+        `definition of ${one.name} in ${one.file} — expected ${JSON.stringify([one.want])}, got ${
+          JSON.stringify(one.landed)
+        }`,
       );
     }
   }
