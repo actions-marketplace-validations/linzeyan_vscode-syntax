@@ -629,6 +629,7 @@ published from.
 - stable_deref_trait 1.2.1 (MIT OR Apache-2.0) — https://github.com/storyyeller/stable_deref_trait
 - stacker 0.1.25 (MIT OR Apache-2.0) — https://github.com/rust-lang/stacker
 - static_assertions 1.1.0 (MIT OR Apache-2.0) — https://github.com/nvzqz/static-assertions-rs
+- streaming-iterator 0.1.9 (MIT OR Apache-2.0) — https://github.com/sfackler/streaming-iterator
 - string_enum 1.0.2 (Apache-2.0) — https://github.com/swc-project/swc.git
 - strip-ansi-escapes 0.2.1 (Apache-2.0/MIT) — https://github.com/luser/strip-ansi-escapes
 - strsim 0.10.0 (MIT) — https://github.com/dguo/strsim-rs
@@ -704,6 +705,10 @@ published from.
 - tracing 0.1.44 (MIT) — https://github.com/tokio-rs/tracing
 - tracing-attributes 0.1.31 (MIT) — https://github.com/tokio-rs/tracing
 - tracing-core 0.1.36 (MIT) — https://github.com/tokio-rs/tracing
+- tree-sitter 0.27.1 (MIT) — https://github.com/tree-sitter/tree-sitter
+- tree-sitter-bash 0.25.1 (MIT) — https://github.com/tree-sitter/tree-sitter-bash
+- tree-sitter-language 0.1.9 (MIT) — https://github.com/tree-sitter/tree-sitter
+- tree-sitter-make 1.1.1 (MIT) — https://github.com/tree-sitter-grammars/tree-sitter-make
 - triomphe 0.1.16 (MIT OR Apache-2.0) — https://github.com/Manishearth/triomphe
 - ty_module_resolver 0.0.12 (MIT) — https://github.com/astral-sh/ruff
 - ty_site_packages 0.0.12 (MIT) — https://github.com/astral-sh/ruff
@@ -1673,7 +1678,7 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 END OF TERMS AND CONDITIONS
 ```
 
-### annotate-snippets 0.11.5, annotate-snippets 0.12.16, anstream 1.0.0, anstyle 1.0.14, anstyle-parse 1.0.0, anstyle-query 1.1.5, anstyle-wincon 3.0.11, bytecount 0.6.9, clap 4.6.6, clap-cargo 0.18.3, clap-verbosity-flag 3.0.4, clap_builder 4.6.6, clap_complete 4.6.9, clap_derive 4.6.4, clap_lex 1.1.0, cobs 0.3.0, colorchoice 1.0.5, colorchoice-clap 1.0.8, crc32fast 1.5.1, dictgen 0.6.0, diff 0.1.13, env_filter 2.0.0, env_logger 0.10.2, env_logger 0.11.11, human-panic 2.0.8, imperative 1.0.7, is_terminal_polyfill 1.70.2, once_cell_polyfill 1.70.2, pretty_assertions 1.4.1, proc-exit 2.0.2, ruff_annotate_snippets 0.0.12, serde_regex 1.2.0, serde_spanned 0.6.9, serde_spanned 1.1.1, terminal_size 0.4.4, toml 0.7.8, toml 0.8.23, toml 0.9.12+spec-1.1.0, toml 1.1.4+spec-1.1.0, toml_datetime 0.6.11, toml_datetime 0.7.5+spec-1.1.0, toml_datetime 1.1.1+spec-1.1.0, toml_edit 0.19.15, toml_edit 0.22.27, toml_edit 0.25.13+spec-1.1.0, toml_parser 1.1.3+spec-1.1.0, toml_write 0.1.2, toml_writer 1.1.2+spec-1.1.0, typos 0.10.44, typos-cli 1.49.1, typos-dict 0.14.0, typos-vars 0.11.0, unicode-general-category 1.1.0, varcon-core 5.0.7, winapi 0.3.9, winapi-i686-pc-windows-gnu 0.4.0, winapi-x86_64-pc-windows-gnu 0.4.0
+### annotate-snippets 0.11.5, annotate-snippets 0.12.16, anstream 1.0.0, anstyle 1.0.14, anstyle-parse 1.0.0, anstyle-query 1.1.5, anstyle-wincon 3.0.11, bytecount 0.6.9, clap 4.6.6, clap-cargo 0.18.3, clap-verbosity-flag 3.0.4, clap_builder 4.6.6, clap_complete 4.6.9, clap_derive 4.6.4, clap_lex 1.1.0, cobs 0.3.0, colorchoice 1.0.5, colorchoice-clap 1.0.8, crc32fast 1.5.1, dictgen 0.6.0, diff 0.1.13, env_filter 2.0.0, env_logger 0.10.2, env_logger 0.11.11, human-panic 2.0.8, imperative 1.0.7, is_terminal_polyfill 1.70.2, once_cell_polyfill 1.70.2, pretty_assertions 1.4.1, proc-exit 2.0.2, ruff_annotate_snippets 0.0.12, serde_regex 1.2.0, serde_spanned 0.6.9, serde_spanned 1.1.1, streaming-iterator 0.1.9, terminal_size 0.4.4, toml 0.7.8, toml 0.8.23, toml 0.9.12+spec-1.1.0, toml 1.1.4+spec-1.1.0, toml_datetime 0.6.11, toml_datetime 0.7.5+spec-1.1.0, toml_datetime 1.1.1+spec-1.1.0, toml_edit 0.19.15, toml_edit 0.22.27, toml_edit 0.25.13+spec-1.1.0, toml_parser 1.1.3+spec-1.1.0, toml_write 0.1.2, toml_writer 1.1.2+spec-1.1.0, typos 0.10.44, typos-cli 1.49.1, typos-dict 0.14.0, typos-vars 0.11.0, unicode-general-category 1.1.0, varcon-core 5.0.7, winapi 0.3.9, winapi-i686-pc-windows-gnu 0.4.0, winapi-x86_64-pc-windows-gnu 0.4.0
 
 From https://github.com/crate-ci/typos/blob/634a0fddd0a8c2057e54c4f4b251eb3b8d6f1df3/LICENSE-APACHE
 From https://github.com/retep998/winapi-rs/blob/5b1829956ef645f3c2f8236ba18bb198ca4c2468/LICENSE-APACHE
@@ -17652,6 +17657,30 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### streaming-iterator 0.1.9
+
+```text
+Copyright (c) 2016 Steven Fackler
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### strip-ansi-escapes 0.2.1
 
 ```text
@@ -18280,6 +18309,86 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+### tree-sitter 0.27.1, tree-sitter-language 0.1.9
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2018 Max Brunsfeld
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### tree-sitter-bash 0.25.1
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2017 Max Brunsfeld
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### tree-sitter-make 1.1.1
+
+From https://github.com/tree-sitter-grammars/tree-sitter-make/blob/5e9e8f8ff3387b0edcaa90f46ddf3629f4cfeb1d/LICENSE
+
+```text
+MIT License
+
+Copyright (c) 2021 Alexandre A. Muller
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### triomphe 0.1.16

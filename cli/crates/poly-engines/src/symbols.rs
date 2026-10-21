@@ -1,19 +1,25 @@
-//! poly's own outline and references, for the two languages no language server
-//! answers them for.
+//! poly's own outline, references and definitions, for the languages no
+//! language server most people have answers them for.
 //!
 //! Everywhere else poly counts answers somebody else produced: the reference
 //! lens asks the editor, and the editor asks whichever language server the
 //! user installed for the language. GraphQL and nginx are the exception, taken on
 //! purpose on 2026-10-05: graphql-language-service-server never implemented
 //! `textDocument/references` and answers nothing at all without a
-//! graphql-config, and no nginx server answers references.
+//! graphql-config, and no nginx server answers references. Makefiles and shell
+//! scripts joined on 2026-10-21, asked for by name: the editor's own support for
+//! both is a grammar and nothing else, so Go to Definition on `$(CC)` or on a
+//! shell function said "no definition found".
 //!
 //! What is here is the cheap half of a language server and deliberately no
 //! more: names and where they are written. No types, no scopes, no resolution
 //! -- a mention is a namespace and a spelling, and two mentions are the same
 //! thing when both agree. That is exact for GraphQL, whose type, fragment and
 //! directive names are global by the spec, and as close as nginx gets: its
-//! variables, upstreams and zones are global to the configuration too.
+//! variables, upstreams and zones are global to the configuration too. make's
+//! targets and variables are global to the make run. Shell is the one that has
+//! scopes -- `local` -- and the definition lookup in poly-cli makes up for it
+//! with position rather than with a resolver.
 
 use std::ops::Range;
 
@@ -57,15 +63,20 @@ pub struct Mention {
     pub declares: bool,
 }
 
-/// Does poly answer outline and references for `lang` itself?
+/// Does poly read the names of `lang` itself?
+///
+/// Which questions it then answers about them is poly-cli's registration, not
+/// this: shell has mentions but no outline, because only its definitions were
+/// asked for.
 pub fn applies(lang: &str) -> bool {
-    matches!(lang, "graphql" | "nginx")
+    matches!(lang, "graphql" | "nginx" | "makefile" | "shellscript")
 }
 
 pub fn symbols(lang: &str, text: &str) -> Vec<Symbol> {
     match lang {
         "graphql" => graphql::symbols(text),
         "nginx" => nginx::scan(text).0,
+        "makefile" => make::scan(text).0,
         _ => Vec::new(),
     }
 }
@@ -74,6 +85,8 @@ pub fn mentions(lang: &str, text: &str) -> Vec<Mention> {
     match lang {
         "graphql" => graphql::mentions(text),
         "nginx" => nginx::scan(text).1,
+        "makefile" => make::scan(text).1,
+        "shellscript" => shell::mentions(text),
         _ => Vec::new(),
     }
 }
@@ -532,6 +545,302 @@ mod nginx {
     }
 }
 
+/// The tree-sitter half Makefiles and shell share.
+mod tree {
+    use tree_sitter::{Language, Node, Tree};
+
+    pub(super) fn parse(language: Language, text: &str) -> Option<Tree> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).ok()?;
+        parser.parse(text, None)
+    }
+
+    /// Every node, in document order. A cursor rather than recursion: a
+    /// generated script can nest deeper than a thread's stack.
+    pub(super) fn each(tree: &Tree, mut visit: impl FnMut(Node)) {
+        let mut cursor = tree.walk();
+        loop {
+            visit(cursor.node());
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The one named child, when it is a plain `word`: `$(CC)` names CC, while
+    /// `$($(X)_FLAGS)` names something only make knows once it runs.
+    pub(super) fn only_word(node: Node) -> Option<Node> {
+        let child = node.named_child(0)?;
+        (node.named_child_count() == 1 && child.kind() == "word").then_some(child)
+    }
+
+    pub(super) fn has_child(node: Node, kind: &str) -> bool {
+        let mut cursor = node.walk();
+        let found = node.children(&mut cursor).any(|child| child.kind() == kind);
+        found
+    }
+
+    /// A node's span without the newline tree-sitter counts as part of a
+    /// statement, so an outline entry ends on its own last line.
+    pub(super) fn span(node: Node, text: &str) -> std::ops::Range<usize> {
+        let range = node.byte_range();
+        range.start..range.start + text[range.clone()].trim_end().len()
+    }
+}
+
+mod make {
+    use super::{tree, Kind, Mention, Range, Symbol};
+    use std::collections::HashSet;
+    use tree_sitter::Node;
+
+    /// `.PHONY`, `.DEFAULT`, `.ONESHELL`: an instruction to make, not a target
+    /// anyone builds.
+    fn special(name: &str) -> bool {
+        name.strip_prefix('.').is_some_and(|rest| {
+            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+        })
+    }
+
+    /// The variable a function takes by name rather than by `$()`:
+    /// `$(call greet,x)`, `$(value greet)`, `$(origin CC)`, `$(flavor CC)`.
+    fn named_argument(node: Node, text: &str) -> Option<Range<usize>> {
+        let function = node.child_by_field_name("function")?;
+        if !matches!(function.kind(), "call" | "value" | "origin" | "flavor") {
+            return None;
+        }
+        let mut cursor = node.walk();
+        let arguments = node
+            .children(&mut cursor)
+            .find(|child| child.kind() == "arguments")?;
+        let raw = &text[arguments.byte_range()];
+        let start = arguments.start_byte() + (raw.len() - raw.trim_start().len());
+        let rest = &text[start..arguments.end_byte()];
+        let len = rest.find([',', ' ', '\t', '\n']).unwrap_or(rest.len());
+        (len > 0 && !rest[..len].contains('$')).then_some(start..start + len)
+    }
+
+    /// The outline and every mention.
+    ///
+    /// Two namespaces, as make has them: a target and a variable may share a
+    /// spelling (`test: ; $(test)`) without being each other. A declaration is
+    /// a rule's target or an assignment; `+=` is not one, because it appends to
+    /// a variable somebody else declared -- often the environment or an
+    /// included file -- and counting it would put a second lens on every
+    /// `CFLAGS += -Wall`. Patterns (`%.o`) and special targets are left out:
+    /// nothing names them.
+    ///
+    /// The outline lists the first declaration of each name. A target with two
+    /// rules, or a variable assigned in both branches of an `ifeq`, is one
+    /// name, and two entries would be two lenses showing the same count.
+    pub(super) fn scan(text: &str) -> (Vec<Symbol>, Vec<Mention>) {
+        let mut symbols = Vec::new();
+        let mut mentions = Vec::new();
+        let Some(tree) = tree::parse(tree_sitter_make::LANGUAGE.into(), text) else {
+            return (symbols, mentions);
+        };
+        let mut listed = HashSet::new();
+        let mut push = |space: &'static str, at: Range<usize>, declared: Option<(Kind, Node)>| {
+            let name = text[at.clone()].to_string();
+            if let Some((kind, node)) = declared {
+                if listed.insert((space, name.clone())) {
+                    symbols.push(Symbol {
+                        name: name.clone(),
+                        kind,
+                        range: tree::span(node, text),
+                        selection: at.clone(),
+                        children: Vec::new(),
+                    });
+                }
+            }
+            mentions.push(Mention {
+                space,
+                name,
+                at,
+                declares: declared.is_some(),
+            });
+        };
+        tree::each(&tree, |node| match node.kind() {
+            "rule" => {
+                let mut cursor = node.walk();
+                for part in node.children(&mut cursor) {
+                    let declares = match part.kind() {
+                        "targets" => true,
+                        "prerequisites" => false,
+                        _ => continue,
+                    };
+                    // Direct words only: `build/$(NAME).o` is a concatenation,
+                    // a file name make computes rather than one anyone types.
+                    let mut words = part.walk();
+                    for word in part.children(&mut words).filter(|w| w.kind() == "word") {
+                        let name = &text[word.byte_range()];
+                        if name.contains('%') || special(name) {
+                            continue;
+                        }
+                        push(
+                            "target",
+                            word.byte_range(),
+                            declares.then_some((Kind::Function, node)),
+                        );
+                    }
+                }
+            }
+            "variable_assignment" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    let appends = node
+                        .child_by_field_name("operator")
+                        .is_some_and(|operator| operator.kind() == "+=");
+                    push(
+                        "variable",
+                        name.byte_range(),
+                        (!appends).then_some((Kind::Variable, node)),
+                    );
+                }
+            }
+            "define_directive" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    push("variable", name.byte_range(), Some((Kind::Function, node)));
+                }
+            }
+            "variable_reference" => {
+                if let Some(word) = tree::only_word(node) {
+                    push("variable", word.byte_range(), None);
+                }
+            }
+            "substitution_reference" => {
+                if let Some(word) = node
+                    .child_by_field_name("text")
+                    .filter(|w| w.kind() == "word")
+                {
+                    push("variable", word.byte_range(), None);
+                }
+            }
+            "ifdef_directive" | "ifndef_directive" => {
+                if let Some(word) = node
+                    .child_by_field_name("variable")
+                    .filter(|w| w.kind() == "word")
+                {
+                    push("variable", word.byte_range(), None);
+                }
+            }
+            "function_call" => {
+                if let Some(at) = named_argument(node, text) {
+                    push("variable", at, None);
+                }
+            }
+            _ => {}
+        });
+        (symbols, mentions)
+    }
+}
+
+mod shell {
+    use super::{tree, Mention};
+    use tree_sitter::Node;
+
+    fn identifier(word: &str) -> bool {
+        let mut bytes = word.bytes();
+        bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+
+    /// Is this `$name`'s `name` where the variable is given a value?
+    ///
+    /// `x=1`, `local x`, `export X`, `for x in`. `x+=1` is not: it appends to
+    /// an `x` that is already somewhere, which is where Go to Definition
+    /// should land.
+    fn declares(node: Node) -> bool {
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        match parent.kind() {
+            "variable_assignment" => {
+                parent.child_by_field_name("name") == Some(node) && !tree::has_child(parent, "+=")
+            }
+            "declaration_command" => true,
+            "for_statement" | "select_statement" => {
+                parent.child_by_field_name("variable") == Some(node)
+            }
+            _ => false,
+        }
+    }
+
+    /// The variables a builtin assigns by name, as plain words:
+    /// `read -r line rest`, `mapfile -t lines`, `getopts "ab:" opt`,
+    /// `printf -v out`.
+    fn assigned<'t>(command: &str, arguments: &[Node<'t>], text: &str) -> Vec<Node<'t>> {
+        let word = |node: &Node| node.kind() == "word" && identifier(&text[node.byte_range()]);
+        match command {
+            "read" | "mapfile" | "readarray" => arguments.iter().copied().filter(word).collect(),
+            "getopts" => arguments.get(1).copied().filter(word).into_iter().collect(),
+            "printf" => arguments
+                .windows(2)
+                .filter(|pair| &text[pair[0].byte_range()] == "-v")
+                .map(|pair| pair[1])
+                .filter(word)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Functions and variables, each where it is written.
+    ///
+    /// Every command is a mention of the function it might be: `ls` and `echo`
+    /// are mentions of functions nobody declared, which costs nothing, and
+    /// telling them apart from the script's own functions is exactly the
+    /// resolution this file does not do.
+    pub(super) fn mentions(text: &str) -> Vec<Mention> {
+        let mut found = Vec::new();
+        let Some(tree) = tree::parse(tree_sitter_bash::LANGUAGE.into(), text) else {
+            return found;
+        };
+        let mut push = |space: &'static str, node: Node, declares: bool| {
+            found.push(Mention {
+                space,
+                name: text[node.byte_range()].to_string(),
+                at: node.byte_range(),
+                declares,
+            });
+        };
+        tree::each(&tree, |node| match node.kind() {
+            "function_definition" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    push("function", name, true);
+                }
+            }
+            "command_name" => {
+                if let Some(word) = tree::only_word(node) {
+                    push("function", word, false);
+                }
+            }
+            "variable_name" => push("variable", node, declares(node)),
+            "command" => {
+                let Some(name) = node.child_by_field_name("name") else {
+                    return;
+                };
+                let mut cursor = node.walk();
+                let arguments: Vec<Node> = node
+                    .children_by_field_name("argument", &mut cursor)
+                    .collect();
+                for variable in assigned(&text[name.byte_range()], &arguments, text) {
+                    push("variable", variable, true);
+                }
+            }
+            _ => {}
+        });
+        found
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,6 +1040,145 @@ server {
                     && symbol.selection.end <= symbol.range.end
             );
         }
+    }
+
+    const MAKEFILE: &str = "CC ?= gcc
+OBJS := a.o b.o
+CFLAGS += -Wall
+define greet
+echo $(1)
+endef
+.PHONY: all clean
+all: build $(OBJS)
+\t$(CC) $(CFLAGS) -o $@ $^
+\t$(call greet,hi)
+build: ; echo ${CC} $$HOME
+%.o: %.c
+\t$(CC) -c $<
+clean:
+\trm -f $(OBJS:.o=.d)
+ifdef CC
+CC = clang
+endif
+";
+
+    /// Targets and variables are two namespaces, each declared where make
+    /// gives it a value and used wherever make reads it -- `.PHONY`'s list
+    /// included, `$$HOME` (the shell's) and the `%.o` pattern not.
+    #[test]
+    fn make_targets_and_variables_are_found_where_they_are_written() {
+        let found = mentions("makefile", MAKEFILE);
+        assert_eq!(
+            named(MAKEFILE, &found, "target", "all"),
+            vec![("all", false), ("all", true)]
+        );
+        assert_eq!(
+            named(MAKEFILE, &found, "target", "build"),
+            vec![("build", false), ("build", true)]
+        );
+        assert_eq!(
+            named(MAKEFILE, &found, "variable", "CC"),
+            vec![
+                ("CC", true),
+                ("CC", false),
+                ("CC", false),
+                ("CC", false),
+                ("CC", false),
+                ("CC", true)
+            ]
+        );
+        // Appending is a use: the declaration is somebody else's.
+        assert_eq!(
+            named(MAKEFILE, &found, "variable", "CFLAGS"),
+            vec![("CFLAGS", false), ("CFLAGS", false)]
+        );
+        // `$(call greet,...)` names the macro bare.
+        assert_eq!(
+            named(MAKEFILE, &found, "variable", "greet"),
+            vec![("greet", true), ("greet", false)]
+        );
+        // `$(OBJS:.o=.d)` is a reference too.
+        assert_eq!(
+            named(MAKEFILE, &found, "variable", "OBJS"),
+            vec![("OBJS", true), ("OBJS", false), ("OBJS", false)]
+        );
+        assert!(found
+            .iter()
+            .all(|m| !m.name.contains('%') && m.name != ".PHONY" && m.name != "HOME"));
+    }
+
+    #[test]
+    fn a_make_outline_lists_each_name_once() {
+        let outline = symbols("makefile", MAKEFILE);
+        let listed: Vec<(&str, Kind)> = outline.iter().map(|s| (s.name.as_str(), s.kind)).collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("CC", Kind::Variable),
+                ("OBJS", Kind::Variable),
+                ("greet", Kind::Function),
+                ("all", Kind::Function),
+                ("build", Kind::Function),
+                ("clean", Kind::Function),
+            ]
+        );
+        // A rule's range is its recipe too, and stops before the next line.
+        let all = &outline[3];
+        assert_eq!(
+            &MAKEFILE[all.range.clone()],
+            "all: build $(OBJS)\n\t$(CC) $(CFLAGS) -o $@ $^\n\t$(call greet,hi)"
+        );
+        for symbol in &outline {
+            assert!(
+                symbol.range.start <= symbol.selection.start
+                    && symbol.selection.end <= symbol.range.end
+            );
+        }
+    }
+
+    const SCRIPT: &str = r#"NAME=world
+greet() { local who=$1; echo "hi $who ${NAME}"; }
+function main {
+  read -r line
+  for f in *.txt; do greet "$f"; done
+  NAME+=!
+  while getopts "a:" opt; do echo "$opt"; done
+  cat <<EOF
+$line
+EOF
+  echo '$NAME'
+}
+main "$@"
+"#;
+
+    /// Functions are declared by their definition and used as a command;
+    /// variables are declared wherever the shell assigns one by name --
+    /// `local`, `for`, `read`, `getopts` -- and a single-quoted `$NAME` is
+    /// text, not a use.
+    #[test]
+    fn shell_functions_and_variables_are_found_where_they_are_written() {
+        let found = mentions("shellscript", SCRIPT);
+        assert_eq!(
+            named(SCRIPT, &found, "function", "greet"),
+            vec![("greet", true), ("greet", false)]
+        );
+        assert_eq!(
+            named(SCRIPT, &found, "function", "main"),
+            vec![("main", true), ("main", false)]
+        );
+        assert_eq!(
+            named(SCRIPT, &found, "variable", "NAME"),
+            vec![("NAME", true), ("NAME", false), ("NAME", false)]
+        );
+        for variable in ["who", "line", "f", "opt"] {
+            assert_eq!(
+                named(SCRIPT, &found, "variable", variable),
+                vec![(variable, true), (variable, false)],
+                "{variable}"
+            );
+        }
+        // Shell answers definitions only; it has no outline to give.
+        assert!(symbols("shellscript", SCRIPT).is_empty());
     }
 
     #[test]

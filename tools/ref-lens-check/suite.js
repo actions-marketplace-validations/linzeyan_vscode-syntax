@@ -235,7 +235,7 @@ exports.run = async function run() {
 
   // The .proto half, whole in its own module: it brings its own servers.
   const proto = await observeProto();
-  // And GraphQL and nginx, whose providers are poly's daemon.
+  // And GraphQL, nginx, Makefile and shell, whose providers are poly's daemon.
   const navigate = await observeNavigate(lensesFor);
   const markdown = await observeMarkdown(lensesFor);
 

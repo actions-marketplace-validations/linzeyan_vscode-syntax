@@ -1,7 +1,7 @@
-//! Outline and references for the languages poly answers itself.
+//! Outline, references and definitions for the languages poly answers itself.
 //!
-//! The editor half of `poly_engines::symbols`, which says why these two
-//! languages and why nothing more. This is the plumbing: which documents and
+//! The editor half of `poly_engines::symbols`, which says why these languages
+//! and why nothing more. This is the plumbing: which documents and
 //! which files on disk, and byte offsets turned into the editor's positions.
 
 use std::collections::{HashMap, HashSet};
@@ -21,21 +21,30 @@ use poly_engines::symbols::{self, Kind, Mention, Symbol};
 /// next five; a file watcher if that ever shows.
 const WALK_REUSE: Duration = Duration::from_secs(5);
 
+/// The languages poly reads names out of, whichever of the questions below
+/// it answers for each.
+pub const LANGUAGES: &[&str] = &["graphql", "nginx", "makefile", "shellscript"];
+
 /// The registrations that make the editor ask poly, sent once per session.
 ///
-/// Dynamic and scoped to the two languages, never a static capability: a
-/// static `referencesProvider` covers every language in the client's selector,
-/// and an empty answer is still an answer -- the reference lens would then
-/// draw `no refs` over YAML and CSS, which it leaves alone precisely because
-/// nothing answers for them.
+/// Dynamic and scoped by language, never a static capability: a static
+/// `referencesProvider` covers every language in the client's selector, and an
+/// empty answer is still an answer -- the reference lens would then draw
+/// `no refs` over YAML and CSS, which it leaves alone precisely because nothing
+/// answers for them.
 ///
-/// nginx's text is synchronised here as well. It is not in the client's
-/// selector because poly does not format it, and joining that selector would
-/// make poly nginx's formatter -- one that never changes anything, in place of
-/// the editor saying there is none. Registering the sync instead brings the
-/// buffer, unsaved edits included, with no formatter attached. The save is
-/// part of it so the spelling lint `poly check` already runs over nginx files
-/// is refreshed rather than left stale.
+/// Definitions are Makefile and shell only, the two that were asked for. Shell
+/// gets nothing else: it has no outline here, so a reference lens would have no
+/// declarations to stand on.
+///
+/// nginx's and Makefile's text is synchronised here as well. Neither is in the
+/// client's selector because poly formats neither, and joining that selector
+/// would make poly their formatter -- one that never changes anything, in
+/// place of the editor saying there is none. Registering the sync instead
+/// brings the buffer, unsaved edits included, with no formatter attached. The
+/// save is part of it so the spelling lint `poly check` already runs over those
+/// files is refreshed rather than left stale. Shell needs none of it: poly
+/// formats shell, so its text already arrives.
 pub fn registrations() -> serde_json::Value {
     let selector = |languages: &[&str]| -> Vec<serde_json::Value> {
         languages
@@ -43,51 +52,72 @@ pub fn registrations() -> serde_json::Value {
             .map(|language| serde_json::json!({"language": language, "scheme": "file"}))
             .collect()
     };
-    let both = selector(&["graphql", "nginx"]);
-    let nginx = selector(&["nginx"]);
+    let outlined = selector(&["graphql", "nginx", "makefile"]);
+    let defined = selector(&["makefile", "shellscript"]);
+    let synced = selector(&["nginx", "makefile"]);
     serde_json::json!([
         {
             "id": "poly:navigate:documentSymbol",
             "method": "textDocument/documentSymbol",
-            "registerOptions": {"documentSelector": both},
+            "registerOptions": {"documentSelector": outlined},
         },
         {
             "id": "poly:navigate:references",
             "method": "textDocument/references",
-            "registerOptions": {"documentSelector": both},
+            "registerOptions": {"documentSelector": outlined},
+        },
+        {
+            "id": "poly:navigate:definition",
+            "method": "textDocument/definition",
+            "registerOptions": {"documentSelector": defined},
         },
         {
             "id": "poly:navigate:didOpen",
             "method": "textDocument/didOpen",
-            "registerOptions": {"documentSelector": nginx},
+            "registerOptions": {"documentSelector": synced},
         },
         {
             "id": "poly:navigate:didChange",
             "method": "textDocument/didChange",
-            "registerOptions": {"documentSelector": nginx, "syncKind": 1},
+            "registerOptions": {"documentSelector": synced, "syncKind": 1},
         },
         {
             "id": "poly:navigate:didSave",
             "method": "textDocument/didSave",
-            "registerOptions": {"documentSelector": nginx, "includeText": false},
+            "registerOptions": {"documentSelector": synced, "includeText": false},
         },
         {
             "id": "poly:navigate:didClose",
             "method": "textDocument/didClose",
-            "registerOptions": {"documentSelector": nginx},
+            "registerOptions": {"documentSelector": synced},
         },
     ])
 }
 
 /// Does the editor give `path` this language id?
 ///
-/// The rules poly-syntax-highlight's manifest declares, which is where the
-/// editor gets them; `the_file_rules_are_the_manifests` holds the two together.
-/// A file outside them is invisible here even if it is nginx, because it is
-/// not nginx to the editor either and would never ask.
+/// For GraphQL and nginx, the rules poly-syntax-highlight's manifest declares,
+/// which is where the editor gets them; `the_file_rules_are_the_manifests`
+/// holds the two together. A file outside them is invisible here even if it is
+/// nginx, because it is not nginx to the editor either and would never ask.
+///
+/// Makefile and shell are the editor's own languages, so their rules are VS
+/// Code's built-in `make` and `shellscript` manifests, which no test here can
+/// read. Shell's is the part of that list that is the Bourne family, by
+/// extension: a rc file or a `#!` script with no extension is still answered
+/// when it is the open one, it is only not searched for a library's function.
 pub fn is_file_of(language: &str, path: &Path) -> bool {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     match language {
+        "makefile" => {
+            matches!(extension, "mak" | "mk")
+                || matches!(
+                    name,
+                    "Makefile" | "makefile" | "GNUmakefile" | "OCamlMakefile"
+                )
+        }
+        "shellscript" => matches!(extension, "sh" | "bash" | "zsh" | "ksh" | "bats"),
         "graphql" => matches!(extension, "graphql" | "gql" | "graphqls"),
         // `**/nginx/*.conf` and `**/nginx/**/*.conf`: any folder named nginx
         // above it.
@@ -228,11 +258,63 @@ impl Index {
         wanted: (&str, &str),
         include_declaration: bool,
     ) -> Vec<Location> {
-        let matches = |mention: &Mention| {
+        self.find(language, root, open, |mention| {
             mention.space == wanted.0
                 && mention.name == wanted.1
                 && (include_declaration || !mention.declares)
+        })
+    }
+
+    /// Where the name at `at` in `text` -- the document `uri` -- is declared.
+    ///
+    /// The document's own declaration first, and of several the nearest one
+    /// above the cursor: for shell that is the `local x` of the function the
+    /// cursor is in rather than of another one, which is as much scope as a
+    /// name match can get. One below is taken when none is above -- a function
+    /// called before the line that defines it, a variable a recipe reads that
+    /// is assigned further down. Only a name the document never declares is
+    /// looked for in the rest of the folder, and there every declaration is an
+    /// answer: a sourced library, an included `.mk`.
+    pub fn definition(
+        &mut self,
+        language: &str,
+        root: &Path,
+        open: &[(Url, &str)],
+        (uri, text): (&Url, &str),
+        at: Position,
+    ) -> Vec<Location> {
+        let lines = Lines::new(text);
+        let offset = lines.offset(at);
+        let mentions = symbols::mentions(language, text);
+        let Some(wanted) = mentions
+            .iter()
+            .find(|mention| mention.at.start <= offset && offset <= mention.at.end)
+        else {
+            return Vec::new();
         };
+        let declared = || {
+            mentions.iter().filter(|mention| {
+                mention.declares && mention.space == wanted.space && mention.name == wanted.name
+            })
+        };
+        let nearest = declared()
+            .rfind(|mention| mention.at.start <= wanted.at.start)
+            .or_else(|| declared().next());
+        if let Some(declaration) = nearest {
+            return vec![Location::new(uri.clone(), lines.range(&declaration.at))];
+        }
+        self.find(language, root, open, |mention| {
+            mention.declares && mention.space == wanted.space && mention.name == wanted.name
+        })
+    }
+
+    fn find(
+        &mut self,
+        language: &str,
+        root: &Path,
+        open: &[(Url, &str)],
+        matches: impl Fn(&Mention) -> bool,
+    ) -> Vec<Location> {
         let mut found = Vec::new();
         let mut covered = HashSet::new();
         for (uri, text) in open {
@@ -438,22 +520,127 @@ mod tests {
         assert_eq!(mention_at("nginx", text, Position::new(1, 2)), None);
     }
 
-    /// Nothing outside the two languages is told poly answers for it.
+    /// Each question is registered for exactly the languages poly answers it
+    /// for: a language named where poly has no answer gets an empty one, which
+    /// the reference lens draws as `no refs` and Go to Definition as "no
+    /// definition found" over whatever the user's own server would have said.
     #[test]
-    fn the_registrations_name_only_graphql_and_nginx() {
+    fn each_registration_names_only_the_languages_answered() {
         let registrations = registrations();
-        let mut languages = HashSet::new();
+        let languages = |method: &str| -> HashSet<String> {
+            registrations
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == method)
+                .flat_map(|r| r["registerOptions"]["documentSelector"].as_array().unwrap())
+                .map(|selector| selector["language"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let set = |names: &[&str]| -> HashSet<String> {
+            names.iter().map(|name| name.to_string()).collect()
+        };
+        for method in ["textDocument/documentSymbol", "textDocument/references"] {
+            assert_eq!(languages(method), set(&["graphql", "nginx", "makefile"]));
+        }
+        assert_eq!(
+            languages("textDocument/definition"),
+            set(&["makefile", "shellscript"])
+        );
+        // Shell is in the client's selector already; the two that are not
+        // need their text sent.
+        for method in [
+            "textDocument/didOpen",
+            "textDocument/didChange",
+            "textDocument/didSave",
+            "textDocument/didClose",
+        ] {
+            assert_eq!(languages(method), set(&["nginx", "makefile"]));
+        }
         for registration in registrations.as_array().unwrap() {
             for selector in registration["registerOptions"]["documentSelector"]
                 .as_array()
                 .unwrap()
             {
-                languages.insert(selector["language"].as_str().unwrap().to_string());
+                let language = selector["language"].as_str().unwrap();
+                assert!(LANGUAGES.contains(&language), "{language}");
+                assert!(symbols::applies(language), "{language}");
             }
         }
+    }
+
+    /// VS Code's own rules for its built-in `make` and `shellscript`, as far as
+    /// a folder walk uses them.
+    #[test]
+    fn makefiles_and_scripts_are_the_editors() {
+        for path in [
+            "/w/Makefile",
+            "/w/sub/GNUmakefile",
+            "/w/rules.mk",
+            "/w/x.mak",
+        ] {
+            assert!(is_file_of("makefile", Path::new(path)), "{path}");
+        }
+        assert!(!is_file_of("makefile", Path::new("/w/Makefile.am")));
+        for path in ["/w/lib.sh", "/w/run.bash", "/w/t.bats", "/w/p.zsh"] {
+            assert!(is_file_of("shellscript", Path::new(path)), "{path}");
+        }
+        assert!(!is_file_of("shellscript", Path::new("/w/conf.fish")));
+    }
+
+    /// Go to Definition lands on the document's own declaration nearest above
+    /// the cursor -- the `local` of the function it is in, not another's --
+    /// and on one below only when there is none above. A name the document
+    /// never declares is found in the folder: the `.mk` an include brings in.
+    #[test]
+    fn a_definition_is_the_nearest_declaration_then_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let script =
+            "a() { local x=1; echo $x; }\nb() { local x=2; echo $x; later; }\nlater() { :; }\n";
+        let uri = Url::from_file_path(root.join("run.sh")).unwrap();
+        let mut index = Index::default();
+        let mut at = |language: &str, (uri, text): (&Url, &str), line: u32, character: u32| {
+            index
+                .definition(
+                    language,
+                    &root,
+                    &[(uri.clone(), text)],
+                    (uri, text),
+                    Position::new(line, character),
+                )
+                .iter()
+                .map(|l| {
+                    let file = l
+                        .uri
+                        .path_segments()
+                        .unwrap()
+                        .next_back()
+                        .unwrap()
+                        .to_string();
+                    (file, l.range.start.line, l.range.start.character)
+                })
+                .collect::<Vec<_>>()
+        };
+        // `$x` in b() is b's own `local x`.
         assert_eq!(
-            languages,
-            HashSet::from(["graphql".to_string(), "nginx".to_string()])
+            at("shellscript", (&uri, script), 1, 23),
+            vec![("run.sh".into(), 1, 12)]
+        );
+        // `later` is called a line before it is defined.
+        assert_eq!(
+            at("shellscript", (&uri, script), 1, 27),
+            vec![("run.sh".into(), 2, 0)]
+        );
+        // Not on a name.
+        assert!(at("shellscript", (&uri, script), 0, 3).is_empty());
+
+        std::fs::write(root.join("common.mk"), "CC ?= cc\n").unwrap();
+        let makefile = "include common.mk\nall:\n\t$(CC) -o x\n";
+        let make_uri = Url::from_file_path(root.join("Makefile")).unwrap();
+        assert_eq!(
+            at("makefile", (&make_uri, makefile), 2, 4),
+            vec![("common.mk".into(), 0, 0)]
         );
     }
 }

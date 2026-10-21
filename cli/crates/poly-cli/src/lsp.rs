@@ -397,16 +397,17 @@ fn serve(connection: Connection) -> Result<()> {
         // name suggests.
         document_range_formatting_provider: Some(OneOf::Left(true)),
         // Rule documentation for a finding already on screen -- not a language
-        // feature. A6 rules out completion, go-to-definition and the rest, all
-        // of which mean understanding the code; this only reads out what the
+        // feature. A6 rules out completion, go-to-definition (bar the Makefile
+        // and shell names `crate::navigate` matches) and the rest, all of which
+        // mean understanding the code; this only reads out what the
         // linter that produced the squiggle has to say about its own rule.
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         execute_command_provider: Some(ExecuteCommandOptions {
             commands: EXECUTE_COMMANDS.iter().map(|c| c.to_string()).collect(),
             ..Default::default()
         }),
-        // For GraphQL and nginx references, which search the workspace folder a
-        // document is in. Without it the editor never sends
+        // For the references and definitions `crate::navigate` answers, which
+        // search the workspace folder a document is in. Without it the editor never sends
         // `workspace/didChangeWorkspaceFolders` at all, and a second project
         // added to the window would be searched as if it were not there.
         workspace: Some(lsp_types::WorkspaceServerCapabilities {
@@ -456,10 +457,11 @@ fn serve(connection: Connection) -> Result<()> {
                     "textDocument/formatting" => server.on_formatting(request),
                     "textDocument/rangeFormatting" => server.on_range_formatting(request),
                     "textDocument/hover" => server.on_hover(request),
-                    // Registered for GraphQL and nginx only, so these reach poly
-                    // for those two and for nothing else. See `crate::navigate`.
+                    // Registered for the languages `crate::navigate` names, so
+                    // these reach poly for those and for nothing else.
                     "textDocument/documentSymbol" => server.on_document_symbol(request),
                     "textDocument/references" => server.on_references(request),
+                    "textDocument/definition" => server.on_definition(request),
                     "workspace/executeCommand" => server.on_execute_command(request),
                     // Dropping it is not a harmless no-op: the editor waits on
                     // that id for the rest of the session, so the feature looks
@@ -694,9 +696,9 @@ impl Server {
         Response::new_ok(request.id, serde_json::json!(hover))
     }
 
-    /// Ask the editor to send GraphQL and nginx outline and reference requests
-    /// here. See `crate::navigate::registrations` for why this is not a
-    /// capability declared at initialize.
+    /// Ask the editor to send the outline, reference and definition requests
+    /// poly answers itself here. See `crate::navigate::registrations` for why
+    /// this is not a capability declared at initialize.
     fn register_navigation(&self) {
         let request = lsp_server::Request {
             id: lsp_server::RequestId::from("poly:register:navigate".to_string()),
@@ -715,10 +717,10 @@ impl Server {
             .get(uri)
             .cloned()
             .or_else(|| {
-                ["graphql", "nginx"]
-                    .into_iter()
+                crate::navigate::LANGUAGES
+                    .iter()
                     .find(|l| crate::navigate::is_file_of(l, &path))
-                    .map(str::to_string)
+                    .map(|l| l.to_string())
             })
             .filter(|language| poly_engines::symbols::applies(language))?;
         let text = match self.documents.get(uri) {
@@ -772,6 +774,31 @@ impl Server {
             (space, &name),
             params.context.include_declaration,
         );
+        Response::new_ok(request.id, serde_json::json!(found))
+    }
+
+    /// Where the name under the cursor is declared: in the document when it
+    /// is, across its workspace folder when it is not.
+    fn on_definition(&mut self, request: lsp_server::Request) -> Response {
+        let params: lsp_types::GotoDefinitionParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(e) => return Response::new_err(request.id, INTERNAL_ERROR, e.to_string()),
+        };
+        let at = params.text_document_position_params;
+        let uri = at.text_document.uri;
+        let Some((language, text)) = self.navigated(&uri) else {
+            return Response::new_ok(request.id, serde_json::Value::Null);
+        };
+        let root = crate::navigate::root_of(&self.init_params, &uri_path(&uri));
+        let open: Vec<(Url, &str)> = self
+            .documents
+            .iter()
+            .filter(|(open, _)| self.language_ids.get(*open) == Some(&language))
+            .map(|(open, text)| (open.clone(), text.as_str()))
+            .collect();
+        let found = self
+            .navigation
+            .definition(&language, &root, &open, (&uri, &text), at.position);
         Response::new_ok(request.id, serde_json::json!(found))
     }
 

@@ -1,15 +1,17 @@
-// The GraphQL and nginx half: names whose references poly's daemon answers for.
+// The half poly's daemon answers for: GraphQL, nginx and Makefile references,
+// and Makefile and shell definitions.
 //
-// Every other section asks a provider the editor or the suite brings. These two
-// languages have none offline, so poly registers documentSymbol and references
-// for exactly them (cli/crates/poly-cli/src/navigate.rs) -- dynamically, so a
-// YAML or CSS file never meets a reference provider that cannot answer for it
-// and gets `no refs` drawn over everything. That registration, the nginx sync
-// that comes with it, and a count that reaches a file nobody opened are what no
-// Rust test can see: they are the client's half.
+// Every other section asks a provider the editor or the suite brings. These
+// languages have none offline, so poly registers documentSymbol, references and
+// definition for exactly them (cli/crates/poly-cli/src/navigate.rs) --
+// dynamically, so a YAML or CSS file never meets a reference provider that
+// cannot answer for it and gets `no refs` drawn over everything. That
+// registration, the nginx and Makefile sync that comes with it, and an answer
+// that reaches a file nobody opened are what no Rust test can see: they are the
+// client's half.
 //
 const { mkdirSync, writeFileSync } = require("node:fs");
-const { join } = require("node:path");
+const { join, relative } = require("node:path");
 
 /**
  * The schema, and an operations file that uses it.
@@ -62,7 +64,61 @@ limit_req_zone $binary_remote_addr zone=perip:10m rate=1r/s;
   error_page 502 @fallback;
 }
 `,
+  "common.mk": `CC ?= cc
+CFLAGS := -O2
+`,
+  Makefile: `include common.mk
+
+.PHONY: all clean
+
+all: build
+
+build:
+\t$(CC) $(CFLAGS) -o app main.c
+
+clean:
+\trm -f app
+`,
+  // Shell has definitions and nothing else, so these two must carry no lens:
+  // a reference provider here would draw one over every function.
+  "lib.sh": `greet() {
+  echo "hi $1"
+}
+`,
+  // No shebang: that would bring poly's `run | debug` lens, which is not this
+  // section's.
+  "run.sh": `source ./lib.sh
+NAME=world
+main() {
+  local who=$NAME
+  greet "$who"
+}
+main
+`,
 };
+
+/** The language id each fixture file must open as for poly's registration to apply. */
+function languageOf(file) {
+  if (file.endsWith(".graphql")) return "graphql";
+  if (file.startsWith("nginx/")) return "nginx";
+  if (file.endsWith(".sh")) return "shellscript";
+  return "makefile";
+}
+
+/**
+ * Go to Definition, asked on a name in one file, and the line it must land on.
+ *
+ * `greet` and `$(CC)` are declared only in the file the other one sources or
+ * includes, which nobody opened: the answer has to come from the daemon
+ * reading the folder. `$NAME` and `$who` are the same-file case.
+ */
+const DEFINITIONS = [
+  { file: "run.sh", line: 'greet "$who"', name: "greet", want: ["lib.sh", "greet() {"] },
+  { file: "run.sh", line: 'greet "$who"', name: "who", want: ["run.sh", "local who=$NAME"] },
+  { file: "run.sh", line: "local who=$NAME", name: "NAME", want: ["run.sh", "NAME=world"] },
+  { file: "Makefile", line: "$(CC) $(CFLAGS) -o app main.c", name: "CC", want: ["common.mk", "CC ?= cc"] },
+  { file: "Makefile", line: "all: build", name: "build", want: ["Makefile", "build:"] },
+];
 
 /**
  * Every lens each file may carry, by the text of its line, and what it says.
@@ -92,6 +148,18 @@ const EXPECTED = {
     "set $origin api;": ["1 ref"],
     "location @fallback {": ["1 ref"],
   },
+  // `.PHONY: all clean` is what gives those two their one reference.
+  "common.mk": {
+    "CC ?= cc": ["1 ref"],
+    "CFLAGS := -O2": ["1 ref"],
+  },
+  Makefile: {
+    "all: build": ["1 ref"],
+    "build:": ["1 ref"],
+    "clean:": ["1 ref"],
+  },
+  "lib.sh": {},
+  "run.sh": {},
 };
 
 /** Written before the host launches, because the daemon walks the folder for them. */
@@ -104,23 +172,48 @@ exports.writeFixture = function writeFixture(workspace) {
 };
 
 /**
- * What each file's lenses say, opened one at a time in `FIXTURE`'s order.
+ * What each file's lenses say, opened one at a time in `FIXTURE`'s order, and
+ * where each of `DEFINITIONS` lands.
  *
  * The order is the point: the first file of each pair is counted while its
  * partner is still unopened, so `2 refs` over `type User` and `1 ref` over
- * `upstream api` can only come from the daemon reading the folder.
+ * `upstream api` or `CC ?= cc` can only come from the daemon reading the
+ * folder. The definitions are asked before any file is opened beyond the one
+ * asked in, for the same reason.
  */
 exports.observeNavigate = async function observeNavigate(lensesFor) {
   // Required here rather than at the top of the file: run.js loads this same
   // module in plain node, where `vscode` does not resolve.
   const vscode = require("vscode");
   const dir = process.env.POLY_NAV_WORKSPACE;
+  const definitions = [];
+  for (const asked of DEFINITIONS) {
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(join(dir, asked.file)));
+    let line = 0;
+    while (line < document.lineCount && document.lineAt(line).text.trim() !== asked.line) line++;
+    const character = document.lineAt(line).text.indexOf(asked.name);
+    const found = (await vscode.commands.executeCommand(
+      "vscode.executeDefinitionProvider",
+      document.uri,
+      new vscode.Position(line, character + 1),
+    )) ?? [];
+    const landed = [];
+    for (const location of found) {
+      const uri = location.targetUri ?? location.uri;
+      const range = location.targetRange ?? location.range;
+      const target = await vscode.workspace.openTextDocument(uri);
+      landed.push([relative(dir, uri.fsPath), target.lineAt(range.start.line).text.trim()]);
+    }
+    definitions.push({ ...asked, language: document.languageId, landed });
+  }
   const observed = [];
   for (const name of Object.keys(FIXTURE)) {
     const uri = vscode.Uri.file(join(dir, name));
     const document = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(document);
-    for (const lens of await lensesFor(uri)) {
+    // A file expected to carry none is still waited on until its count holds.
+    const atLeast = Object.keys(EXPECTED[name]).length > 0 ? 1 : 0;
+    for (const lens of await lensesFor(uri, atLeast)) {
       observed.push({
         file: name,
         language: document.languageId,
@@ -130,12 +223,13 @@ exports.observeNavigate = async function observeNavigate(lensesFor) {
       });
     }
   }
-  return observed;
+  return { lenses: observed, definitions };
 };
 
-/** What the GraphQL and nginx lenses said, and what is wrong with it. */
-exports.checkNavigate = function checkNavigate(observed) {
-  console.log("\nGraphQL and nginx, answered by poly's daemon:");
+/** What the lenses and definitions said, and what is wrong with it. */
+exports.checkNavigate = function checkNavigate(navigate) {
+  const observed = navigate?.lenses;
+  console.log("\nGraphQL, nginx, Makefile and shell, answered by poly's daemon:");
   for (const one of observed ?? []) {
     console.log(
       `  ${one.file.padEnd(21)} ${String(one.line + 1).padStart(3)}  ${one.title.padEnd(8)} ${one.text}`,
@@ -152,7 +246,7 @@ exports.checkNavigate = function checkNavigate(observed) {
     const language = (observed ?? []).find((one) => one.file === file)?.language;
     // Named apart from a missing lens, because the fix is somewhere else
     // entirely: poly-syntax's manifest, not the daemon.
-    if (language && language !== (file.endsWith(".graphql") ? "graphql" : "nginx")) {
+    if (language && language !== languageOf(file)) {
       problems.push(`${file} opened as ${language}, so poly's registration never applied to it`);
     }
     for (const [text, want] of Object.entries(lines)) {
@@ -166,6 +260,20 @@ exports.checkNavigate = function checkNavigate(observed) {
     if (!Object.hasOwn(EXPECTED[one.file] ?? {}, one.text)) {
       problems.push(`${one.file}: a lens on a name nothing can reach: ${one.text} says ${one.title}`);
     }
+  }
+  for (const one of navigate?.definitions ?? []) {
+    console.log(`  definition of ${one.name} in ${one.file} -> ${JSON.stringify(one.landed)}`);
+    if (one.language !== languageOf(one.file)) {
+      problems.push(`${one.file} opened as ${one.language}, so poly's registration never applied to it`);
+    }
+    if (JSON.stringify(one.landed) !== JSON.stringify([one.want])) {
+      problems.push(
+        `definition of ${one.name} in ${one.file} — expected ${JSON.stringify([one.want])}, got ${JSON.stringify(one.landed)}`,
+      );
+    }
+  }
+  if (!navigate?.definitions?.length) {
+    problems.push("no definitions were asked: the suite never reached them");
   }
   return problems;
 };

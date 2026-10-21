@@ -135,7 +135,8 @@ syntax: ## Typecheck, build and package poly-syntax-highlight
 # has. The protobuf and shell sections have no offline server to ask, so they
 # supply providers shaped like what `make lens-probe` measured; that pins poly's
 # wiring, and `lens-probe` is what says the real servers still behave that way.
-# GraphQL and nginx are answered by poly's own daemon, hence the build.
+# GraphQL, nginx, Makefile and shell are answered by poly's own daemon, hence
+# the build.
 #
 # It exists because `make editor`'s unit tests could not see the defect that
 # put a count over every parameter and local: they assert against a symbol tree

@@ -154,9 +154,9 @@ async function main() {
           "poly.referencesCodeLens.enabled": true,
           "poly.runCodeLens.enabled": true,
           "poly.protobufCodeLens.enabled": true,
-          // The checkout's build, as `make e2e` does: GraphQL and nginx are
-          // answered by the daemon, and a bundled bin/poly is whichever release
-          // was last packaged here, not the code under test.
+          // The checkout's build, as `make e2e` does: GraphQL, nginx, Makefile
+          // and shell are answered by the daemon, and a bundled bin/poly is
+          // whichever release was last packaged here, not the code under test.
           "poly.serverPath": process.env.POLY_BIN ?? join(ROOT, "cli", "target", "release", "poly"),
         },
         null,
