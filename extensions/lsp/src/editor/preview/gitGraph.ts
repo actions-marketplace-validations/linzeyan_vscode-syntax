@@ -555,6 +555,8 @@ const TYPE_TITLES: Record<FileChange["type"], string> = {
   U: "Untracked",
 };
 
+const listed = new WeakMap<Element, FileEntry>();
+
 function fileRow(file: FileEntry, label: string, depth: number): HTMLElement {
   const stats = file.additions === null
     ? el("span", { class: "stats binary" }, file.type === "U" && file.additions === null ? "" : "binary")
@@ -590,11 +592,13 @@ function fileRow(file: FileEntry, label: string, depth: number): HTMLElement {
     stats,
   );
   item.style.paddingLeft = `${8 + depth * 14}px`;
-  const open = () =>
-    post({
-      type: "open",
-      file: { path: file.newPath, oldPath: file.oldPath, type: file.type, from: file.from, to: file.to },
-    });
+  listed.set(item, file);
+  // The whole list goes with it, in the order shown here -- tree or flat,
+  // collapsed folders included -- for the diff to step through.
+  const open = () => {
+    const shown = [...item.closest(".files")!.querySelectorAll("li.file")];
+    post({ type: "open", files: shown.map((row) => listed.get(row)), index: shown.indexOf(item) });
+  };
   item.addEventListener("click", open);
   item.addEventListener("keydown", (event) => {
     if (event.key === "Enter") open();

@@ -55,6 +55,24 @@ export function repositoriesOnDisk(): string[] {
   return [...found].sort();
 }
 
+/** The active tab, when it is a diff Git History opened: their left side is always a `poly-git:` revision. */
+function historyDiff(): vscode.TabInputTextDiff | undefined {
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  return input instanceof vscode.TabInputTextDiff && input.original.scheme === "poly-git" ? input : undefined;
+}
+
+/**
+ * Next/Previous Changed File in a diff Git History opened: the commit's next
+ * file rather than the working tree's. False anywhere else, and the panel's
+ * half stays unloaded.
+ */
+export async function stepHistoryDiff(direction: 1 | -1): Promise<boolean> {
+  const input = historyDiff();
+  if (!input) return false;
+  await load().step(input, direction);
+  return true;
+}
+
 export function registerGitGraph(context: vscode.ExtensionContext, log: vscode.LogOutputChannel, poly: string): void {
   const statusBar = vscode.window.createStatusBarItem("poly.gitGraph", vscode.StatusBarAlignment.Left, 0);
   statusBar.name = "Git History";
@@ -106,6 +124,22 @@ export function registerGitGraph(context: vscode.ExtensionContext, log: vscode.L
       ),
     );
   }
+  // For the diff title's file buttons: a menu's `when` sees only a diff's
+  // right side, which for uncommitted changes is the working file itself.
+  // The manifest sorts them first (navigation@-2, -1) because an editor title
+  // shows nine actions and unordered ones count as 0: in a markdown diff the
+  // previews took the front and pushed Next into the overflow menu.
+  let inDiff = false;
+  const diffShown = () => {
+    if (inDiff === (historyDiff() !== undefined)) return;
+    inDiff = !inDiff;
+    void vscode.commands.executeCommand("setContext", "poly.gitGraph.diff", inDiff);
+  };
+  context.subscriptions.push(
+    vscode.window.tabGroups.onDidChangeTabs(diffShown),
+    vscode.window.tabGroups.onDidChangeTabGroups(diffShown),
+  );
+  diffShown();
   context.subscriptions.push(
     statusBar,
     vscode.extensions.onDidChange(update),

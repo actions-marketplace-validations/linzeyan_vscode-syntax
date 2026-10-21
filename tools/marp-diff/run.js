@@ -265,7 +265,10 @@ function manifestProblems(extensions) {
   for (const [menu, entries] of Object.entries(theirs.menus)) {
     for (const entry of entries) {
       const found = ours.menus[menu]?.find((one) => one.command === renamed(entry.command));
-      const when = found?.when?.replace(/^!poly\.yield\.marp$/, "").replace(/ && !poly\.yield\.marp$/, "") || undefined;
+      // Beyond standing down, the title button leaves a diff Git History
+      // opened: that title shows nine actions, and its arrows need the room.
+      const when = found?.when?.replace(/ && !poly\.gitGraph\.diff$/, "").replace(/^!poly\.yield\.marp$/, "")
+        .replace(/ && !poly\.yield\.marp$/, "") || undefined;
       if (!found || found.group !== entry.group || when !== entry.when) {
         problems.push(`menu ${menu} ${entry.command}: upstream ${JSON.stringify(entry)} poly ${JSON.stringify(found)}`);
       }

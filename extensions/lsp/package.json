@@ -350,12 +350,14 @@
       {
         "command": "poly.nextChangedFile",
         "title": "%command.nextChangedFile.title%",
-        "category": "%command.category%"
+        "category": "%command.category%",
+        "icon": "$(arrow-right)"
       },
       {
         "command": "poly.previousChangedFile",
         "title": "%command.previousChangedFile.title%",
-        "category": "%command.category%"
+        "category": "%command.category%",
+        "icon": "$(arrow-left)"
       },
       {
         "command": "poly.syntaxColors",
@@ -1431,6 +1433,16 @@
       ],
       "editor/title": [
         {
+          "command": "poly.previousChangedFile",
+          "when": "poly.gitGraph.diff",
+          "group": "navigation@-2"
+        },
+        {
+          "command": "poly.nextChangedFile",
+          "when": "poly.gitGraph.diff",
+          "group": "navigation@-1"
+        },
+        {
           "command": "poly.plantumlPreview",
           "when": "(editorLangId == plantuml || resourceExtname =~ /^\\.(wsd|pu|puml|plantuml|iuml)$/i) && config.poly.plantuml.enabled",
           "group": "navigation"
@@ -1460,17 +1472,17 @@
         },
         {
           "command": "poly.marp.showQuickPick",
-          "when": "editorLangId == markdown && !poly.yield.marp && config.poly.marp.enabled",
+          "when": "editorLangId == markdown && !poly.yield.marp && config.poly.marp.enabled && !poly.gitGraph.diff",
           "group": "navigation"
         },
         {
           "command": "poly.dataPreview",
-          "when": "resourceFilename =~ /\\.(json|jsonl|json5|hjson|ndjson|arrow|arr|avro|parquet|parq|config|env|properties|ini|yaml|yml|md|csv|tsv|txt|tab|dif|ods|xls|xlsb|xlsm|xlsx|xml|html)$/ && !poly.yield.dataPreview && config.poly.dataPreview.enabled",
+          "when": "resourceFilename =~ /\\.(json|jsonl|json5|hjson|ndjson|arrow|arr|avro|parquet|parq|config|env|properties|ini|yaml|yml|md|csv|tsv|txt|tab|dif|ods|xls|xlsb|xlsm|xlsx|xml|html)$/ && !poly.yield.dataPreview && config.poly.dataPreview.enabled && !poly.gitGraph.diff",
           "group": "navigation"
         },
         {
           "command": "poly.dataPreviewOnSide",
-          "when": "resourceFilename =~ /\\.(json|jsonl|json5|hjson|ndjson|arrow|arr|avro|parquet|parq|config|env|properties|ini|yaml|yml|md|csv|tsv|txt|tab|dif|ods|xls|xlsb|xlsm|xlsx|xml|html)$/ && !poly.yield.dataPreview && config.poly.dataPreview.enabled",
+          "when": "resourceFilename =~ /\\.(json|jsonl|json5|hjson|ndjson|arrow|arr|avro|parquet|parq|config|env|properties|ini|yaml|yml|md|csv|tsv|txt|tab|dif|ods|xls|xlsb|xlsm|xlsx|xml|html)$/ && !poly.yield.dataPreview && config.poly.dataPreview.enabled && !poly.gitGraph.diff",
           "group": "navigation"
         },
         {
@@ -1863,13 +1875,13 @@
         "command": "poly.nextChangedFile",
         "key": "ctrl+alt+z",
         "mac": "cmd+alt+z",
-        "when": "config.git.enabled && !git.missing && !poly.yield.nextChangedFile"
+        "when": "(config.git.enabled && !git.missing || poly.gitGraph.diff) && !poly.yield.nextChangedFile"
       },
       {
         "command": "poly.previousChangedFile",
         "key": "ctrl+alt+a",
         "mac": "cmd+alt+a",
-        "when": "config.git.enabled && !git.missing && !poly.yield.previousChangedFile"
+        "when": "(config.git.enabled && !git.missing || poly.gitGraph.diff) && !poly.yield.previousChangedFile"
       },
       {
         "command": "poly.revertAndSave",

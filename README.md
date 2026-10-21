@@ -142,7 +142,8 @@
   Chrome、Edge 或 Firefox 匯出，和它一樣不另外下載。兩個都裝著時 poly 整個讓出。
 - **Git History**：取代 mhutchie.git-graph。按 status bar 的 Git History、原始檔控制標題列的按鈕（或
   `View Git History`），所有分支、tag 與 stash 畫成一張圖，未提交的變更在最上面。點 commit 在下面展開它的
-  訊息與變更的檔案，`cmd/ctrl` 加點另一個是比較兩者；可搜尋、只看某些分支。commit、分支、tag、stash 與
+  訊息與變更的檔案，`cmd/ctrl` 加點另一個是比較兩者；開著的 diff 用標題列的 ← →（`cmd+alt+a`／`cmd+alt+z`）
+  換到同一個 commit 的上／下一個檔案；可搜尋、只看某些分支。commit、分支、tag、stash 與
   檔案的右鍵選單做簽出、merge、rebase、cherry-pick、reset、push、刪除等操作，remote 在工具列管理。功能
   照它的行為做；圖的畫法移植自 VSCode 的原始檔控制圖（Source Control Graph，MIT），顏色是它的
   `scmGraph.*` 佈景主題色。沒有它的 `git-graph.*` 設定。兩個都裝著時 poly 讓出 status bar 與原始檔控制的按鈕。

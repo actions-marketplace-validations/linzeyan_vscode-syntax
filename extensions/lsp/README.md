@@ -303,6 +303,8 @@ VSCode 自己的原始檔控制圖（Source Control Graph，MIT），顏色是�
   repository 時，工具列可切換。
 - **圖**：點一下 commit 在它下面展開作者、日期、父 commit、訊息與變更的檔案（樹狀或清單），點檔案開 diff；
   上下鍵換到相鄰的 commit，`Esc` 收起。按住 `cmd`／`ctrl` 再點另一個 commit 是比較兩者。分支標籤雙擊即簽出。
+- **diff**：標題列的 ← →（`cmd+alt+a`／`cmd+alt+z`，Windows、Linux 是 `ctrl`）照清單的順序換到同一個 commit
+  的上／下一個檔案，不必回到圖；旁邊的 ↑ ↓（`shift+alt+f5`／`alt+f5`）是 VSCode 自己的上／下一個差異。
 - **工具列**：只看某些分支、要不要顯示 remote 分支、搜尋（大小寫、正規表示式，`cmd+f`／`ctrl+f`）、擷取、
   管理 remote（新增、編輯、刪除、擷取並 prune），以及選項：tag、stash、未提交的變更要不要顯示，只沿第一個
   父 commit，排序照 commit 日期、作者日期或拓撲。選項按 repository 記住。`cmd+r` 重新整理，`cmd+h` 捲到
@@ -429,8 +431,8 @@ $fullFileName`，用 Python extension 選的直譯器，沒有時用 `python3`�
 | `Outdent List Item`                | `shift+tab`       | `shift+tab`                         | markdown 家族       |
 | `Extract Variable`                 | `cmd+alt+v`       | `ctrl+alt+v`                        | 編輯器有焦點        |
 | `Inline Variable`                  | `cmd+alt+shift+v` | `ctrl+alt+shift+v`                  | 編輯器有焦點        |
-| `Go to Next Changed File`          | `cmd+alt+z`       | `ctrl+alt+z`                        | 有 git              |
-| `Go to Previous Changed File`      | `cmd+alt+a`       | `ctrl+alt+a`                        | 有 git              |
+| `Go to Next Changed File`          | `cmd+alt+z`       | `ctrl+alt+z`                        | 有 git、Git History |
+| `Go to Previous Changed File`      | `cmd+alt+a`       | `ctrl+alt+a`                        | 有 git、Git History |
 | `Revert Selected Changes and Save` | `alt+q`           | `alt+q`                             | 有 git、檔案        |
 | `Run Code`                         | `ctrl+alt+n`      | `ctrl+alt+n`                        | 開了 Code Runner    |
 | `Run Custom Command`               | `ctrl+alt+k`      | `ctrl+alt+k`                        | 開了 Code Runner    |

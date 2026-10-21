@@ -408,7 +408,7 @@ class GraphPanel {
         if (repo) await this.compare(repo, message.from as string, message.to as string);
         return;
       case "open":
-        if (repo) await openDiff({ ...(message.file as Omit<Context, "repo">), repo });
+        if (repo) await openListed(repo, message.files as Listed[], message.index as number);
         return;
     }
   }
@@ -645,7 +645,7 @@ async function manageRemotes(repo: string): Promise<void> {
   }
 }
 
-async function openDiff(ctx: Context): Promise<void> {
+function diffSides(ctx: Context): { left: vscode.Uri; right: vscode.Uri } {
   const { repo, from = "", to = "", type } = ctx;
   const oldPath = ctx.oldPath ?? ctx.path!;
   const newPath = ctx.path!;
@@ -655,11 +655,53 @@ async function openDiff(ctx: Context): Promise<void> {
     : to === UNCOMMITTED
     ? vscode.Uri.file(path.join(repo, newPath))
     : revisionUri(repo, to, newPath);
-  const title = `${path.basename(newPath)} (${from ? short(from) : "Empty"} ↔ ${short(to)})`;
+  return { left, right };
+}
+
+async function openDiff(ctx: Context): Promise<void> {
+  const { left, right } = diffSides(ctx);
+  const title = `${path.basename(ctx.path!)} (${ctx.from ? short(ctx.from) : "Empty"} ↔ ${short(ctx.to ?? "")})`;
   await vscode.commands.executeCommand("vscode.diff", left, right, title, {
     preview: true,
     viewColumn: vscode.ViewColumn.Active,
   });
+}
+
+type Listed = FileChange & { from: string; to: string };
+
+/**
+ * The list each diff opened from the page came from, and where in it, by the
+ * diff's two sides. The diff covers the panel it was opened from, so the next
+ * file of the same commit is reached from the diff itself (Next/Previous
+ * Changed File) rather than by closing it. Kept apart from the panel: a diff
+ * outlives the panel that opened it. A diff not in here -- one restored with
+ * the window, or opened from a file's menu -- has no list to walk.
+ */
+const walks = new Map<string, { repo: string; files: Listed[]; index: number }>();
+const walkKey = (left: vscode.Uri, right: vscode.Uri) => `${left}\n${right}`;
+
+/** Opens the `index`th of the files the page listed, in the order it showed them. */
+export async function openListed(repo: string, files: Listed[], index: number): Promise<void> {
+  const file = files[index];
+  const ctx = { repo, path: file.newPath, oldPath: file.oldPath, type: file.type, from: file.from, to: file.to };
+  const { left, right } = diffSides(ctx);
+  walks.set(walkKey(left, right), { repo, files, index });
+  await openDiff(ctx);
+}
+
+/**
+ * In a diff Git History opened, the file after (or before) it in the same
+ * commit's list, wrapping at both ends as Next Changed File does in the
+ * working tree.
+ */
+export async function step(input: vscode.TabInputTextDiff, direction: 1 | -1): Promise<void> {
+  const walk = walks.get(walkKey(input.original, input.modified));
+  if (!walk) {
+    vscode.window.setStatusBarMessage("Poly: open a file from Git History to walk the rest of its commit", 4000);
+    return;
+  }
+  const count = walk.files.length;
+  await openListed(walk.repo, walk.files, (walk.index + direction + count) % count);
 }
 
 async function archive(repo: string, ref: string, name: string): Promise<void> {

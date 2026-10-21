@@ -14,7 +14,7 @@ import { registerDataPreview } from "./dataPreview";
 import type { FromSql, ToSql } from "./dbml";
 import { registerErrorLens } from "./errorLens";
 import { registerExcalidraw } from "./excalidrawEditor";
-import { registerGitGraph } from "./gitGraph";
+import { registerGitGraph, stepHistoryDiff } from "./gitGraph";
 import { imageReferences } from "./images";
 import { indentSpans } from "./indent";
 import {
@@ -2117,9 +2117,13 @@ async function changedFiles(): Promise<string[] | undefined> {
  *
  * VSCode has next/previous change within a file and a list of changed files in
  * the SCM view; what it has no command for is the step between two files, which
- * is the one a review pass makes most often.
+ * is the one a review pass makes most often. In a diff Git History opened, the
+ * pass is over that commit's files instead.
  */
 async function stepChangedFile(direction: 1 | -1): Promise<void> {
+  if (await stepHistoryDiff(direction)) {
+    return;
+  }
   const files = await changedFiles();
   if (files === undefined) {
     vscode.window.showWarningMessage(

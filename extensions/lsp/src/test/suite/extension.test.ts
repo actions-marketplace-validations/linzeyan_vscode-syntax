@@ -1616,9 +1616,10 @@ suite("poly-lsp in a real editor", () => {
   // gitGraphLayout's unit tests. What only a host shows is the wiring: every
   // command the manifest declares reaching a handler in the half loaded on
   // first use, the panel opening on the repository it was asked for, a menu
-  // command acting on the context the page puts on what was right-clicked, and
-  // a diff side read out of a revision by the poly-git: scheme, which has to be
-  // registered before any of that has loaded.
+  // command acting on the context the page puts on what was right-clicked, a
+  // diff side read out of a revision by the poly-git: scheme, which has to be
+  // registered before any of that has loaded, and a diff opened from the page
+  // stepping on through the files it was listed with.
   test("Git History opens on a repository, and its commands act on what was right-clicked", async () => {
     const repo = join(workspaceRoot(), "graph-repo");
     rmSync(repo, { recursive: true, force: true });
@@ -1641,7 +1642,13 @@ suite("poly-lsp in a real editor", () => {
     git("add", "a.txt");
     git("commit", "-q", "-m", "First");
     const hash = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "a.txt"), "second\n");
+    writeFileSync(join(repo, "b.txt"), "new\n");
+    git("add", "a.txt", "b.txt");
+    git("commit", "-q", "-m", "Second");
+    const second = git("rev-parse", "HEAD");
     writeFileSync(join(repo, "a.txt"), "changed\n");
+    writeFileSync(join(repo, "c.txt"), "untracked\n");
 
     const extension = vscode.extensions.getExtension(EXTENSION_ID)!;
     const host: typeof import("../../editor/gitGraphPanel") = require(
@@ -1670,6 +1677,10 @@ suite("poly-lsp in a real editor", () => {
       vscode.window.tabGroups.all.flatMap((group) => group.tabs).find((tab) =>
         tab.input instanceof vscode.TabInputWebview && tab.input.viewType.endsWith("poly.gitGraph")
       );
+    const historyDiff = (tab: vscode.Tab | undefined) =>
+      tab?.input instanceof vscode.TabInputTextDiff && tab.input.original.scheme === "poly-git"
+        ? tab.input
+        : undefined;
     try {
       // From the Source Control title the argument is the repository itself.
       await vscode.commands.executeCommand("poly.gitGraph.view", { rootUri: vscode.Uri.file(repo) });
@@ -1688,9 +1699,42 @@ suite("poly-lsp in a real editor", () => {
         "first\n",
         "not the file as committed",
       );
+
+      // A diff covers the panel it was opened from, so the commit's next file
+      // has to be reachable from the diff. The working tree has changes of its
+      // own here, which a plain Next Changed File would open instead; the
+      // uncommitted list's right side is the working file itself, not poly-git:.
+      const landsOn = (file: string, what: string) =>
+        eventually(what, () => {
+          const input = historyDiff(vscode.window.tabGroups.activeTabGroup.activeTab);
+          return input && basename(input.modified.fsPath) === file ? file : undefined;
+        }, 10_000);
+      const committed = [
+        { oldPath: "a.txt", newPath: "a.txt", type: "M" as const },
+        { oldPath: "b.txt", newPath: "b.txt", type: "A" as const },
+      ].map((file) => ({ ...file, additions: 1, deletions: 1, from: hash, to: second }));
+      await host.openListed(repo, committed, 0);
+      await landsOn("a.txt", "the listed file to open as a diff");
+      await vscode.commands.executeCommand("poly.nextChangedFile");
+      await landsOn("b.txt", "next to be the commit's next file");
+      await vscode.commands.executeCommand("poly.nextChangedFile");
+      await landsOn("a.txt", "next to wrap to the commit's first file");
+      await vscode.commands.executeCommand("poly.previousChangedFile");
+      await landsOn("b.txt", "previous to wrap to the commit's last file");
+
+      const uncommitted = [
+        { oldPath: "a.txt", newPath: "a.txt", type: "M" as const, from: "HEAD" },
+        { oldPath: "c.txt", newPath: "c.txt", type: "U" as const, from: "" },
+      ].map((file) => ({ ...file, additions: null, deletions: null, to: "*" }));
+      await host.openListed(repo, uncommitted, 0);
+      await landsOn("a.txt", "the uncommitted file to open as a diff");
+      await vscode.commands.executeCommand("poly.nextChangedFile");
+      await landsOn("c.txt", "next to be the next uncommitted file");
     } finally {
       const tab = page();
       if (tab) await vscode.window.tabGroups.close(tab);
+      const diffs = vscode.window.tabGroups.all.flatMap((group) => group.tabs).filter((tab) => historyDiff(tab));
+      await vscode.window.tabGroups.close(diffs);
     }
   });
 

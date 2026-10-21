@@ -48,7 +48,8 @@ const VSIX = "https://marketplace.visualstudio.com/_apis/public/gallery/publishe
 const BLANK = "VSCode's webview host sends some pages an empty string before any data, and upstream's page loads "
   + "it as an Arrow file: that grid stays blank. poly's page drops a message that is not bytes";
 const MENUS = "poly's menus match the extension anchored -- upstream's pattern put Data Preview on `vite.config.ts` "
-  + "and `x.mdx` -- and stand down when upstream is installed";
+  + "and `x.mdx` -- and stand down when upstream is installed. The title buttons also leave a diff Git History "
+  + "opened, whose nine-action title needs the room for its file and change arrows";
 const DEPARTURES = {
   "rows.json.page.rows": BLANK,
   "rows.json.page.columns": BLANK,

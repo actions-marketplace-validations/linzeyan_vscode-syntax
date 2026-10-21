@@ -204,6 +204,7 @@ const vscode = {
   CompletionItemKind: { Snippet: 14 },
   CodeActionKind: { Refactor: "refactor", QuickFix: "quickfix" },
   SymbolKind: new Proxy({}, { get: () => 0 }),
+  TabInputTextDiff: class {},
   version: "stub",
   window: {
     get visibleTextEditors() {
@@ -217,6 +218,7 @@ const vscode = {
     onDidChangeActiveTextEditor: on("activeEditor"),
     onDidChangeTextEditorSelection: on("selection"),
     onDidCloseTerminal: on("closeTerminal"),
+    tabGroups: { activeTabGroup: {}, onDidChangeTabs: on("tabs"), onDidChangeTabGroups: on("tabGroups") },
     createTreeView: () => ({ ...nothing, onDidChangeVisibility: on("treeVisibility"), visible: false }),
     registerTreeDataProvider: () => nothing,
     registerCustomEditorProvider: () => nothing,
