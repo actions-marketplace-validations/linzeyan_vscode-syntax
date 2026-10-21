@@ -77,16 +77,20 @@ jobs:
   # tag is pushed is a Dockerfile that breaks when a tag is pushed. Native
   # amd64 only: the release build covers arm64 under emulation, and paying for
   # that on every push would buy nothing this job can catch.
+  #
+  # 24.04 is the image's base, as release.yml builds the binary it ships: a
+  # binary from ubuntu-latest (26.04 since October 2026) needs glibc 2.43 and
+  # does not start in it. Its own cache for the same reason -- the shared one
+  # is built on ubuntu-latest, and would come back as an up-to-date binary.
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: cli
-          shared-key: ci
-          save-if: false
+          shared-key: docker-ubuntu-24.04
           cache-on-failure: true
       # The binary this stages is a fixture, not a shipped artifact: what the
       # job asks is whether the Dockerfile assembles around a binary and whether
