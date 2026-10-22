@@ -49,6 +49,13 @@ export function gitIn(executable: string, cwd: string, lead: string[] = []): Git
 
 const lines = (text: string) => text.split("\n").filter((line) => line !== "");
 
+/**
+ * The pathspec narrowing a command to `scope`, a path relative to the root;
+ * nothing for the whole repository. Literal, so a name with `*` or a leading
+ * `:` is the file it names rather than a pattern.
+ */
+const within = (scope: string) => (scope ? ["--", `:(literal)${scope}`] : []);
+
 const ORDER: Record<ViewOptions["order"], string> = {
   date: "--date-order",
   "author-date": "--author-date-order",
@@ -108,8 +115,11 @@ function parseCommit(record: string): GraphCommit {
   };
 }
 
-/** The first `max` commits as Git Graph lists them, with stashes and uncommitted changes in their places. */
-export async function loadGraph(run: Git, view: ViewOptions, max: number): Promise<Graph> {
+/**
+ * The first `max` commits as Git Graph lists them, with stashes and uncommitted
+ * changes in their places; with a `scope`, only those that changed it.
+ */
+export async function loadGraph(run: Git, view: ViewOptions, max: number, scope = ""): Promise<Graph> {
   const [head, headBranch, remotes] = await Promise.all([
     run(["rev-parse", "--verify", "-q", "HEAD"]).then((out) => out.trim(), () => undefined),
     run(["symbolic-ref", "--short", "-q", "HEAD"]).then((out) => out.trim() || undefined, () => undefined),
@@ -140,8 +150,12 @@ export async function loadGraph(run: Git, view: ViewOptions, max: number): Promi
     "-z",
     ORDER[view.order],
     ...view.firstParent ? ["--first-parent"] : [],
+    // Parent rewriting: without it `%P` names a commit's real parents, which
+    // a narrowed list mostly leaves out, and the graph falls apart into dots.
+    ...scope ? ["--parents"] : [],
     ...revisions,
     "--",
+    ...within(scope).slice(1),
   ]);
   const listed = log.split("\0").map((record) => record.replace(/^\n/, "")).filter((record) => record !== "");
   const commits = listed.slice(0, max).map(parseCommit);
@@ -154,7 +168,9 @@ export async function loadGraph(run: Git, view: ViewOptions, max: number): Promi
     }
   }
 
-  if (view.showStashes) {
+  // A stash sits on the commit it was made on, which a narrowed list need not
+  // hold, and whether it touched the path would cost a diff for each one.
+  if (view.showStashes && !scope) {
     // Each stash sits directly above the commit it was made on, newest first,
     // drawn as a branch off it; one whose base is not listed is not shown.
     const stashes = lines(await run(["stash", "list", `--format=%H${F}%P${F}%gd${F}%an${F}%ae${F}%at${F}%s`]));
@@ -180,12 +196,17 @@ export async function loadGraph(run: Git, view: ViewOptions, max: number): Promi
     }
   }
 
-  if (view.showUncommitted && head && commits.some((commit) => commit.hash === head)) {
-    const count = lines(await run(["status", "--porcelain", "--untracked-files=all"])).length;
+  // Narrowed, the changes sit on the last commit that touched the path rather
+  // than on HEAD, which the list may not hold.
+  const base = scope && head
+    ? (await run(["log", "-1", "--format=%H", "HEAD", ...within(scope)])).trim()
+    : head;
+  if (view.showUncommitted && base && commits.some((commit) => commit.hash === base)) {
+    const count = lines(await run(["status", "--porcelain", "--untracked-files=all", ...within(scope)])).length;
     if (count > 0) {
       commits.unshift({
         hash: UNCOMMITTED,
-        parents: [head],
+        parents: [base],
         author: "*",
         email: "",
         date: Math.round(Date.now() / 1000),
@@ -220,11 +241,11 @@ export async function loadGraph(run: Git, view: ViewOptions, max: number): Promi
  * The files a diff touches, with their line counts. `args` is a `diff` or
  * `diff-tree` command without its output format.
  */
-async function changedFiles(run: Git, args: string[]): Promise<FileChange[]> {
+async function changedFiles(run: Git, args: string[], scope = ""): Promise<FileChange[]> {
   const common = ["-z", "-M", "--diff-filter=AMDR"];
   const [status, numbers] = await Promise.all([
-    run([args[0], ...common, "--name-status", ...args.slice(1)]),
-    run([args[0], ...common, "--numstat", ...args.slice(1)]),
+    run([args[0], ...common, "--name-status", ...args.slice(1), ...within(scope)]),
+    run([args[0], ...common, "--numstat", ...args.slice(1), ...within(scope)]),
   ]);
   const counts = new Map<string, [number | null, number | null]>();
   const numberTokens = numbers.split("\0");
@@ -270,14 +291,15 @@ async function metadata(run: Git, hash: string): Promise<Omit<CommitDetails, "fi
   };
 }
 
-/** A commit and what it changed from its first parent, or from nothing for a root. */
-export async function commitDetails(run: Git, hash: string): Promise<CommitDetails> {
+/** A commit and what it changed from its first parent, or from nothing for a root; only under `scope` if given. */
+export async function commitDetails(run: Git, hash: string, scope = ""): Promise<CommitDetails> {
   const details = await metadata(run, hash);
   const files = await changedFiles(
     run,
     details.parents.length > 0
       ? ["diff-tree", "-r", details.parents[0], details.hash]
       : ["diff-tree", "-r", "--root", "--no-commit-id", details.hash],
+    scope,
   );
   return { ...details, files };
 }
@@ -294,10 +316,10 @@ export async function stashDetails(run: Git, hash: string, base: string, untrack
 }
 
 /** The working tree against HEAD, staged and not alike, then each untracked file. */
-export async function uncommittedChanges(run: Git): Promise<FileChange[]> {
+export async function uncommittedChanges(run: Git, scope = ""): Promise<FileChange[]> {
   const [files, status] = await Promise.all([
-    changedFiles(run, ["diff", "HEAD"]),
-    run(["status", "-z", "--porcelain", "--untracked-files=all"]),
+    changedFiles(run, ["diff", "HEAD"], scope),
+    run(["status", "-z", "--porcelain", "--untracked-files=all", ...within(scope)]),
   ]);
   for (const entry of status.split("\0")) {
     if (entry.startsWith("?? ")) {
@@ -309,8 +331,8 @@ export async function uncommittedChanges(run: Git): Promise<FileChange[]> {
 }
 
 /** What changed from one commit to another, or to the working tree (untracked files aside). */
-export function comparison(run: Git, from: string, to: string): Promise<FileChange[]> {
-  return changedFiles(run, ["diff", from, ...to === UNCOMMITTED ? [] : [to]]);
+export function comparison(run: Git, from: string, to: string, scope = ""): Promise<FileChange[]> {
+  return changedFiles(run, ["diff", from, ...to === UNCOMMITTED ? [] : [to]], scope);
 }
 
 /** An annotated tag's tagger and message. */

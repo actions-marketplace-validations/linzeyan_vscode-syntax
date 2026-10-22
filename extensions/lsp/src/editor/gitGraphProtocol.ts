@@ -72,6 +72,12 @@ export interface Remote {
   pushUrl?: string;
 }
 
+/** A file or folder the history is narrowed to; `path` is relative to the root, with `/`. */
+export interface Scope {
+  path: string;
+  folder: boolean;
+}
+
 /** The view options the toolbar changes, kept per repository. */
 export interface ViewOptions {
   /** Branch names to show, or empty for all. */

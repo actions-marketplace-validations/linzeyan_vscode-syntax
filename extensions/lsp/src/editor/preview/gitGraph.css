@@ -101,6 +101,32 @@ select,
   white-space: nowrap;
 }
 
+.scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  max-width: 320px;
+  padding-left: 6px;
+  border-radius: 2px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+.scope[hidden] {
+  display: none;
+}
+
+.scope .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope .icon-button {
+  color: inherit;
+}
+
 .check {
   display: inline-flex;
   align-items: center;

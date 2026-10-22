@@ -317,6 +317,8 @@
   "lm.marpExport.displayName": "Export Marp Slide Deck",
   "command.gitGraph.view.title": "View Git History",
   "command.gitGraph.fetch.title": "Fetch from Remotes",
+  "command.gitGraph.viewFileHistory.title": "View File History",
+  "command.gitGraph.viewFolderHistory.title": "View Folder History",
   "command.gitGraph.addTag.title": "Add Tag…",
   "command.gitGraph.createBranch.title": "Create Branch…",
   "command.gitGraph.checkoutCommit.title": "Checkout…",

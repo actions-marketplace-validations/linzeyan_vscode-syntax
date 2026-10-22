@@ -109,6 +109,8 @@ export function registerGitGraph(context: vscode.ExtensionContext, log: vscode.L
     // a rejection handler on the same `then` never sees.
   }).catch((error) => {
     log.info(`Git History: no git to run (${error}); finding repositories on disk`);
+    // `poly git` reads no pathspec, so a file's history needs git: its menus go.
+    void vscode.commands.executeCommand("setContext", "poly.gitGraph.noGit", true);
     repositories = repositoriesOnDisk().length;
     update();
   });

@@ -103,6 +103,39 @@ export function entryLine(languageId: string, text: string): number | undefined 
 }
 
 /**
+ * Whether a file's declarations can hold its program's entry point at all.
+ *
+ * Go is where the name alone lies: `func main` in any package but `main` is an
+ * ordinary function -- `go run` refuses the file as "not a main package", and
+ * delve with it -- so a button there is an offer the file cannot keep.
+ */
+export function canHoldEntry(languageId: string, text: string): boolean {
+  return languageId !== "go" || goPackage(text) === "main";
+}
+
+/** Comments and white space: all Go allows before the package clause. */
+const GO_SKIP = /\s+|\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/y;
+const GO_PACKAGE = /package\s+(\w+)/y;
+
+/**
+ * A Go file's package name, from its package clause.
+ *
+ * Scanned past the comments rather than searched for: a build constraint or a
+ * licence header comes first, and `package main` quoted in a comment's prose
+ * is not the clause.
+ */
+function goPackage(text: string): string | undefined {
+  let at = 0;
+  for (;;) {
+    GO_SKIP.lastIndex = at;
+    if (!GO_SKIP.exec(text) || GO_SKIP.lastIndex === at) break;
+    at = GO_SKIP.lastIndex;
+  }
+  GO_PACKAGE.lastIndex = at;
+  return GO_PACKAGE.exec(text)?.[1];
+}
+
+/**
  * The entry points among `symbols`.
  *
  * Name equality and not a prefix or a pattern: `TestMain` is a test harness,

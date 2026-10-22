@@ -302,6 +302,9 @@ VSCode 自己的原始檔控制圖（Source Control Graph，MIT），顏色是�
 
 - **`View Git History`**：status bar 左邊的 Git History、原始檔控制的標題列按鈕，或命令面板。開了多個
   repository 時，工具列可切換。
+- **`View File History`／`View Folder History`**：檔案總管對檔案或資料夾按右鍵，或編輯器分頁的右鍵選單、
+  命令面板（作用在目前的檔案與它所在的資料夾）。圖只留改過它的 commit，仍連成一張圖；展開的 commit、比較與未提交的變更只列它底下的
+  檔案；stash 不顯示。工具列顯示目前的路徑，按 ✕ 回到整個 repository。需要 git。
 - **圖**：點一下 commit 在它下面展開作者、日期、父 commit、訊息與變更的檔案（樹狀或清單），點檔案開 diff；
   上下鍵換到相鄰的 commit，`Esc` 收起。按住 `cmd`／`ctrl` 再點另一個 commit 是比較兩者。分支標籤雙擊即簽出。
 - **diff**：標題列的 ← →（`cmd+alt+a`／`cmd+alt+z`，Windows、Linux 是 `ctrl`）照清單的順序換到同一個 commit
@@ -369,7 +372,7 @@ $fullFileName`，用 Python extension 選的直譯器，沒有時用 `python3`�
     一個專案一個小 JSON 檔。重開視窗時先畫上次的數字，同時在背景重新問 language server，
     數字變了就更新，所以專案在視窗關著時改過也會被更正。已刪除的檔案與宣告會順手清掉，
     一個月沒開的專案整個檔案刪除。
-- **`run | debug` CodeLens**（設定）：程式進入點上方一行。`run` 存檔後像 Code Runner 的
+- **`run | debug` CodeLens**（設定）：程式進入點上方一行；Go 只有 `package main` 的 `func main` 算。`run` 存檔後像 Code Runner 的
   `Run Code` 那樣執行整個檔案，命令來自 `poly.codeRunner.*`（go → `go run .`、rust →
   `cargo run`、python → 選定的直譯器、shell → shebang 指定的直譯器），結果在輸出面板的
   Code Runner，`poly.codeRunner.runInTerminal` 打開則在終端機；不經過 debugger。那些設定

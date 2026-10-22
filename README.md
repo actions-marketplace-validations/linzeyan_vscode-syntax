@@ -144,7 +144,9 @@
   `View Git History`），所有分支、tag 與 stash 畫成一張圖，未提交的變更在最上面。點 commit 在下面展開它的
   訊息與變更的檔案，`cmd/ctrl` 加點另一個是比較兩者；開著的 diff 用標題列的 ← →（`cmd+alt+a`／`cmd+alt+z`）
   換到同一個 commit 的上／下一個檔案；可搜尋、只看某些分支。commit、分支、tag、stash 與
-  檔案的右鍵選單做簽出、merge、rebase、cherry-pick、reset、push、刪除等操作，remote 在工具列管理。功能
+  檔案的右鍵選單做簽出、merge、rebase、cherry-pick、reset、push、刪除等操作，remote 在工具列管理。
+  檔案總管對檔案或資料夾按右鍵的 `View File History`／`View Folder History`（命令面板也有，作用在目前的檔案
+  與它所在的資料夾）只列改過它的 commit，展開的 commit 只列它底下的檔案；工具列的 ✕ 回到整個 repository。功能
   照它的行為做；圖的畫法移植自 VSCode 的原始檔控制圖（Source Control Graph，MIT），顏色是它的
   `scmGraph.*` 佈景主題色。沒有它的 `git-graph.*` 設定。兩個都裝著時 poly 讓出 status bar 與原始檔控制的按鈕。
   電腦上沒有 git 時改由 poly 讀 repository，圖、commit 細節、比較與 diff 照常，但只能看：會改動
@@ -199,8 +201,8 @@
   這樣找到的（只認 `.sh`／`.bash`／`.zsh`／`.ksh`／`.bats` 與 VSCode 認得的 Makefile 檔名）。只比對
   名字，不跟 `source`／`include` 的路徑。另外裝了 bash-language-server 的話，編輯器會把兩邊的答案
   合在一起。
-- **`run | debug` CodeLens**：程式進入點（Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`、
-  Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。`run` 存檔後像 Code Runner
+- **`run | debug` CodeLens**：程式進入點（Go 只算 `package main` 的 `main`；Rust／C／C++／Java 的 `main`、
+  C# 的 `Main`、Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。`run` 存檔後像 Code Runner
   的 `Run Code` 那樣執行整個檔案，命令來自 `poly.codeRunner.*`（`go run .`／`cargo run`／選定的
   Python 直譯器／shebang 指定的直譯器），結果在輸出面板的 Code Runner，不經過 debugger；那些設定
   有這個檔的命令就有 `run`，Code Runner 關著也一樣。poly 沒有 debugger，`debug` 是交給你已經裝的

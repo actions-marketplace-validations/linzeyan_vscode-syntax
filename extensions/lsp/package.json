@@ -560,6 +560,18 @@
         "icon": "$(repo-fetch)"
       },
       {
+        "command": "poly.gitGraph.viewFileHistory",
+        "title": "%command.gitGraph.viewFileHistory.title%",
+        "category": "%command.category%",
+        "icon": "$(history)"
+      },
+      {
+        "command": "poly.gitGraph.viewFolderHistory",
+        "title": "%command.gitGraph.viewFolderHistory.title%",
+        "category": "%command.category%",
+        "icon": "$(history)"
+      },
+      {
         "command": "poly.gitGraph.addTag",
         "title": "%command.gitGraph.addTag.title%"
       },
@@ -901,6 +913,16 @@
           "command": "poly.codeRunner.run",
           "when": "!explorerResourceIsFolder && config.poly.codeRunner.showRunCommandInExplorerContextMenu && config.poly.codeRunner.enabled && !poly.yield.codeRunner",
           "group": "navigation"
+        },
+        {
+          "command": "poly.gitGraph.viewFileHistory",
+          "when": "!explorerResourceIsFolder && resourceScheme == file && !poly.gitGraph.noGit",
+          "group": "4_timeline@10"
+        },
+        {
+          "command": "poly.gitGraph.viewFolderHistory",
+          "when": "explorerResourceIsFolder && resourceScheme == file && !poly.gitGraph.noGit",
+          "group": "4_timeline@10"
         }
       ],
       "editor/context": [
@@ -1117,6 +1139,14 @@
         {
           "command": "poly.gitGraph.fetch",
           "when": "!poly.yield.gitGraph"
+        },
+        {
+          "command": "poly.gitGraph.viewFileHistory",
+          "when": "resourceScheme == file && !poly.gitGraph.noGit"
+        },
+        {
+          "command": "poly.gitGraph.viewFolderHistory",
+          "when": "resourceScheme == file && !poly.gitGraph.noGit"
         },
         {
           "command": "poly.gitGraph.addTag",
@@ -1508,6 +1538,11 @@
           "command": "poly.dataPreviewOnSide",
           "when": "resourceFilename =~ /\\.(json|jsonl|json5|hjson|ndjson|arrow|arr|avro|parquet|parq|config|env|properties|ini|yaml|yml|md|csv|tsv|txt|tab|dif|ods|xls|xlsb|xlsm|xlsx|xml|html)$/ && !poly.yield.dataPreview && config.poly.dataPreview.enabled",
           "group": "navigation"
+        },
+        {
+          "command": "poly.gitGraph.viewFileHistory",
+          "when": "resourceScheme == file && !poly.gitGraph.noGit",
+          "group": "4_timeline@10"
         }
       ],
       "file/newFile": [

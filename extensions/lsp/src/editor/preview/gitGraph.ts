@@ -21,6 +21,7 @@ import {
   type FileChange,
   type Graph,
   type GraphCommit,
+  type Scope,
   UNCOMMITTED,
   type ViewOptions,
 } from "../gitGraphProtocol";
@@ -55,6 +56,8 @@ interface State {
   repos: string[];
   repo?: string;
   view?: ViewOptions;
+  /** The file or folder the history is narrowed to, if any. */
+  scope?: Scope;
   graph?: Graph;
   subjects: string[];
   remotes: Remote[];
@@ -124,6 +127,8 @@ const branchButton = el("button", {
   title: "Branches to show",
 });
 const remoteToggle = el("input", { type: "checkbox", id: "show-remotes" });
+const scopeLabel = el("span", { class: "scope", hidden: "" });
+const scopeClear = button("scope-clear", "close", "Show the Whole Repository");
 const findInput = el("input", {
   id: "find",
   type: "text",
@@ -156,6 +161,7 @@ toolbar.append(
     { class: "toolbar-group" },
     repoSelect,
     branchButton,
+    scopeLabel,
     el(
       "label",
       { class: "check", for: "show-remotes", title: "Show remote-tracking branches" },
@@ -955,6 +961,15 @@ function renderToolbar(): void {
     ),
     icon("chevron-down"),
   );
+  const scope = state.scope;
+  scopeLabel.hidden = !scope;
+  if (scope) {
+    scopeLabel.replaceChildren(
+      icon(scope.folder ? "folder" : "file"),
+      el("span", { class: "label", title: scope.path }, scope.path),
+      scopeClear,
+    );
+  }
   remoteToggle.checked = view?.showRemoteBranches ?? true;
   const hasRemotes = state.remotes.length > 0;
   fetchButton.hidden = !hasRemotes || !state.git;
@@ -978,6 +993,7 @@ remoteToggle.addEventListener(
 fetchButton.addEventListener("click", () => post({ type: "fetch" }));
 remotesButton.addEventListener("click", () => post({ type: "remotes" }));
 refreshButton.addEventListener("click", () => post({ type: "refresh" }));
+scopeClear.addEventListener("click", () => post({ type: "scope" }));
 
 function openPopover(anchor: HTMLElement, content: HTMLElement): void {
   if (!popover.hidden && popover.dataset.for === anchor.id) {
@@ -1193,7 +1209,11 @@ window.addEventListener("message", (event: MessageEvent) => {
     case "graph": {
       progress.hidden = true;
       state.waitingForMore = false;
-      const changedRepo = message.repo !== state.repo;
+      const scope = message.scope as Scope | undefined;
+      // A new path is a new list: what was open and where it was scrolled to
+      // belong to the old one.
+      const changedRepo = message.repo !== state.repo || scope?.path !== state.scope?.path;
+      state.scope = scope;
       state.repos = message.repos as string[];
       state.repo = message.repo as string | undefined;
       if (!state.repo) {
@@ -1222,7 +1242,7 @@ window.addEventListener("message", (event: MessageEvent) => {
       renderRows();
       showNotice(
         state.graph.commits.length === 0
-          ? "No commits yet."
+          ? state.scope ? `No commits change ${state.scope.path}.` : "No commits yet."
           : state.git
           ? undefined
           : "Read-only: git was not found, so poly reads this history and nothing here can change it. Install git, or point git.path at it, then reload the window.",

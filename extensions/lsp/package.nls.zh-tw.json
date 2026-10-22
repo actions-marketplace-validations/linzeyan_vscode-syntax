@@ -317,6 +317,8 @@
   "lm.marpExport.displayName": "匯出 Marp 投影片",
   "command.gitGraph.view.title": "檢視 Git History",
   "command.gitGraph.fetch.title": "從遠端擷取",
+  "command.gitGraph.viewFileHistory.title": "檢視檔案歷史",
+  "command.gitGraph.viewFolderHistory.title": "檢視資料夾歷史",
   "command.gitGraph.addTag.title": "新增標籤…",
   "command.gitGraph.createBranch.title": "建立分支…",
   "command.gitGraph.checkoutCommit.title": "簽出…",

@@ -1686,6 +1686,13 @@ suite("poly-lsp in a real editor", () => {
       await vscode.commands.executeCommand("poly.gitGraph.view", { rootUri: vscode.Uri.file(repo) });
       assert.strictEqual((await eventually("the Git History panel", page)).label, "Git History");
 
+      // From the Explorer the argument is the file, which has to be found in
+      // its repository; the plain command goes back to all of it.
+      await vscode.commands.executeCommand("poly.gitGraph.viewFileHistory", vscode.Uri.file(join(repo, "b.txt")));
+      await eventually("the panel narrowed to b.txt", () => page()?.label === "Git History: b.txt" || undefined);
+      await vscode.commands.executeCommand("poly.gitGraph.view", { rootUri: vscode.Uri.file(repo) });
+      await eventually("the panel on the whole repository", () => page()?.label === "Git History" || undefined);
+
       await vscode.env.clipboard.writeText("before");
       await vscode.commands.executeCommand("poly.gitGraph.copyHash", { repo, hash });
       assert.strictEqual(await vscode.env.clipboard.readText(), hash);

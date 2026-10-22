@@ -62,7 +62,7 @@ import {
 } from "./references";
 import { ReferenceTree, registerReferenceTree } from "./referenceTree";
 import { cacheDir, RefStore } from "./refStore";
-import { entryLine, entryPoints, findsEntryInText } from "./runnable";
+import { canHoldEntry, entryLine, entryPoints, findsEntryInText } from "./runnable";
 import { colorSheet, parseStyle, scopesIn, styleText, withSyntaxColors } from "./scopes";
 import { registerSwaggerViewer } from "./swaggerViewer";
 import { registerTodoTree } from "./todoTree";
@@ -1844,6 +1844,9 @@ function runFromGutter(context: vscode.ExtensionContext, codeRunner: CodeManager
       if (findsEntryInText(document.languageId)) {
         const line = entryLine(document.languageId, document.getText());
         return line === undefined ? [] : buttons(document.lineAt(line).range);
+      }
+      if (!canHoldEntry(document.languageId, document.getText())) {
+        return [];
       }
       const symbols = await vscode.commands.executeCommand<
         vscode.DocumentSymbol[]

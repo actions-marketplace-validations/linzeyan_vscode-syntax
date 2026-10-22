@@ -35,6 +35,7 @@ import {
   DEFAULT_VIEW,
   type FileChange,
   type Remote,
+  type Scope,
   UNCOMMITTED,
   type ViewOptions,
 } from "./gitGraphProtocol";
@@ -215,6 +216,8 @@ class GraphPanel {
   static current: GraphPanel | undefined;
 
   repo: string | undefined;
+  /** Not kept with the view options: a file's history is a question asked once, not how the repository is read. */
+  scope: Scope | undefined;
   private count = INITIAL;
   private stale = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -298,7 +301,8 @@ class GraphPanel {
     void this.load();
   }
 
-  open(repo: string | undefined): void {
+  /** `scope` narrows to a path in `repo`; without one the whole repository shows. */
+  open(repo: string | undefined, scope?: Scope): void {
     const repos = this.repos();
     const remembered = this.context.workspaceState.get<string>("poly.gitGraph.repo");
     const active = vscode.window.activeTextEditor?.document.uri.fsPath;
@@ -311,6 +315,13 @@ class GraphPanel {
       this.count = INITIAL;
       if (chosen) void this.context.workspaceState.update("poly.gitGraph.repo", chosen);
     }
+    this.narrow(scope);
+  }
+
+  narrow(scope: Scope | undefined): void {
+    if (scope?.path !== this.scope?.path) this.count = INITIAL;
+    this.scope = scope;
+    this.panel.title = scope ? `Git History: ${path.posix.basename(scope.path)}` : "Git History";
     void this.load();
   }
 
@@ -334,19 +345,21 @@ class GraphPanel {
     }
     await this.post({ type: "busy", on: true });
     const view = this.view(repo);
+    const scope = this.scope;
     const git = gitAt(repo);
     try {
       const [graph, remotes, diffTool] = await Promise.all([
-        loadGraph(git, view, this.count),
+        loadGraph(git, view, this.count, scope?.path),
         remotesOf(git),
         git(["config", "--get", "diff.tool"]).then((tool) => tool.trim() !== "", () => false),
       ]);
-      if (repo !== this.repo) return;
+      if (repo !== this.repo || scope !== this.scope) return;
       await this.post({
         type: "graph",
         repos,
         repo,
         view,
+        scope,
         graph,
         subjects: graph.commits.map((commit) => md.renderInline(commit.subject)),
         remotes: remotes.map((remote) => ({ name: remote.name, pr: act.pullRequestUrl(remote, "") !== undefined })),
@@ -366,6 +379,8 @@ class GraphPanel {
         return this.load();
       case "repo":
         return this.open(message.repo as string);
+      case "scope":
+        return this.narrow(undefined);
       case "view":
         return this.setView(message.view as ViewOptions);
       case "more":
@@ -415,11 +430,12 @@ class GraphPanel {
 
   private async details(repo: string, hash: string, stash?: { base: string; untracked?: string }): Promise<void> {
     const git = gitAt(repo);
+    const scope = this.scope?.path;
     try {
       let details: CommitDetails | undefined;
       let files: (FileChange & { from: string; to: string })[];
       if (hash === UNCOMMITTED) {
-        files = (await uncommittedChanges(git)).map((file) => ({ ...file, from: "HEAD", to: UNCOMMITTED }));
+        files = (await uncommittedChanges(git, scope)).map((file) => ({ ...file, from: "HEAD", to: UNCOMMITTED }));
       } else if (stash) {
         details = await stashDetails(git, hash, stash.base, stash.untracked);
         files = details.files.map((file) => ({
@@ -428,7 +444,7 @@ class GraphPanel {
           to: file.type === "U" ? stash.untracked! : hash,
         }));
       } else {
-        details = await commitDetails(git, hash);
+        details = await commitDetails(git, hash, scope);
         const parent = details.parents[0] ?? "";
         files = details.files.map((file) => ({ ...file, from: parent, to: hash }));
       }
@@ -446,7 +462,7 @@ class GraphPanel {
 
   private async compare(repo: string, from: string, to: string): Promise<void> {
     try {
-      const files = (await comparison(gitAt(repo), from, to)).map((file) => ({ ...file, from, to }));
+      const files = (await comparison(gitAt(repo), from, to, this.scope?.path)).map((file) => ({ ...file, from, to }));
       await this.post({ type: "compare", from, to, files });
     } catch (error) {
       await this.post({ type: "compare", from, to, error: String(error instanceof Error ? error.message : error) });
@@ -461,8 +477,8 @@ class GraphPanel {
   }
 }
 
-/** Opens the panel, or brings it forward, on `repo` or the one it last showed. */
-async function show(context: vscode.ExtensionContext, repo?: string): Promise<void> {
+/** Opens the panel, or brings it forward, on `repo` or the one it last showed, narrowed to `scope` if given. */
+async function show(context: vscode.ExtensionContext, repo?: string, scope?: Scope): Promise<void> {
   await ready();
   if (!GraphPanel.current) {
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Git History", vscode.ViewColumn.Active, {
@@ -478,7 +494,41 @@ async function show(context: vscode.ExtensionContext, repo?: string): Promise<vo
   } else {
     GraphPanel.current.panel.reveal();
   }
-  GraphPanel.current.open(repo);
+  GraphPanel.current.open(repo, scope);
+}
+
+/**
+ * The history of one file or folder: the panel narrowed to it, in the
+ * innermost repository holding it. From a menu the argument is the resource;
+ * from the palette, the file being looked at, or for a folder the one it is in.
+ */
+async function viewHistory(target: unknown, context: vscode.ExtensionContext, ofFolder: boolean): Promise<void> {
+  const active = vscode.window.activeTextEditor?.document.uri;
+  const uri = target instanceof vscode.Uri
+    ? target
+    : ofFolder && active
+    ? vscode.Uri.joinPath(active, "..")
+    : active;
+  if (uri?.scheme !== "file") {
+    void vscode.window.showWarningMessage("Git History: open a file on disk, or pick one in the Explorer");
+    return;
+  }
+  const file = uri.fsPath;
+  const repo = api!.repositories
+    .map((repository) => repository.rootUri.fsPath)
+    .filter((root) => file === root || file.startsWith(root + path.sep))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!repo) {
+    void vscode.window.showWarningMessage(`Git History: ${path.basename(file)} is not in a Git repository`);
+    return;
+  }
+  const relative = path.relative(repo, file).split(path.sep).join("/");
+  // A file deleted since its editor opened still has a history to show.
+  const folder = await vscode.workspace.fs.stat(uri).then(
+    (stat) => (stat.type & vscode.FileType.Directory) !== 0,
+    () => false,
+  );
+  await show(context, repo, relative ? { path: relative, folder } : undefined);
 }
 
 const refreshAfter = () => GraphPanel.current?.refresh();
@@ -952,8 +1002,10 @@ const COMMANDS: Record<string, (ctx: Context, context: vscode.ExtensionContext) 
     const root = (ctx as unknown as { rootUri?: vscode.Uri } | undefined)?.rootUri?.fsPath;
     return show(context, root);
   },
+  viewFileHistory: (ctx, context) => viewHistory(ctx, context, false),
+  viewFolderHistory: (ctx, context) => viewHistory(ctx, context, true),
   fetch: async (_ctx, context) => {
-    await show(context);
+    await show(context, undefined, GraphPanel.current?.scope);
     const repo = GraphPanel.current?.repo;
     if (repo) await fetchAll(repo);
   },

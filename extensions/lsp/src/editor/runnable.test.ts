@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { entryLine, entryPoints, findsEntryInText } from "./runnable";
+import { canHoldEntry, entryLine, entryPoints, findsEntryInText } from "./runnable";
 
 const FUNCTION = 11;
 const METHOD = 5;
@@ -84,6 +84,26 @@ test("the two rules never both apply to one language", () => {
   assert.equal(findsEntryInText("shellscript"), true);
   assert.equal(findsEntryInText("go"), false);
   assert.equal(entryLine("go", "func main() {}\n"), undefined);
+});
+
+test("only Go's main package has an entry point", () => {
+  // `func main` elsewhere is an ordinary function: `go run` refuses the file as
+  // "not a main package", so run and debug over it could only fail.
+  assert.equal(canHoldEntry("go", "package main\n\nfunc main() {}\n"), true);
+  assert.equal(canHoldEntry("go", "package server\n\nfunc main() {}\n"), false);
+  assert.equal(canHoldEntry("go", "package mainly\n"), false);
+  // A build constraint and a licence header come before the clause.
+  assert.equal(
+    canHoldEntry("go", "//go:build linux\n\n/*\nCopyright somebody.\n*/\n\npackage main\n"),
+    true,
+  );
+  // The clause is the first thing after comments, not any line saying so.
+  assert.equal(canHoldEntry("go", "// package main is elsewhere\npackage tools\n"), false);
+  assert.equal(canHoldEntry("go", "/*\npackage main\n*/\npackage tools\n"), false);
+  // No clause yet, as in a file being written: nothing to run.
+  assert.equal(canHoldEntry("go", "func main() {}\n"), false);
+  // Other languages are not asked.
+  assert.equal(canHoldEntry("rust", "fn main() {}\n"), true);
 });
 
 test("a local named main inside a function is not the program's entry", () => {
