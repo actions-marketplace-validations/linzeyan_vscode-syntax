@@ -47,7 +47,11 @@ fn the_committed_example_is_what_the_binary_generates() {
     let root = repo_root();
     let (code, stdout, stderr) = poly(&root, &["config", "export"]);
     assert_eq!(code, 0, "{stderr}");
-    let committed = std::fs::read_to_string(root.join("poly.example.toml")).unwrap();
+    // A Windows checkout with core.autocrlf has CRLF on disk; the generator
+    // writes LF, and the endings are git's business, not the contract's.
+    let committed = std::fs::read_to_string(root.join("poly.example.toml"))
+        .unwrap()
+        .replace("\r\n", "\n");
     assert_eq!(
         stdout, committed,
         "poly.example.toml is stale; run `poly config export > poly.example.toml`"
@@ -116,4 +120,94 @@ fn a_tools_path_that_does_not_exist_stops_the_run() {
     // `poly fmt` reads the same file and has to agree about it.
     let (code, _, stderr) = poly(dir.path(), &["fmt", "--check", "."]);
     assert_eq!(code, 2, "{stderr}");
+}
+
+/// The editor asks `poly tools install` for a jar from wherever the file is and
+/// runs the path it prints, so that path has to be the project's pin, whole.
+#[test]
+fn a_pinned_tool_is_found_from_a_subdirectory_and_printed_absolute() {
+    let dir = project("[tools]\nplantuml = \"./vendor/plantuml.jar\"\n");
+    std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+    std::fs::write(dir.path().join("vendor/plantuml.jar"), "").unwrap();
+    let sub = dir.path().join("docs");
+    std::fs::create_dir_all(&sub).unwrap();
+    let (code, stdout, stderr) = poly(&sub, &["tools", "install", "plantuml"]);
+    assert_eq!(code, 0, "{stderr}");
+    let printed = stdout
+        .trim()
+        .strip_prefix("plantuml: pinned ")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(Path::new(printed).is_absolute(), "{stdout}");
+    assert_eq!(
+        std::fs::canonicalize(printed).unwrap(),
+        std::fs::canonicalize(dir.path().join("vendor/plantuml.jar")).unwrap()
+    );
+}
+
+/// `poly` as the editor starts it, carrying the poly.tools setting.
+fn poly_in_editor(dir: &Path, tools: &str, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_poly"))
+        .args(args)
+        .current_dir(dir)
+        .env("POLY_TOOLS", tools)
+        .output()
+        .expect("spawn poly");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The setting replaces poly.toml one tool at a time. Someone who pins a jar
+/// in settings.json has not thereby turned the project's other lines off, and
+/// the project's line for that jar must not win over what they just chose.
+#[test]
+fn the_editor_setting_beats_poly_toml_tool_by_tool() {
+    let dir = project("[tools]\nplantuml = \"./vendor/plantuml.jar\"\nshellcheck = \"off\"\n");
+    std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+    std::fs::write(dir.path().join("vendor/plantuml.jar"), "").unwrap();
+    let mine = dir.path().join("mine.jar");
+    std::fs::write(&mine, "").unwrap();
+    let tools = format!(
+        "\"plantuml\" = {:?}\n\"tflint\" = \"off\"\n",
+        mine.display().to_string()
+    );
+    let (code, stdout, stderr) = poly_in_editor(
+        dir.path(),
+        &tools,
+        &["tools", "install", "plantuml", "shellcheck", "tflint"],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let line = |name: &str| {
+        stdout
+            .lines()
+            .find(|line| line.starts_with(&format!("{name}: ")))
+            .unwrap_or_else(|| panic!("no {name} line: {stdout}"))
+            .to_string()
+    };
+    let printed = line("plantuml");
+    let printed = printed.strip_prefix("plantuml: pinned ").unwrap();
+    assert_eq!(
+        std::fs::canonicalize(printed).unwrap(),
+        std::fs::canonicalize(&mine).unwrap()
+    );
+    // Each "off" sends the reader to the place that says it.
+    assert_eq!(line("shellcheck"), "shellcheck: disabled in poly.toml");
+    assert_eq!(line("tflint"), "tflint: disabled in the poly.tools setting");
+}
+
+/// A setting that points at nothing stops the run the way a poly.toml line
+/// does, and says which of the two to fix: there is no poly.toml here to open.
+#[test]
+fn a_missing_path_in_the_editor_setting_names_the_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, _, stderr) = poly_in_editor(
+        dir.path(),
+        "\"shellcheck\" = \"/nonexistent/shellcheck\"",
+        &["check", "."],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("poly.tools"), "{stderr}");
+    assert!(!stderr.contains("poly.toml"), "{stderr}");
 }

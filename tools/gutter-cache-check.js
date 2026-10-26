@@ -58,6 +58,9 @@ class Uri {
   static file(fsPath) {
     return new Uri(fsPath);
   }
+  static joinPath(base, ...parts) {
+    return new Uri(join(base.fsPath, ...parts));
+  }
   toString() {
     return `file://${this.fsPath}`;
   }
@@ -195,9 +198,13 @@ const vscode = {
   },
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
   OverviewRulerLane: { Right: 4 },
+  ViewColumn: { Active: -1, Beside: -2 },
+  ColorThemeKind: { Light: 1, Dark: 2, HighContrast: 3, HighContrastLight: 4 },
+  StatusBarAlignment: { Left: 1, Right: 2 },
   CompletionItemKind: { Snippet: 14 },
   CodeActionKind: { Refactor: "refactor", QuickFix: "quickfix" },
   SymbolKind: new Proxy({}, { get: () => 0 }),
+  TabInputTextDiff: class {},
   version: "stub",
   window: {
     get visibleTextEditors() {
@@ -210,11 +217,17 @@ const vscode = {
     onDidChangeTextEditorOptions: on("editorOptions"),
     onDidChangeActiveTextEditor: on("activeEditor"),
     onDidChangeTextEditorSelection: on("selection"),
+    onDidCloseTerminal: on("closeTerminal"),
+    tabGroups: { activeTabGroup: {}, onDidChangeTabs: on("tabs"), onDidChangeTabGroups: on("tabGroups") },
     createTreeView: () => ({ ...nothing, onDidChangeVisibility: on("treeVisibility"), visible: false }),
     registerTreeDataProvider: () => nothing,
+    registerCustomEditorProvider: () => nothing,
+    registerWebviewPanelSerializer: () => nothing,
+    registerUriHandler: () => nothing,
     showWarningMessage: () => Promise.resolve(undefined),
     showQuickPick: () => Promise.resolve(undefined),
     setStatusBarMessage: () => nothing,
+    createStatusBarItem: () => ({ ...nothing, show() {}, hide() {} }),
     // The "Poly Editor" log channel. Nothing here reads what it says.
     createOutputChannel: () => ({
       ...nothing,
@@ -228,12 +241,14 @@ const vscode = {
   },
   workspace: {
     workspaceFolders: [{ uri: Uri.file(WORKSPACE), name: "workspace", index: 0 }],
+    textDocuments: [],
     // The image gutter ships off, and this check is about what it does while
     // on. Naming the setting rather than returning the code's own fallback:
     // that fallback is `false` now, and a stub that inherited it would measure
     // a feature doing nothing and report a flawless cache.
     getConfiguration: () => ({
       get: (setting, fallback) => (setting === "imagePreview.enabled" ? true : fallback),
+      inspect: () => undefined,
     }),
     getWorkspaceFolder: () => ({ uri: Uri.file(WORKSPACE), name: "workspace", index: 0 }),
     asRelativePath: (uri) => String(uri.fsPath ?? uri),
@@ -245,11 +260,19 @@ const vscode = {
     onDidChangeTextDocument: on("changeDocument"),
     onDidChangeConfiguration: on("changeConfiguration"),
     onDidSaveTextDocument: on("saveDocument"),
+    onWillSaveTextDocument: on("willSaveDocument"),
     onDidOpenTextDocument: on("openDocument"),
     onDidCloseTextDocument: on("closeDocument"),
     onDidCreateFiles: on("createFiles"),
     onDidDeleteFiles: on("deleteFiles"),
     onDidRenameFiles: on("renameFiles"),
+    registerTextDocumentContentProvider: () => nothing,
+    createFileSystemWatcher: () => ({
+      ...nothing,
+      onDidCreate: on("watchCreate"),
+      onDidChange: on("watchChange"),
+      onDidDelete: on("watchDelete"),
+    }),
   },
   commands: {
     registerCommand: () => nothing,
@@ -261,8 +284,11 @@ const vscode = {
     registerCompletionItemProvider: () => nothing,
     registerCodeActionsProvider: () => nothing,
     registerHoverProvider: () => nothing,
+    registerDocumentSymbolProvider: () => nothing,
+    registerSignatureHelpProvider: () => nothing,
+    createDiagnosticCollection: () => ({ ...nothing, set() {}, delete() {}, clear() {} }),
   },
-  extensions: { all: [], getExtension: () => undefined },
+  extensions: { all: [], getExtension: () => undefined, onDidChange: on("extensions") },
   env: { clipboard: { writeText: async () => {} } },
 };
 
@@ -305,6 +331,12 @@ function load() {
     external: ["vscode"],
     format: "cjs",
     platform: "node",
+    // The product build's alias: jsonc-parser's default entry is a UMD build
+    // whose require("./impl/format") esbuild cannot follow. An alias resolves
+    // from the working directory, so that has to be the extension's, as it is
+    // for `pnpm run build`.
+    alias: { "jsonc-parser": "jsonc-parser/lib/esm/main.js" },
+    absWorkingDir: LSP,
   });
   const real = Module._load;
   Module._load = function(request, ...rest) {
@@ -325,7 +357,11 @@ async function main() {
   const pinned = openEditor(openDocument(join(WORKSPACE, "pinned.md"), lines.pinned), 0, 1);
   visible = [scroller, pinned];
 
-  extension.activate({ subscriptions: [], extensionUri: Uri.file(LSP) });
+  extension.activate({
+    subscriptions: [],
+    extensionUri: Uri.file(LSP),
+    extension: { id: "ricky.poly-lsp", packageJSON: { contributes: { commands: [] } } },
+  });
 
   const steps = [];
   for (let top = 0; top + WINDOW <= IMAGES; top += WINDOW) {

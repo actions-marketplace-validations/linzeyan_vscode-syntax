@@ -3,8 +3,9 @@
 //! runners producing poly_core::diag::Issue.
 //!
 //! Resolution per tool: poly.toml `[tools]` entry (version pin / "off" /
-//! explicit path) -> managed download cache -> PATH. Project-local tool
-//! detection (node_modules/.bin, rustfmt) is M4 backlog.
+//! explicit path) -> PATH, at any version of the pinned major -> managed
+//! download cache. Project-local tool detection (node_modules/.bin, rustfmt)
+//! is M4 backlog.
 
 pub mod project;
 pub mod run;
@@ -31,9 +32,9 @@ pub struct Asset {
 pub struct Tool {
     pub name: &'static str,
     pub version: &'static str,
-    /// The poly-core language id this linter covers. `None` would mean a tool
-    /// that reads every file regardless; typos was the only one, and it is
-    /// compiled in now (`poly_engines::lint::spell`).
+    /// The poly-core language id this linter covers. `None` is plantuml, which
+    /// lints nothing: the editor's preview and export run it, and it is here
+    /// for the download and the pin.
     pub language: Option<&'static str>,
     asset: fn(version: &str, platform: &str) -> Option<Asset>,
 }
@@ -209,6 +210,32 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "jsonnetfmt",
+        version: "0.22.0",
+        language: Some("jsonnet"),
+        // go-jsonnet, not google/jsonnet: the C++ repo releases source only.
+        // The two formatters share the C++ repo's fmt golden tests, so this is
+        // the same output, and the tarball also carries jsonnet, jsonnet-lint
+        // and jsonnet-deps -- `unpack` takes the one named here.
+        asset: |v, p| {
+            let suffix = match p {
+                "darwin-arm64" => "darwin_arm64",
+                "darwin-x64" => "darwin_amd64",
+                "linux-arm64" => "linux_arm64",
+                "linux-x64" => "linux_amd64",
+                "win-x64" => "windows_amd64",
+                "win-arm64" => "windows_arm64",
+                _ => return None,
+            };
+            Some(Asset {
+                url: format!(
+                    "https://github.com/google/go-jsonnet/releases/download/v{v}/go-jsonnet_{v}_{suffix}.tar.gz"
+                ),
+                kind: Kind::TarGz,
+            })
+        },
+    },
+    Tool {
         name: "golangci-lint",
         version: "2.13.2",
         language: Some("go"),
@@ -252,14 +279,10 @@ pub const TOOLS: &[Tool] = &[
             })
         },
     },
-    // The only tool here that is also a language server (`buf lsp serve`).
-    // Every other server poly proxies resolves from PATH because it has to
-    // match the toolchain that built the project -- gopls reads the Go version
-    // out of go.mod, rust-analyzer wants the rustc that compiled the crate,
-    // clangd wants the compile database. A .proto file is a declaration with
-    // no build behind it, so buf has nothing to match and poly can pin it like
-    // any other formatter. That is what makes protobuf work out of the box
-    // instead of only for people who already ran `brew install buf`.
+    // A .proto file is a declaration with no build behind it, so buf has no
+    // toolchain to match and poly can pin it like any other formatter. That is
+    // what makes protobuf work out of the box instead of only for people who
+    // already ran `brew install buf`.
     Tool {
         name: "buf",
         version: "1.72.0",
@@ -283,8 +306,8 @@ pub const TOOLS: &[Tool] = &[
     },
     // R's whole toolchain in one binary: formatter, linter and language server
     // (`arity lsp`). buf is the precedent and the reasoning is buf's -- an R
-    // script has no build for a server to be in step with, so there is no
-    // toolchain for poly to match and pinning the version is free. Without it R
+    // script has no build to be in step with, so there is no toolchain for
+    // poly to match and pinning the version is free. Without it R
     // has nothing: no formatter ships with R, and the ecosystem's own tools are
     // R packages that need an R installation poly cannot assume.
     Tool {
@@ -313,6 +336,24 @@ pub const TOOLS: &[Tool] = &[
                     "https://github.com/jolars/arity/releases/download/v{v}/arity-{target}"
                 ),
                 kind,
+            })
+        },
+    },
+    // The MIT build, not the GPLv2 one jebbs.plantuml bundles: over 32 diagram
+    // types the only one it cannot draw is ditaa, and every export format
+    // behaves the same in both. A project that needs ditaa points
+    // `[tools] plantuml` at a GPL jar. poly does not ship the Java to run it.
+    Tool {
+        name: "plantuml",
+        version: "1.2026.8",
+        language: None,
+        // One jar for every platform: the JVM is the platform-specific part.
+        asset: |v, p| {
+            PLATFORMS.contains(&p).then(|| Asset {
+                url: format!(
+                    "https://github.com/plantuml/plantuml/releases/download/v{v}/plantuml-mit-{v}.jar"
+                ),
+                kind: Kind::Raw,
             })
         },
     },
@@ -409,6 +450,35 @@ pub fn default_off(name: &str) -> bool {
     DEFAULT_OFF.contains(&name)
 }
 
+// ── Restricted Mode ────────────────────────────────────────────────────────
+
+static RESTRICTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// From here on, run nothing and download nothing: what poly embeds is all it
+/// uses. For an editor in Restricted Mode, whose folder is not trusted.
+///
+/// Every tool poly could start is one the folder can choose or steer: a
+/// `node_modules/.bin` it ships, a `[tools]` path, a rustup proxy obeying its
+/// `rust-toolchain.toml`, a `go` obeying its `toolchain` line, golangci-lint
+/// loading the plugins its config names. So nothing is started rather than
+/// some things, which is the one rule that cannot miss a case. Schemas are not
+/// fetched either: the folder names those URLs too.
+///
+/// Process-wide and one-way, because trust only ever moves the other way
+/// mid-session, and the editor restarts the daemon when it does.
+pub fn restrict() {
+    RESTRICTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See `restrict`.
+pub fn restricted() -> bool {
+    RESTRICTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What a restricted poly says instead of running something.
+pub const RESTRICTED_REASON: &str =
+    "the workspace is not trusted, so poly runs only what it embeds";
+
 // ── resolution ─────────────────────────────────────────────────────────────
 
 /// The binary a `[tools]` value points at, or None when the value is not a
@@ -470,6 +540,9 @@ impl Resolved {
 /// asks for it. One grammar for every tool, rather than a value that only means
 /// something for the tools that happen to be off today.
 pub fn resolve(name: &str, config: &poly_core::Config, offline: bool) -> Resolved {
+    if restricted() {
+        return Resolved::Missing(RESTRICTED_REASON.to_string());
+    }
     let setting = config.tools.get(name).map(String::as_str);
     if setting == Some("off") {
         return Resolved::Disabled;
@@ -485,7 +558,8 @@ pub fn resolve(name: &str, config: &poly_core::Config, offline: bool) -> Resolve
             Resolved::Pinned(path)
         } else {
             Resolved::Missing(format!(
-                "poly.toml points {name} at {} (not found)",
+                "{} points {name} at {} (not found)",
+                config.tool_source(name),
                 path.display()
             ))
         };
@@ -499,41 +573,134 @@ pub fn resolve(name: &str, config: &poly_core::Config, offline: bool) -> Resolve
         Some("on") | None => tool.version,
         Some(pinned) => pinned,
     };
-    match ensure_installed(tool, version, config, offline) {
-        Ok(Some(path)) => return Resolved::Managed(path),
-        Ok(None) => {} // no asset for this platform: fall through to PATH
-        Err(e) => {
-            // Download failed (offline, checksum, ...): fall back to PATH but
-            // remember why in case PATH misses too.
-            if let Some(path) = find_on_path(name) {
-                return Resolved::Path(path);
-            }
-            return Resolved::Missing(format!("{e:#}"));
+    // plantuml is never taken from PATH: poly runs a jar, and a `plantuml` on
+    // PATH is a launcher script that brings its own Java.
+    let on_path = || {
+        (tool.name != "plantuml")
+            .then(|| find_on_path(name))
+            .flatten()
+            .filter(|path| same_tool(tool, path))
+    };
+    // What the machine already runs comes first, at whatever version it is. A
+    // version written in `[tools]` is a request for that version, so it goes to
+    // the download instead.
+    let written = version != tool.version;
+    if !written {
+        if let Some(path) = on_path() {
+            return Resolved::Path(path);
         }
     }
-    match find_on_path(name) {
-        Some(path) => Resolved::Path(path),
-        None => Resolved::Missing(format!(
+    let missing = match ensure_installed(tool, version, config, offline) {
+        Ok(Some(path)) => return Resolved::Managed(path),
+        Ok(None) => format!(
             "{name} has no managed build for {} and is not on PATH",
             current_platform()
-        )),
+        ),
+        Err(e) => format!("{e:#}"),
+    };
+    // A written version with no build here, or a failed download: the
+    // machine's own copy still beats nothing.
+    match written.then(on_path).flatten() {
+        Some(path) => Resolved::Path(path),
+        None => Resolved::Missing(missing),
     }
 }
 
-/// Last resort of `resolve`, and the only route for the tools poly never
-/// installs for you — rustfmt, clang-format, and the language servers the LSP
-/// daemon proxies, all of which have to match the project's own toolchain.
+/// Is the binary at `path` the tool poly pins, at any version?
+///
+/// Asked by running `--version` and reading the first `N.N` it prints. Minor
+/// and patch may differ -- the machine's copy is taken as it is -- but the
+/// major has to match, because that is where a command line changes:
+/// golangci-lint 1.x rejects the `--output.json.path` poly passes 2.x. A binary
+/// that cannot say its version is not taken either: a mise shim with no version
+/// set for this directory exits non-zero, though its error names one.
+///
+/// ponytail: the first `N.N` printed is the version for every registry tool
+/// today; one that prints another number first needs a probe of its own.
+fn same_tool(tool: &Tool, path: &Path) -> bool {
+    let Some(want) = major(tool.version) else {
+        // "system": the project's toolchain, whatever version it is.
+        return true;
+    };
+    let Ok(output) = std::process::Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let same = output.status.success() && major(&said) == Some(want);
+    if !same {
+        eprintln!(
+            "[poly] {} is not {} {want}.x ({}), so poly uses its own",
+            path.display(),
+            tool.name,
+            said.lines().next().unwrap_or("no output").trim()
+        );
+    }
+    same
+}
+
+/// The major version in the first `N.N` of `text`, whatever precedes it.
+fn major(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    (0..bytes.len()).find_map(|start| {
+        if !bytes[start].is_ascii_digit() || (start > 0 && bytes[start - 1].is_ascii_digit()) {
+            return None;
+        }
+        let end = start
+            + bytes[start..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+        let dotted =
+            bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(|b| b.is_ascii_digit());
+        dotted.then(|| text[start..end].parse().ok()).flatten()
+    })
+}
+
+/// `resolve`'s first stop for a tool poly pins, and the only route for the
+/// tools poly never installs for you — rustfmt, clang-format, and the language
+/// servers the LSP daemon proxies, all of which have to match the project's
+/// own toolchain.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    if restricted() {
+        return None;
+    }
     let exe = if cfg!(windows) {
         format!("{name}.exe")
     } else {
         name.to_string()
     };
+    let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some();
     std::env::var_os("PATH")?.to_str().map(|paths| {
         std::env::split_paths(paths)
+            .filter(|d| !(wsl && windows_drive(d)))
             .map(|d| d.join(&exe))
             .find(|p| p.is_file())
     })?
+}
+
+/// A Windows drive as WSL mounts it, `/mnt/c/...`. WSL appends Windows' PATH to
+/// its own, so a tool installed on both sides was found first on the Windows
+/// one whenever Linux's copy came later or was missing: bash-language-server
+/// was npm's Windows shim, which started a server over the drive mount that
+/// never answered `initialize`. A Windows program is not the Linux tool asked
+/// for, so the drives are not looked in at all.
+///
+/// ponytail: the default mount root only; one moved by `[automount] root` in
+/// wsl.conf is searched as before.
+fn windows_drive(dir: &Path) -> bool {
+    let Some(rest) = dir.to_str().and_then(|d| d.strip_prefix("/mnt/")) else {
+        return false;
+    };
+    let drive = rest.split('/').next().unwrap_or_default();
+    drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic()
 }
 
 // ── managed download ───────────────────────────────────────────────────────
@@ -563,10 +730,71 @@ fn lock_path(config: &poly_core::Config) -> PathBuf {
         .join("poly-tools.lock")
 }
 
+/// poly's own pins: the sha256 of every (version, platform) the registry
+/// downloads, as tools/tool-sync.py records them from upstream's release API.
+///
+/// Compiled in, because the project's lock is the wrong place to look for
+/// them: every repository but this one has none, so each first download was
+/// trust on first use and wrote a poly-tools.lock into a workspace that never
+/// asked for one.
+const PINS: &str = include_str!("../../../../poly-tools.lock");
+
+/// Check a download's `digest` against the lock that speaks for it.
+///
+/// poly's pins decide whenever they hold `key` ("<version>-<platform>"), and
+/// then nothing is written anywhere. A version poly does not pin -- `[tools]
+/// x = "1.2.3"` -- falls back to the project's lock, trust on first use: the
+/// first download is recorded and later ones must match. `record` is false
+/// under the editor, which never adds a file to the workspace it was opened on.
+fn verify(
+    tool: &str,
+    version: &str,
+    key: &str,
+    digest: &str,
+    lock_file: &Path,
+    record: bool,
+) -> Result<()> {
+    let mismatch = |expected: &str| {
+        anyhow!(
+            "{tool} {version} sha256 mismatch: lock has {expected}, download is {digest} — upstream re-tagged or download corrupted"
+        )
+    };
+    let pins: toml::Table = PINS.parse().context("parsing poly's own poly-tools.lock")?;
+    if let Some(expected) = pins
+        .get(tool)
+        .and_then(|t| t.get(key))
+        .and_then(|v| v.as_str())
+    {
+        return if expected == digest {
+            Ok(())
+        } else {
+            Err(mismatch(expected))
+        };
+    }
+    let mut lock: toml::Table = std::fs::read_to_string(lock_file)
+        .ok()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_default();
+    let entry = lock
+        .entry(tool.to_string())
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    match entry.get(key).and_then(|v| v.as_str()) {
+        Some(expected) if expected != digest => Err(mismatch(expected)),
+        Some(_) => Ok(()),
+        None if !record => Ok(()),
+        None => {
+            if let Some(table) = entry.as_table_mut() {
+                table.insert(key.to_string(), toml::Value::String(digest.to_string()));
+            }
+            std::fs::write(lock_file, toml::to_string_pretty(&lock)?)
+                .with_context(|| format!("writing {}", lock_file.display()))
+        }
+    }
+}
+
 /// Download+verify+extract `tool` into the cache; returns None when the
 /// platform has no asset. Already-cached binaries return immediately.
-/// First download records the sha256 in poly-tools.lock (trust on first
-/// use); later downloads must match it.
+/// See `verify` for which lock a download is checked against.
 fn ensure_installed(
     tool: &Tool,
     version: &str,
@@ -602,31 +830,16 @@ fn ensure_installed(
     );
     let body = download(&asset.url)?;
     let digest = format!("{:x}", sha2::Sha256::digest(&body));
-
-    let lock_file = lock_path(config);
-    let mut lock: toml::Table = std::fs::read_to_string(&lock_file)
-        .ok()
-        .and_then(|t| t.parse().ok())
-        .unwrap_or_default();
-    let key = format!("{}-{}", version, platform);
-    let entry = lock
-        .entry(tool.name.to_string())
-        .or_insert_with(|| toml::Value::Table(Default::default()));
-    match entry.get(&key).and_then(|v| v.as_str()) {
-        Some(expected) if expected != digest => bail!(
-            "{} {} sha256 mismatch: lock has {expected}, download is {digest} — upstream re-tagged or download corrupted",
-            tool.name,
-            version
-        ),
-        Some(_) => {}
-        None => {
-            if let Some(table) = entry.as_table_mut() {
-                table.insert(key, toml::Value::String(digest.clone()));
-            }
-            std::fs::write(&lock_file, toml::to_string_pretty(&lock)?)
-                .with_context(|| format!("writing {}", lock_file.display()))?;
-        }
-    }
+    verify(
+        tool.name,
+        version,
+        &format!("{version}-{platform}"),
+        &digest,
+        &lock_path(config),
+        // The extension sets this on every poly it starts, empty or not, and a
+        // CLI run never has it -- so it doubles as "who is asking".
+        std::env::var_os(poly_core::EDITOR_TOOLS).is_none(),
+    )?;
 
     extract(&body, asset.kind, tool.name, &target)?;
     Ok(Some(target))
@@ -662,9 +875,15 @@ const DOWNLOAD_BACKOFF: std::time::Duration = std::time::Duration::from_millis(2
 /// quietly downloading again until one passes is exactly how a tamper signal
 /// turns into a flake.
 fn download(url: &str) -> Result<Vec<u8>> {
+    download_with(&ureq::Agent::new_with_defaults(), url)
+}
+
+/// `download`, through an agent with settings of its own -- a schema fetch has
+/// a deadline a tool download must not have.
+fn download_with(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
     let mut attempt = 1u32;
     loop {
-        let error = match ureq::get(url).call().and_then(|mut response| {
+        let error = match agent.get(url).call().and_then(|mut response| {
             response
                 .body_mut()
                 .with_config()
@@ -689,6 +908,74 @@ fn download(url: &str) -> Result<Vec<u8>> {
         eprintln!("[poly] {url}: {error} — retrying ({attempt}/{DOWNLOAD_ATTEMPTS})");
         std::thread::sleep(DOWNLOAD_BACKOFF * 2u32.pow(attempt - 1));
         attempt += 1;
+    }
+}
+
+/// How long a fetched JSON Schema is used before it is asked for again.
+///
+/// A day, because a schema is a document its owner edits, unlike a pinned
+/// tool: caching it forever would keep reporting against a version upstream has
+/// since fixed. CI starts with an empty cache and always fetches.
+const SCHEMA_FRESH: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The longest a schema fetch may take, retries included.
+///
+/// The daemon lints on the thread that answers the editor, so a fetch that
+/// hangs is a frozen editor rather than a slow lint. Ten seconds is past any
+/// healthy response and short enough to read as an error, not a hang.
+const SCHEMA_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A JSON Schema a YAML or TOML file named, as text: poly-engines' `schema::Fetch`.
+///
+/// Cached under the poly cache beside the tools, keyed by the URL's sha256. A
+/// copy older than `SCHEMA_FRESH` is fetched again, and a failed fetch falls
+/// back to that copy however old it is -- a stale schema is a better answer on
+/// a train than "could not check", and the fallback says so on stderr.
+pub fn schema(url: &str) -> Result<String> {
+    if restricted() {
+        bail!("{url} not fetched: {RESTRICTED_REASON}");
+    }
+    let file = cache_dir()
+        .with_file_name("schemas")
+        .join(format!("{:x}.json", sha2::Sha256::digest(url.as_bytes())));
+    let age = std::fs::metadata(&file)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok());
+    if age.is_some_and(|age| age < SCHEMA_FRESH) {
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            return Ok(text);
+        }
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(SCHEMA_DEADLINE))
+        .build()
+        .into();
+    let fetched = download_with(&agent, url).and_then(|body| {
+        String::from_utf8(body).with_context(|| format!("{url} is not UTF-8 text"))
+    });
+    match fetched {
+        Ok(text) => {
+            // Written beside and renamed over, so a concurrent reader -- the
+            // daemon and a `poly check` share this directory -- never sees half
+            // a schema. A cache that cannot be written costs the next run a
+            // fetch, not this one its answer.
+            let partial = file.with_extension(format!("{}.part", std::process::id()));
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if std::fs::write(&partial, &text).is_ok() {
+                let _ = std::fs::rename(&partial, &file);
+            }
+            Ok(text)
+        }
+        Err(error) => match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                eprintln!("[poly] {error:#} -- checking against the copy cached earlier");
+                Ok(text)
+            }
+            Err(_) => Err(error),
+        },
     }
 }
 
@@ -829,6 +1116,29 @@ fn unpack(body: &[u8], kind: Kind, name: &str, tmp: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Under WSL a Windows drive on PATH handed out npm's Windows shim for
+    /// bash-language-server; WSL's own mounts beside the drives are Linux and
+    /// stay searched.
+    #[test]
+    fn only_a_drive_letter_under_mnt_is_windows() {
+        for dir in [
+            "/mnt/c",
+            "/mnt/c/Users/me/AppData/Roaming/npm",
+            "/mnt/D/bin",
+        ] {
+            assert!(windows_drive(Path::new(dir)), "{dir} is a Windows drive");
+        }
+        for dir in [
+            "/mnt/wsl/bin",
+            "/mnt/wslg",
+            "/mnt",
+            "/usr/local/bin",
+            "/home/me/mnt/c/bin",
+        ] {
+            assert!(!windows_drive(Path::new(dir)), "{dir} is Linux");
+        }
+    }
 
     /// Two installers of the same tool must not share a scratch file.
     ///
@@ -1247,6 +1557,111 @@ mod tests {
         let error = format!("{error:#}");
         assert!(error.contains("sha256 mismatch"), "{error}");
         assert!(!error.contains("attempts"), "{error}");
+    }
+
+    /// Which lock a download answers to decides whether a file appears in the
+    /// project. poly pins every version it downloads, so a workspace that never
+    /// asked for a poly-tools.lock must not get one -- the editor was writing
+    /// one beside every Go module it linted. A version poly does not pin is
+    /// still recorded, by the CLI only, and a recorded one binds both.
+    #[test]
+    fn only_an_unpinned_version_is_recorded_and_only_by_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("poly-tools.lock");
+        let pins: toml::Table = PINS.parse().unwrap();
+        let (tool, keys) = pins.iter().next().expect("poly pins at least one tool");
+        let (key, digest) = keys.as_table().unwrap().iter().next().unwrap();
+        let digest = digest.as_str().unwrap();
+        let wrong = "0".repeat(64);
+
+        verify(tool, "pinned", key, digest, &lock, true).expect("poly's own pin");
+        let error = verify(tool, "pinned", key, &wrong, &lock, true)
+            .expect_err("a digest poly pins differently is not an install");
+        assert!(format!("{error:#}").contains("sha256 mismatch"));
+        assert!(
+            !lock.exists(),
+            "a pinned download wrote a lock into the project"
+        );
+
+        verify("unpinned", "1.0", "1.0-any", digest, &lock, false).unwrap();
+        assert!(!lock.exists(), "the editor wrote a lock into its workspace");
+
+        verify("unpinned", "1.0", "1.0-any", digest, &lock, true).unwrap();
+        assert!(std::fs::read_to_string(&lock).unwrap().contains(digest));
+        verify("unpinned", "1.0", "1.0-any", &wrong, &lock, false)
+            .expect_err("a digest the project recorded binds the editor too");
+    }
+
+    /// What the registry's tools print for `--version`, copied from real runs:
+    /// the version is the first `N.N`, whether a word, a `v` or a label comes
+    /// before it, and a later `go1.26` does not get in the way.
+    #[test]
+    fn a_version_is_read_from_what_the_tool_prints() {
+        for (said, want) in [
+            (
+                "golangci-lint has version 2.12.2 built with go1.26.2 from c0d3ddc9",
+                2,
+            ),
+            ("golangci-lint has version 1.64.8 built with go1.24.1", 1),
+            (
+                "ShellCheck - shell script analysis tool\nversion: 0.10.0",
+                0,
+            ),
+            ("v0.10.0 (go1.26.4)", 0),
+            ("Haskell Dockerfile Linter 2.14.0", 2),
+            (
+                "TFLint version 0.53.0\n+ ruleset.terraform (0.9.1-bundled)",
+                0,
+            ),
+            ("1.2026.8", 1),
+        ] {
+            assert_eq!(major(said), Some(want), "{said}");
+        }
+        assert_eq!(major("system"), None);
+    }
+
+    /// The machine's copy is taken at any minor or patch and refused at another
+    /// major: a golangci-lint 1.x on PATH would have failed every run against
+    /// the 2.x command line poly speaks. One that cannot say its version is
+    /// refused too -- a mise shim names a version in the error it exits with.
+    #[cfg(unix)]
+    #[test]
+    fn path_is_taken_at_any_version_of_the_pinned_major() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = |name: &str, script: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let golangci = tool("golangci-lint").unwrap();
+        assert!(same_tool(
+            golangci,
+            &fake(
+                "older",
+                "echo 'golangci-lint has version 2.1.0 built with go1.24'"
+            )
+        ));
+        assert!(!same_tool(
+            golangci,
+            &fake(
+                "v1",
+                "echo 'golangci-lint has version 1.64.8 built with go1.24'"
+            )
+        ));
+        assert!(!same_tool(
+            golangci,
+            &fake(
+                "shim",
+                "echo 'mise ERROR No version is set for shim: golangci-lint 2.12.2' >&2; exit 1"
+            )
+        ));
+        // A toolchain tool has no pin to compare against.
+        assert!(same_tool(
+            tool("terraform").unwrap(),
+            &fake("terraform", "exit 1")
+        ));
     }
 
     /// `offline` is a promise, not a preference. An air-gapped run must not

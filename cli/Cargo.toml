@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/poly-cli", "crates/poly-core", "crates/poly-engines", "crates/poly-tools"]
 
 [workspace.package]
-version = "0.18.3"
+version = "0.19.1"
 edition = "2021"
 license = "MIT"
 
@@ -71,6 +71,17 @@ encoding_rs = "0.8"
 # Lua's parser, needed directly because selene lints an `Ast` rather than a
 # string and re-exports nothing.
 full_moon = "2.2"
+# Git History's reads where the editor finds no git (`poly git`). gitoxide
+# rather than libgit2: pure Rust, so the six release targets cross-compile with
+# no C or OpenSSL, and MIT/Apache rather than GPL-with-exception. Reads only --
+# no network, no worktree mutation -- so none of the transport features.
+gix = { version = "0.88", default-features = false, features = [
+  "anyhow",
+  "basic",
+  "max-performance-safe",
+  "sha1",
+  "status",
+] }
 globset = "0.4"
 ignore = "0.4"
 # deno.json is JSON with comments, and deno.jsonc says so in its name. Already
@@ -78,6 +89,11 @@ ignore = "0.4"
 # config costs a feature rather than a dependency -- and it is the same parser
 # `deno lint` reads that file with.
 jsonc-parser = { version = "0.33", features = ["serde"] }
+# JSON Schema, draft 4 through 2020-12, for the YAML and TOML files that name a
+# schema. Default features off because each one is a fetch poly does itself:
+# `resolve-http` brings reqwest and a second TLS stack beside poly-tools' ureq,
+# and `resolve-file` is a reader for the paths poly already resolves.
+jsonschema = { version = "0.58", default-features = false }
 # CSS's printer for `poly minify`. A parser is unavoidable here -- CSS
 # whitespace is only mostly insignificant, and the exceptions (the descendant
 # combinator in `a b`, the spaces inside `calc(1px + 2px)`, anything inside a
@@ -259,6 +275,18 @@ stylua = { version = "=2.5.2", default-features = false, features = [
   "luau",
 ] }
 toml = "0.8"
+# The parser under `toml`, named directly for the one thing `toml::Value`
+# drops: where each key and value was written. A schema finding has to land on
+# a line, and this is the version `toml` 0.8 already links.
+toml_edit = "0.22"
+# The parser behind Makefile and shell navigation (`symbols`). Neither language
+# has a language server most people have installed, and both are hard to read
+# by hand: a recipe line is shell, a heredoc swallows `$X`, and `$(call f,x)`
+# nests. One library for the two grammars, both from the tree-sitter project,
+# MIT like the rest.
+tree-sitter = "0.27"
+tree-sitter-bash = "0.25"
+tree-sitter-make = "1.1"
 # The spell checker's engine: tokenizer, `Typo`, `Status`. Named directly
 # because `typos_cli` takes and returns these types and re-exports none of them.
 typos = "0.10"
@@ -282,6 +310,10 @@ typos-cli = "=1.49.1"
 # adds 314 words and would have poly reporting typos the binary it replaces
 # never did. Pinning is what keeps "embedded" from quietly meaning "upgraded".
 typos-dict = "=0.14.0"
+# File paths to `file://` base URIs and back, so a local schema's relative
+# `$ref` resolves on Windows drive paths too. Already in the tree through
+# lsp-types.
+url = "2"
 xmlem = "0.5"
 # The parser behind pretty_yaml, named directly so poly's workflow rules read
 # the same tree `poly fmt` formats. pretty_yaml already links it, so this costs
@@ -296,7 +328,7 @@ yaml_parser = "0.3"
 # relink on a one-line local change, so Makefile and ci.yml both override those
 # two -- build.yml and release.yml are where this file is read as written.
 [profile.release]
-# The binary ships inside all six platform VSIX, so size is worth real
+# The binary ships inside both platform VSIX, so size is worth real
 # latency: opt-level="s" halved it when this was measured (28.9MB -> 14.7MB on
 # darwin-arm64, before Lua was embedded) for ~8% on 1MB files, which stays far
 # inside the 200ms p95 budget.

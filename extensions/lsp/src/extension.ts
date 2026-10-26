@@ -2,11 +2,20 @@ import { execFile } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { DocumentFormattingRequest, LanguageClient, State, TransportKind } from "vscode-languageclient/node";
+import {
+  DocumentFormattingRequest,
+  LanguageClient,
+  State,
+  type TextEdit,
+  TransportKind,
+} from "vscode-languageclient/node";
 import { firstCodeLine } from "./anchor";
 import { activate as activateEditor } from "./editor/extension";
+import { toolsEnv } from "./editor/toolsEnv";
+import { mayRun } from "./editor/trust";
 import { commonRoot, useLines } from "./gowork";
-import { isOn, type Quiet, stillOn, toggler } from "./quiet";
+import { isOn, type Quiet, stillOn, syncSnapshots, toggler } from "./quiet";
+import { affects, initSettings, keepBlock, openSettingsMenu } from "./settings";
 import { checkForUpdates, scheduleUpdateCheck } from "./update";
 
 // Everything the extension does goes through the daemon, so a daemon that
@@ -61,8 +70,14 @@ const LANGUAGES = [
   // arity, which formats, lints and serves R, so the file works the moment the
   // id exists and costs nothing while it does not.
   "r",
+  // poly-syntax-highlight's id; the formatter is jsonnetfmt.
+  "jsonnet",
   // Built-in id; poly only adds the formatter (markup_fmt's Mustache parser).
   "handlebars",
+  // Built-in ids; poly's own re-indentation formats both (poly-engines'
+  // reindent.rs), since neither language has a formatter to embed.
+  "powershell",
+  "bat",
   // Neither id is poly's, and neither is guaranteed to exist -- they arrive
   // with ms-azuretools.vscode-docker and github.vscode-github-actions. Listing
   // an id nothing declares costs nothing (the selector simply never matches),
@@ -125,6 +140,8 @@ const MINIFIABLE = [
 ];
 
 let client: LanguageClient | undefined;
+/** The "Poly" channel itself, for lines below info; see `daemonLog`. */
+let polyLog: vscode.LogOutputChannel | undefined;
 let status: vscode.StatusBarItem | undefined;
 let formatToggle: vscode.StatusBarItem | undefined;
 let lintToggle: vscode.StatusBarItem | undefined;
@@ -348,10 +365,17 @@ async function formatNow(self: string): Promise<void> {
   }
   const { document } = editor;
   const chosen = vscode.workspace.getConfiguration("editor", document).get<string>("defaultFormatter");
-  const polys = document.uri.scheme === "file"
+  const textOnly = TEXT_ONLY.includes(document.uri.scheme);
+  const polys = (document.uri.scheme === "file" || textOnly)
     && LANGUAGES.includes(document.languageId)
     && (!chosen || chosen === self);
   if (!polys) {
+    const why = !(document.uri.scheme === "file" || textOnly)
+      ? `a ${document.uri.scheme}: document`
+      : !LANGUAGES.includes(document.languageId)
+      ? `${document.languageId}, which poly does not format`
+      : `formatted by ${chosen} (editor.defaultFormatter)`;
+    polyLog?.debug(`[format] ${document.uri.toString(true)} is ${why}; handing it to Format Document`);
     await vscode.commands.executeCommand("editor.action.formatDocument");
     return;
   }
@@ -360,16 +384,21 @@ async function formatNow(self: string): Promise<void> {
     return;
   }
   const version = document.version;
-  const edits = await client.sendRequest(DocumentFormattingRequest.type, {
-    textDocument: { uri: document.uri.toString() },
-    options: {
-      tabSize: Number(editor.options.tabSize),
-      insertSpaces: Boolean(editor.options.insertSpaces),
-    },
-  });
+  const edits = textOnly
+    ? await textEdits(document)
+    : await client.sendRequest(DocumentFormattingRequest.type, {
+      textDocument: { uri: document.uri.toString() },
+      options: {
+        tabSize: Number(editor.options.tabSize),
+        insertSpaces: Boolean(editor.options.insertSpaces),
+      },
+    });
   // Typed into while the daemon was formatting: the edits describe a text
   // that no longer exists, and applying them would scramble the new one.
   if (!edits || edits.length === 0 || document.version !== version) {
+    if (edits?.length && document.version !== version) {
+      polyLog?.debug(`[format] ${document.uri.fsPath}: typed into while poly formatted it, edits dropped`);
+    }
     return;
   }
   await editor.edit((builder) => {
@@ -377,6 +406,73 @@ async function formatNow(self: string): Promise<void> {
       builder.replace(client!.protocol2CodeConverter.asRange(edit.range), edit.newText);
     }
   });
+}
+
+/// Buffers the daemon cannot read by path, so their text travels with the
+/// format request: one never saved, and the editor's own files -- the user
+/// settings.json, keybindings.json -- which open as `vscode-userdata:`.
+///
+/// The second is not an edge case. `[jsonc]` names poly as its formatter, and a
+/// formatter named for a language the extension cannot serve in that scheme is
+/// not skipped but refused, so the user's settings.json had no formatter at all.
+/// Under a remote window the file is not even on the daemon's machine.
+///
+/// Nor is a local file opened in a remote window (File > Open File > Show
+/// Local): the remote extension host sees it as `vscode-local:`, and without
+/// that scheme here Format Document said no formatter was installed.
+const TEXT_ONLY = ["untitled", "vscode-userdata", "vscode-local"];
+
+/// The daemon's edits for a `TEXT_ONLY` buffer.
+///
+/// Such a buffer is outside the client's document selector -- `file` only,
+/// because a didOpen also starts lint and a language server, and neither has
+/// anything to do with text that has no path. So nothing reaches the daemon
+/// until it is asked, and the text travels with the question. A failure is
+/// said here: a saved file's parse error becomes a squiggle through lint, and
+/// this buffer has no lint to carry one.
+async function textEdits(document: vscode.TextDocument): Promise<TextEdit[]> {
+  // A settings file keeps its own path: its name decides the language, and
+  // poly.toml is looked for beside it rather than in whichever project the
+  // window has open, so the same file formats the same way from every window.
+  const where = document.uri.scheme === "untitled" ? untitledPath(document) : document.uri.path;
+  if (!client || health !== "ready" || !where) {
+    return [];
+  }
+  try {
+    return (await client.sendRequest("workspace/executeCommand", {
+      command: "poly.formatText",
+      arguments: [{ path: where, text: document.getText() }],
+    })) as TextEdit[];
+  } catch (err) {
+    vscode.window.showWarningMessage(`Poly: could not format ${document.uri.path}: ${err}`);
+    return [];
+  }
+}
+
+/// The path an untitled buffer is formatted as, which is what decides its
+/// language to the daemon: its name with the first extension VSCode registers
+/// for its language, in the first workspace folder, so poly.toml is found
+/// where it would be once saved there.
+///
+/// Asked of the installed extensions rather than kept as a table, because the
+/// ids are theirs: `typescriptreact` means `.tsx` because the TypeScript
+/// extension says so, and a copy here would be one more list to drift.
+function untitledPath(document: vscode.TextDocument): string | undefined {
+  for (const extension of vscode.extensions.all) {
+    const languages = extension.packageJSON?.contributes?.languages;
+    if (!Array.isArray(languages)) {
+      continue;
+    }
+    for (const language of languages) {
+      const suffix = language?.id === document.languageId ? language.extensions?.[0] : undefined;
+      if (typeof suffix === "string") {
+        const name = `${path.basename(document.uri.path)}${suffix}`;
+        const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+        return folder?.scheme === "file" ? path.join(folder.fsPath, name) : name;
+      }
+    }
+  }
+  return undefined;
 }
 
 function workspacePaths(): string[] {
@@ -578,6 +674,11 @@ async function reportVersionSkew(
 /// afterwards rather than waiting for a watcher is for the same reason: a file
 /// outside the workspace is a file the editor is not watching.
 async function createGoWork(): Promise<void> {
+  // `go` obeys the `toolchain` line of the go.mod it finds, and fetches and
+  // runs the one named there.
+  if (!mayRun("Create go.work")) {
+    return;
+  }
   const found = await vscode.workspace.findFiles(
     "**/go.mod",
     "**/{vendor,node_modules,testdata}/**",
@@ -625,7 +726,9 @@ async function createGoWork(): Promise<void> {
   const written = await new Promise<boolean>((resolve) => {
     execFile(
       "go",
-      ["work", existing ? "use" : "init", ...dirs],
+      // The dialog's relative lines, not `dirs`: go writes absolute paths as
+      // given, and a go.work naming one machine's folders breaks on the next.
+      ["work", existing ? "use" : "init", ...useLines(root, dirs)],
       { cwd: root },
       (error, _stdout, stderr) => {
         if (error) {
@@ -640,10 +743,14 @@ async function createGoWork(): Promise<void> {
   if (!written) {
     return;
   }
-  vscode.window.showInformationMessage(
-    `Poly: wrote ${target}; restarting the language server so gopls picks it up.`,
-  );
-  await client?.restart();
+  // The file usually sits above every open folder, where no watcher sees it, so
+  // gopls is restarted -- through the Go extension, whose server it is.
+  if ((await vscode.commands.getCommands(true)).includes("go.languageserver.restart")) {
+    vscode.window.showInformationMessage(`Poly: wrote ${target}; restarting gopls so it picks it up.`);
+    await vscode.commands.executeCommand("go.languageserver.restart");
+  } else {
+    vscode.window.showInformationMessage(`Poly: wrote ${target}; restart your Go language server to pick it up.`);
+  }
 }
 
 /**
@@ -715,117 +822,57 @@ function analyzeDeadCodeLens(context: vscode.ExtensionContext): void {
       provider,
     ),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.deadCodeCodeLens")) {
+      if (affects(event, "poly.deadCodeCodeLens")) {
         changed.fire();
       }
     }),
   );
 }
 
-/**
- * Extensions that start a language server of their own, and the server of
- * poly's each one stands in for.
- *
- * With both running, every question is answered twice: two gopls hold the same
- * module in memory, every reference search runs in both, and hover and
- * completion show each answer twice. The two cannot be merged and poly cannot
- * stop somebody else's server, so the one direction that can be enforced is
- * poly stepping back -- the extension the user installed for that language
- * keeps it, and poly routes only the languages nobody else serves.
- *
- * A list of other people's extension ids, which elsewhere in poly is a smell
- * (a guess about what is installed). Here it is not a guess: `getExtension`
- * answers from what is actually installed and enabled, and the list only says
- * which server each one runs. R is absent on purpose -- REditorSupport.r serves
- * nothing unless the `languageserver` R package is installed, and yielding to
- * it would leave most R files with no server at all.
- */
-const OFFICIAL_SERVERS: readonly [extension: string, server: string][] = [
-  ["golang.go", "gopls"],
-  ["rust-lang.rust-analyzer", "rust-analyzer"],
-  ["llvm-vs-code-extensions.vscode-clangd", "clangd"],
-  ["ms-vscode.cpptools", "clangd"],
-  ["swiftlang.swift-vscode", "sourcekit-lsp"],
-  ["sswg.swift-lang", "sourcekit-lsp"],
-  ["hashicorp.terraform", "terraform-ls"],
-  ["sumneko.lua", "lua-language-server"],
-  ["mads-hartmann.bash-ide-vscode", "bash-language-server"],
-  ["bufbuild.vscode-buf", "buf"],
-];
-
-/**
- * The servers poly should leave alone, keyed by server with the extension that
- * serves the language instead -- the daemon names it in the log line that says
- * why a language went to someone else.
- */
-function yieldServers(): Record<string, string> {
-  const yielded: Record<string, string> = {};
-  for (const [extension, server] of OFFICIAL_SERVERS) {
-    if (!vscode.extensions.getExtension(extension) || yielded[server]) {
-      continue;
-    }
-    // cpptools is often installed for its debugger alone, with IntelliSense
-    // switched off so clangd can have C and C++. Yielding to it then would hand
-    // the language to an engine that has been told to answer nothing.
-    if (
-      extension === "ms-vscode.cpptools"
-      && vscode.workspace.getConfiguration("C_Cpp").get<string>("intelliSenseEngine") === "disabled"
-    ) {
-      continue;
-    }
-    yielded[server] = extension;
-  }
-  return yielded;
-}
-
 export async function activate(context: vscode.ExtensionContext) {
+  // Before anything registers a listener that asks `affects`.
+  initSettings(context, logLine);
   // First, and returned on every path below: the editor features need no
   // daemon, and the markdown preview reads its plugin off this return value --
   // a binary that fails to start must not take the diagrams down with it.
-  const exports = activateEditor(context);
+  // They get the binary's path, not a running daemon (PlantUML asks it for the
+  // jar), and finding the path only reads settings.
   const serverPath = resolveServerPath(context);
-  let yielded = yieldServers();
+  const exports = activateEditor(context, serverPath);
+  // Read again on every start, so assigning `env` and restarting is how a
+  // `poly.tools` change reaches the daemon. Spread over process.env because
+  // the client hands an executable's env to spawn as the whole environment.
+  const server = {
+    command: serverPath,
+    args: ["lsp"],
+    transport: TransportKind.stdio,
+    options: { env: { ...process.env, ...toolsEnv() } },
+  };
   client = new LanguageClient(
     "poly",
     "Poly",
+    server,
     {
-      command: serverPath,
-      args: ["lsp"],
-      transport: TransportKind.stdio,
-    },
-    {
+      outputChannel: daemonLog(context),
       documentSelector: LANGUAGES.map((language) => ({
         scheme: "file",
         language,
       })),
-      // A function, so that a restart asks again: `yieldServers` changes when an
-      // extension is installed or removed, and the client re-sends these on
-      // every start.
+      // A function, so that a restart asks again: a restart is how a change to
+      // `poly.lintOnSave` reaches the daemon.
       initializationOptions: () => ({
-        yieldServers: yielded,
         // Read at startup, and a change restarts the client (below): the lint
         // switch has to take poly's findings off the screen when it is clicked,
         // not at the next reload.
         lintOnSave: vscode.workspace
           .getConfiguration("poly")
           .get<boolean>("lintOnSave", true),
-        // Read once at startup: the daemon acts on it when it
-        // spawns a downstream server, and a server already running cannot be
-        // un-started by a settings change. Toggling it takes a reload, which
-        // is what the setting description says.
-        languageServers: vscode.workspace
-          .getConfiguration("poly")
-          .get<boolean>("languageServers", false),
-        // Same deal: it becomes a command-line argument at spawn time, so a
-        // server already running keeps the verbosity it started with.
-        languageServerLogs: vscode.workspace
-          .getConfiguration("poly")
-          .get<boolean>("languageServerLogs", true),
-        // And again: the daemon reads it once, so turning it on mid-session
-        // logs nothing until the window reloads.
-        memoryLog: vscode.workspace
-          .getConfiguration("poly")
-          .get<boolean>("memoryLog", false),
+        // The channel's level, so a window opened at Debug logs its first
+        // requests too; later moves arrive as `poly/logLevel`.
+        logLevel: polyLog?.logLevel ?? vscode.LogLevel.Info,
+        // Restricted Mode: the daemon keeps to the engines it embeds. Granting
+        // trust restarts it (below), so this is asked again.
+        trusted: vscode.workspace.isTrusted,
       }),
       // The suspend switch, applied here rather than in the daemon: the daemon
       // would have to be told about the setting and would still answer the
@@ -834,13 +881,15 @@ export async function activate(context: vscode.ExtensionContext) {
       // rewrite is not the same as not wanting to know.
       middleware: {
         provideDocumentFormattingEdits: (document, options, token, next) =>
-          mayFormat() ? next(document, options, token) : [],
+          mayFormat() ? next(document, options, token) : skipped(document),
         provideDocumentRangeFormattingEdits: (document, range, options, token, next) =>
-          mayFormat() ? next(document, range, options, token) : [],
+          mayFormat() ? next(document, range, options, token) : skipped(document),
       },
     },
   );
 
+  syncSnapshots(context.globalState);
+  void keepBlock().catch((err) => logLine(`[settings] could not write the poly block: ${err}`));
   status = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100,
@@ -873,15 +922,26 @@ export async function activate(context: vscode.ExtensionContext) {
     formatToggle,
     lintToggle,
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.format") || event.affectsConfiguration("poly.lintOnSave")) {
+      if (affects(event, "poly.format") || affects(event, "poly.lintOnSave")) {
         refreshStatus();
       }
       // The daemon reads it at spawn time, and a restart is also what clears
       // the findings already on screen: the client drops its diagnostics when
       // it stops, and a daemon started with lint off publishes none.
-      if (event.affectsConfiguration("poly.lintOnSave")) {
+      if (affects(event, "poly.lintOnSave")) {
         void client?.restart();
       }
+      if (affects(event, "poly.tools")) {
+        server.options.env = { ...process.env, ...toolsEnv() };
+        void client?.restart();
+      }
+    }),
+    // The workspace's own poly settings were ignored until now (they are
+    // `restrictedConfigurations`), so the binary and its tools are asked again.
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      server.command = resolveServerPath(context);
+      server.options.env = { ...process.env, ...toolsEnv() };
+      void client?.restart();
     }),
     vscode.window.onDidChangeActiveTextEditor(() => {
       refreshStatus();
@@ -892,19 +952,6 @@ export async function activate(context: vscode.ExtensionContext) {
     // is a no-op, and missing an editor is a file being typed into with the
     // wrong indentation.
     vscode.window.onDidChangeVisibleTextEditors(applyIndentationToVisible),
-    // Installing golang.go mid-session is the moment two gopls start sharing a
-    // window, and uninstalling it is the moment Go loses its only one. A
-    // restart is what gets the daemon a new list: it is read at spawn time,
-    // like every other initialization option.
-    vscode.extensions.onDidChange(() => {
-      const now = yieldServers();
-      if (JSON.stringify(now) === JSON.stringify(yielded)) {
-        return;
-      }
-      yielded = now;
-      logLine(`[poly] language servers left to other extensions: ${JSON.stringify(now)}`);
-      void client?.restart();
-    }),
     vscode.workspace.onWillSaveTextDocument((event) => {
       // Same switch as the formatter: these are the save-time rewrites for a
       // file poly does not format, and "poly does not touch my files" has to
@@ -921,6 +968,7 @@ export async function activate(context: vscode.ExtensionContext) {
       );
     }),
     vscode.commands.registerCommand("poly.showOutput", () => client?.outputChannel.show()),
+    vscode.commands.registerCommand("poly.openSettings", openSettingsMenu),
     // Global scope: a switch is "I am not in the mood for this right now",
     // which is about the person and not about the project. Writing it at
     // workspace scope would leave lines in somebody's .vscode/settings.json
@@ -930,6 +978,15 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("poly.toggleLint", toggler("lint", context.globalState, logLine)),
     vscode.commands.registerCommand("poly.createGoWork", createGoWork),
     vscode.commands.registerCommand("poly.formatDocument", () => formatNow(context.extension.id)),
+    // Format Document on a `TEXT_ONLY` buffer; see `textEdits`. Behind the
+    // same switch as the client's own provider.
+    vscode.languages.registerDocumentFormattingEditProvider(
+      TEXT_ONLY.flatMap((scheme) => LANGUAGES.map((language) => ({ scheme, language }))),
+      {
+        provideDocumentFormattingEdits: async (document) =>
+          mayFormat() ? await client!.protocol2CodeConverter.asTextEdits(await textEdits(document)) : [],
+      },
+    ),
     vscode.commands.registerCommand("poly.formatFile", async () => {
       const doc = vscode.window.activeTextEditor?.document;
       if (doc?.uri.scheme === "file") {
@@ -969,10 +1026,10 @@ export async function activate(context: vscode.ExtensionContext) {
       "poly.lintPath",
       (uri?: vscode.Uri) => {
         const target = uri?.fsPath ?? workspacePaths()[0];
-        if (!target) {
+        if (!target || !mayRun("Lint")) {
           return;
         }
-        const terminal = vscode.window.createTerminal("poly check");
+        const terminal = vscode.window.createTerminal({ name: "poly check", env: toolsEnv() });
         terminal.show();
         terminal.sendText(`"${serverPath}" check "${target}"`);
       },
@@ -989,10 +1046,10 @@ export async function activate(context: vscode.ExtensionContext) {
         const target = uri?.fsPath
           ?? vscode.window.activeTextEditor?.document.uri.fsPath
           ?? workspacePaths()[0];
-        if (!target) {
+        if (!target || !mayRun("Analyze Dead Code")) {
           return;
         }
-        const terminal = vscode.window.createTerminal("poly deadcode");
+        const terminal = vscode.window.createTerminal({ name: "poly deadcode", env: toolsEnv() });
         terminal.show();
         terminal.sendText(`"${serverPath}" deadcode "${target}"`);
       },
@@ -1087,9 +1144,89 @@ export async function activate(context: vscode.ExtensionContext) {
   return exports;
 }
 
+const LEVELS = { Error: "error", Warn: "warn", Info: "info", Debug: "debug", Trace: "trace" } as const;
+
+/**
+ * The daemon's "Poly" channel, as a `LogOutputChannel`: that is a file named
+ * after it in the extension's own folder, the one "Developer: Open Extension
+ * Logs Folder" opens, where a plain channel is a numbered file under
+ * `output_logging_*` beside it that nobody finds -- and every line has a time.
+ *
+ * languageclient 9 writes to it as to a plain channel. The server's stderr
+ * comes in whatever chunks the pipe gives, and a log channel makes each chunk
+ * an entry, so lines are put back together here; the client's own messages
+ * carry a clock and a level in brackets, which become the entry's instead.
+ * Owning the channel also keeps the client from opening a second "Poly" to
+ * say the server exited after it disposed the first.
+ */
+function daemonLog(context: vscode.ExtensionContext): vscode.OutputChannel {
+  const log = vscode.window.createOutputChannel("Poly", { log: true });
+  polyLog = log;
+  context.subscriptions.push(
+    log,
+    // The gear on the Output panel is the only level switch, so the daemon is
+    // told when it moves and writes debug and trace lines only while they are
+    // shown. See LOG_LEVEL in lsp.rs.
+    log.onDidChangeLogLevel((level) => {
+      if (client?.isRunning()) {
+        void client.sendNotification("poly/logLevel", { level });
+      }
+    }),
+  );
+  let partial = "";
+  return {
+    name: log.name,
+    append(chunk: string) {
+      const lines = (partial + chunk).split("\n");
+      partial = lines.pop() ?? "";
+      for (const line of lines) {
+        const text = line.replace(/\r$/, "");
+        // `[poly:debug] …` is the daemon naming its level, `[poly] …` is info;
+        // see `say!` in lsp.rs.
+        const tagged = /^\[poly:(trace|debug|warn)\] /.exec(text);
+        if (tagged) {
+          log[tagged[1] as "trace" | "debug" | "warn"](`[poly] ${text.slice(tagged[0].length)}`);
+        } else if (text.trim()) {
+          log.info(text);
+        }
+      }
+    },
+    appendLine(message: string) {
+      const stamped = /^\[(Error|Warn|Info|Debug|Trace) *- [^\]]*\] /.exec(message);
+      if (stamped) {
+        log[LEVELS[stamped[1] as keyof typeof LEVELS]](message.slice(stamped[0].length));
+      } else {
+        log.info(message);
+      }
+    },
+    replace(value: string) {
+      log.replace(value);
+    },
+    clear() {
+      log.clear();
+    },
+    show(column?: vscode.ViewColumn | boolean, preserveFocus?: boolean) {
+      log.show(typeof column === "boolean" ? column : preserveFocus);
+    },
+    hide() {
+      log.hide();
+    },
+    dispose() {
+      log.dispose();
+    },
+  };
+}
+
 /** A line in the "Poly" channel, from code that runs outside the client. */
 function logLine(line: string): void {
   client?.outputChannel.appendLine(line);
+}
+
+/// A format request the Format switch swallowed. From the editor it looks
+/// exactly like a file that was already formatted, so the log says which.
+function skipped(document: vscode.TextDocument): [] {
+  polyLog?.debug(`[format] ${document.uri.fsPath}: skipped, the Format switch is off`);
+  return [];
 }
 
 export function deactivate(): Thenable<void> | undefined {

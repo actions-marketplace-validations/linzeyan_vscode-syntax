@@ -110,11 +110,13 @@ export class TodoTree implements vscode.TreeDataProvider<Node> {
       arguments: [
         node.uri,
         {
+          // The tag selected, as a reference row selects its hit: a bare
+          // cursor lands on the line without showing where on it.
           selection: new vscode.Range(
             todo.line,
             todo.column,
             todo.line,
-            todo.column,
+            todo.column + todo.tag.length,
           ),
         } satisfies vscode.TextDocumentShowOptions,
       ],

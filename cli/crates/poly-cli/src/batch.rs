@@ -177,6 +177,11 @@ pub fn minify_paths(paths: &[PathBuf], walk: Walk) -> Result<FmtSummary> {
 
 /// Files changed vs HEAD plus untracked (the "Git Changed Files" scope).
 pub fn git_changed_files(root: &Path) -> Result<Vec<PathBuf>> {
+    // git obeys the repository's own config, and `core.fsmonitor` there is a
+    // command it runs.
+    if poly_tools::restricted() {
+        anyhow::bail!("git not run: {}", poly_tools::RESTRICTED_REASON);
+    }
     let run = |args: &[&str]| -> Result<Vec<PathBuf>> {
         let out = std::process::Command::new("git")
             .arg("-C")

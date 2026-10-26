@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 
@@ -25,6 +25,7 @@ pub fn formattable(lang: &str) -> bool {
                 | "swift"
                 | "protobuf"
                 | "r"
+                | "jsonnet"
         )
 }
 
@@ -190,11 +191,28 @@ fn dispatch(
         "c" | "cpp" => ("clang-format", vec!["--assume-filename", &path_arg]),
         "terraform" => ("terraform", vec!["fmt", "-"]),
         "swift" => ("swift-format", vec![]),
+        // jsonnetfmt's defaults, which is also exactly what the
+        // xrc-inc.jsonnet-formatter extension spells out on its command line.
+        "jsonnet" => ("jsonnetfmt", vec!["-"]),
         _ => return Ok(None),
     };
     let Some(bin) = cached_tool(tool, config) else {
         return Ok(None);
     };
+    if lang == "go" {
+        // gofumpt reads the module's go.mod for its path and Go version, and
+        // reading stdin it looks from its working directory -- which was
+        // wherever poly ran, and for the daemon, wherever the editor started
+        // it. Outside the module a dotless module path (`forecast-service/...`)
+        // reads as the standard library, so gofumpt merged the project's own
+        // imports into the std group: lines golangci-lint fmt and gofumpt on
+        // the file both leave alone.
+        let dir = path
+            .parent()
+            .filter(|dir| dir.is_dir())
+            .unwrap_or(Path::new("."));
+        return poly_tools::run::format_stdin_in(&bin, dir, &args, text);
+    }
     poly_tools::run::format_stdin(&bin, &args, text)
 }
 
@@ -276,26 +294,80 @@ fn note_missing(name: &str) {
     }
 }
 
+/// Each tool's resolution, memoized for the process lifetime.
+pub(crate) type ToolSlots = Mutex<Option<HashMap<String, Arc<OnceLock<Option<PathBuf>>>>>>;
+
+/// `name`'s slot, which the first caller fills and every later one reads.
+///
+/// The map's lock is held only to find the slot. A resolution can be a first
+/// download that takes minutes on a slow link, and holding the whole map
+/// through it held up every other tool too: a daemon fetching golangci-lint
+/// for a package lint left the main loop waiting behind it to find shellcheck,
+/// and the editor got no lint, no format and no minify for five minutes.
+/// Callers of the same tool still wait for it, which is the point of the memo.
+pub(crate) fn tool_slot(slots: &ToolSlots, name: &str) -> Arc<OnceLock<Option<PathBuf>>> {
+    slots
+        .lock()
+        .expect("tool cache lock")
+        .get_or_insert_with(HashMap::new)
+        .entry(name.to_string())
+        .or_default()
+        .clone()
+}
+
 /// Managed-tool resolution can download; memoize for the process lifetime.
 fn cached_tool(name: &str, config: &poly_core::Config) -> Option<PathBuf> {
-    static CACHE: Mutex<Option<HashMap<String, Option<PathBuf>>>> = Mutex::new(None);
-    let mut cache = CACHE.lock().expect("tool cache lock");
-    let cache = cache.get_or_insert_with(HashMap::new);
-    if let Some(hit) = cache.get(name) {
-        return hit.clone();
-    }
-    let resolved = poly_tools::resolve(name, config, false);
-    let path = resolved.command().map(Path::to_path_buf);
-    if path.is_none() {
-        note_missing(name);
-    }
-    cache.insert(name.to_string(), path.clone());
-    path
+    static CACHE: ToolSlots = Mutex::new(None);
+    tool_slot(&CACHE, name)
+        .get_or_init(|| {
+            let path = poly_tools::resolve(name, config, false)
+                .command()
+                .map(Path::to_path_buf);
+            if path.is_none() {
+                note_missing(name);
+            }
+            path
+        })
+        .clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tool being resolved holds up only callers of that tool. Giving every
+    /// name one slot -- what one lock held through the resolution amounted to
+    /// -- makes the second tool wait out the first, and the timeout fires.
+    #[test]
+    fn a_slow_tool_holds_up_only_itself() {
+        let slots: &ToolSlots = &Mutex::new(None);
+        let (started, resolving) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (answered, answer) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                tool_slot(slots, "golangci-lint").get_or_init(|| {
+                    started.send(()).unwrap();
+                    held.recv().unwrap();
+                    None
+                });
+            });
+            resolving.recv().unwrap();
+            scope.spawn(move || {
+                let found = tool_slot(slots, "shellcheck")
+                    .get_or_init(|| Some(PathBuf::from("shellcheck")))
+                    .clone();
+                answered.send(found).unwrap();
+            });
+            let found = answer.recv_timeout(std::time::Duration::from_secs(10));
+            release.send(()).unwrap();
+            assert_eq!(found.unwrap(), Some(PathBuf::from("shellcheck")));
+        });
+        assert!(Arc::ptr_eq(
+            &tool_slot(slots, "golangci-lint"),
+            &tool_slot(slots, "golangci-lint")
+        ));
+    }
 
     /// The four generators whose output arity excludes, in their own words.
     ///

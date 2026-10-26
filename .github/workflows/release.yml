@@ -1,8 +1,15 @@
 name: Release
 
 # Tag vX.Y.Z (or vX.Y.Z-rc.N for a pre-release) -> 6-platform build ->
-# 7 VSIX (6 platform poly-lsp + universal poly-syntax-highlight) + 6 binaries
-# + SHA256SUMS + third-party notices, uploaded to a GitHub Release.
+# 4 VSIX (poly-lsp for darwin-arm64, win32-x64 and linux-x64 + universal
+# poly-syntax-highlight) + 6 binaries + SHA256SUMS + third-party notices,
+# uploaded to a GitHub Release.
+#
+# poly-lsp ships for those three platforms only: they are the machines it is
+# used on -- linux-x64 being WSL, whose extension host is Linux and so updates
+# from the Linux VSIX -- and every VSIX carries the diagram editors' tens of MB.
+# The binaries stay on all six, because action.yml and the container image
+# download them.
 #
 # Three dot-separated parts, not `v*`: the last step of this workflow force-
 # pushes the moving major tag (`v0`), which `v*` also matched. That published
@@ -26,23 +33,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The glibc a Linux binary needs is the runner's: pinned to 24.04
+          # (2.39), as arm64 and the Docker image's base are. ubuntu-latest
+          # moved to 26.04 in October 2026, and its 2.43 build would not start
+          # on 24.04, WSL's default, or in the image.
           - {
               target: x86_64-unknown-linux-gnu,
-              os: ubuntu-latest,
+              os: ubuntu-24.04,
               vsce: linux-x64,
+              vsix: true,
             }
           - {
               target: aarch64-unknown-linux-gnu,
               os: ubuntu-24.04-arm,
               vsce: linux-arm64,
             }
-          - { target: aarch64-apple-darwin, os: macos-14, vsce: darwin-arm64 }
+          - {
+              target: aarch64-apple-darwin,
+              os: macos-14,
+              vsce: darwin-arm64,
+              vsix: true,
+            }
           # arm64 runner runs the x64 smoke test through Rosetta.
           - { target: x86_64-apple-darwin, os: macos-14, vsce: darwin-x64 }
           - {
               target: x86_64-pc-windows-msvc,
               os: windows-latest,
               vsce: win32-x64,
+              vsix: true,
             }
           - {
               target: aarch64-pc-windows-msvc,
@@ -57,7 +75,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: cli
-          key: ${{ matrix.target }}
+          # The runner too: a target directory from another image comes back
+          # fresh, and cargo would ship its binary without relinking.
+          key: ${{ matrix.target }}-${{ matrix.os }}
           cache-on-failure: true
       - uses: actions/setup-node@v4
         with:
@@ -74,6 +94,9 @@ jobs:
         run: |
           BIN=target/${{ matrix.target }}/release/poly
           [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          # First on its own: a binary the loader refuses exits 1, which the
+          # fmt check's "1 is unformatted files" would let through.
+          "$BIN" --version
           "$BIN" fmt --check . || test $? -le 1
           # Reported, not enforced -- same as build.yml, and for the same
           # reason. A release must not be the place a size ceiling is discovered
@@ -82,6 +105,7 @@ jobs:
           mb=$(( bytes / 1048576 ))
           echo "::notice title=binary size::${{ matrix.target }} ${mb}MB ($bytes bytes)"
       - name: Package platform VSIX
+        if: matrix.vsix
         shell: bash
         run: |
           BIN=cli/target/${{ matrix.target }}/release/poly
@@ -159,7 +183,7 @@ jobs:
           lsp=$(find dist -type f -name 'poly-lsp-*.vsix' | wc -l)
           bins=$(find dist -type f -name 'poly-*' ! -name '*.vsix' ! -name '*.md' | wc -l)
           universal=$(find dist -type f -name 'poly-syntax-highlight-*.vsix' | wc -l)
-          test "$lsp" -eq 6 || { echo "expected 6 poly-lsp VSIX, got $lsp" >&2; exit 1; }
+          test "$lsp" -eq 3 || { echo "expected 3 poly-lsp VSIX, got $lsp" >&2; exit 1; }
           test "$bins" -eq 6 || { echo "expected 6 binaries, got $bins" >&2; exit 1; }
           test "$universal" -eq 1 || { echo "expected 1 universal VSIX, got $universal" >&2; exit 1; }
       - name: Create GitHub Release

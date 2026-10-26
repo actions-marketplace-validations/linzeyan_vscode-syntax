@@ -4,7 +4,7 @@
 pub mod catalog;
 pub mod diag;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -114,6 +114,15 @@ const EXTENSIONS: &[(&str, &str)] = &[
     ("tf", "terraform"),
     ("tfvars", "terraform"),
     ("hcl", "hcl"),
+    ("jsonnet", "jsonnet"),
+    ("libsonnet", "jsonnet"),
+    // VSCode's built-in powershell and bat extensions own both ids and these
+    // exact lists.
+    ("ps1", "powershell"),
+    ("psm1", "powershell"),
+    ("psd1", "powershell"),
+    ("bat", "bat"),
+    ("cmd", "bat"),
 ];
 
 /// Formatter knobs inherited from whatever `.editorconfig` covers `path`.
@@ -294,12 +303,52 @@ pub fn builtin_languages() -> Vec<&'static str> {
     ids
 }
 
+/// A diagram editor's save file, not a document: drawio and excalidraw write
+/// the whole file in their own layout on every save -- the SVG on one line,
+/// the JSON without a final newline. Formatting it is a diff the next save
+/// undoes, and a `--check` that cannot stay green in a repo that commits
+/// diagrams. The drawing survives poly's formatting (measured on the editors'
+/// own samples, 2026-09-25), so this is churn, not damage, and
+/// `[languages.map]` still reaches these for a project that wants them.
+///
+/// Spelling and the Unicode scan skip them too, and have to ask, because both
+/// run on files with no language. What typos finds in a diagram is mostly a
+/// fragment of an id the editor generated or a label drawio cut short in the
+/// SVG's fallback text, and drawio writes every `&nbsp;` as U+00A0: nothing
+/// anyone can fix in the file, so at the default `fail-on` a repo that commits
+/// a diagram could not go green. 39 of 160 real diagrams had such findings,
+/// and about one in six was a real typo in a label (2026-09-26).
+pub fn diagram_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    [
+        ".drawio.svg",
+        ".dio.svg",
+        // The bare XML, as hediet's editor and draw.io's own apps save it.
+        ".drawio",
+        ".dio",
+        ".excalidraw.svg",
+        ".excalidraw.json",
+        // The bare names poly's own Excalidraw editor opens and saves, and
+        // the library it keeps beside them.
+        ".excalidraw",
+        ".excalidrawlib",
+    ]
+    .iter()
+    .any(|diagram| lower.ends_with(diagram))
+}
+
 /// Detect by built-in rules only (no config). Filename rules run before
 /// extension rules so `Dockerfile.dev` is dockerfile, not a "dev" extension.
 pub fn builtin_language(path: &Path) -> Option<&'static str> {
     let name = path.file_name()?.to_str()?;
     if name == "Dockerfile" || name.starts_with("Dockerfile.") || name.ends_with(".dockerfile") {
         return Some("dockerfile");
+    }
+    if diagram_file(path) {
+        return None;
     }
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     EXTENSIONS.iter().find(|(e, _)| *e == ext).map(|(_, l)| *l)
@@ -356,6 +405,9 @@ struct RawLint {
     /// Glob -> the rules that path may not report. See `Config::lint_ignored`.
     #[serde(rename = "per-file-ignores")]
     per_file_ignores: BTreeMap<String, Vec<String>>,
+    /// Glob -> the JSON Schema those files are checked against. See
+    /// `Config::lint_schemas`.
+    schemas: BTreeMap<String, String>,
 }
 
 /// One rule, or one set of them, named the way poly.toml and a `poly: ignore`
@@ -605,6 +657,8 @@ pub const ACTIONLINT_REPLACED: &[(&str, &str, &str)] = &[
 /// no inline suppression at all rather than a guess: `[lint.per-file-ignores]`
 /// still works there, and the finding continuing to appear says so.
 const COMMENT_PREFIXES: &[(&str, &[&str])] = &[
+    // `rem` in the two spellings scripts use; `::` is the label trick.
+    ("bat", &["::", "rem", "REM"]),
     ("c", &["//"]),
     ("cpp", &["//"]),
     ("dockerfile", &["#"]),
@@ -617,10 +671,13 @@ const COMMENT_PREFIXES: &[(&str, &[&str])] = &[
     // legal. Writing one in strict JSON breaks the file loudly on the next
     // parse, which is not a failure mode poly has to protect anyone from.
     ("json", &["//"]),
+    // Both spellings are Jsonnet's own, like HCL's.
+    ("jsonnet", &["//", "#"]),
     ("less", &["//"]),
     ("lua", &["--"]),
     // Both spellings are PHP's own, like HCL's.
     ("php", &["//", "#"]),
+    ("powershell", &["#"]),
     ("protobuf", &["//"]),
     ("python", &["#"]),
     ("r", &["#"]),
@@ -1106,6 +1163,20 @@ impl FormatOptions {
     }
 }
 
+/// The editor's `poly.tools` setting, as `[tools]` lines (`"ruff" = "0.6.9"`),
+/// which the VSCode extension sets on every poly it starts.
+///
+/// Someone who installed the extension configures it in settings.json, and a
+/// poly.toml written only to pin a tool would be a file in their repository
+/// for the editor's sake. An environment variable reaches every way the editor
+/// runs poly -- the daemon, the PlantUML jar lookup, `poly check` in a
+/// terminal -- through this one function, with no flag for each of them to
+/// learn; a CLI run outside the editor never has it, and reads poly.toml alone.
+///
+/// Entry by entry it beats poly.toml: a setting is the person at the keyboard
+/// choosing, a poly.toml line is the project's default for whoever has not.
+pub const EDITOR_TOOLS: &str = "POLY_TOOLS";
+
 pub struct Config {
     /// Compiled `[languages.map]`, in file order. Patterns match against the
     /// file name (`*.tpl`) or the full path when the pattern contains a `/`.
@@ -1126,8 +1197,14 @@ pub struct Config {
     lint_ignore: Vec<Suppression>,
     /// `[lint.severity]`, sorted most precise first so the first match wins.
     lint_severity: Vec<(Suppression, crate::diag::Severity)>,
+    /// `[lint.schemas]`, each schema already resolved to a URL or an absolute
+    /// path. See `lint_schemas`.
+    lint_schemas: Vec<(GlobMatcher, String)>,
     format_options: BTreeMap<String, FormatOptions>,
     pub tools: BTreeMap<String, String>,
+    /// The `tools` entries that came from `EDITOR_TOOLS` rather than a
+    /// poly.toml; see `tool_source`.
+    editor_tools: BTreeSet<String>,
     /// `[walk] include-hidden`. A project decision rather than a per-run one:
     /// a repo whose sources live under a dotted directory needs this on for
     /// every invocation, editor included, or the editor and CI disagree about
@@ -1144,11 +1221,34 @@ pub enum Scope {
     Lint,
 }
 
+/// The user's own poly.toml, under every project's: `$XDG_CONFIG_HOME/poly/
+/// poly.toml` (`~/.config/poly/` when unset), `%APPDATA%\poly\` on Windows.
+///
+/// Only the lowest layer of `discover`'s merge. It never makes a directory a
+/// project root, so `root` -- and with it `[lint.schemas]` paths, exclude
+/// anchors and poly-tools.lock -- still belongs to the nearest project file.
+pub fn global_config() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    };
+    base.map(|dir| dir.join("poly").join("poly.toml"))
+}
+
 impl Config {
     /// Walk upward from `start` (a file or directory), collect every
     /// `poly.toml` on the way, and field-level-merge them with nearer files
-    /// winning — monorepo subdirs override only what they declare.
+    /// winning — monorepo subdirs override only what they declare. The user's
+    /// `global_config` is merged under all of them.
     pub fn discover(start: &Path) -> Result<Config> {
+        Self::discover_over(start, global_config().as_deref())
+    }
+
+    fn discover_over(start: &Path, global: Option<&Path>) -> Result<Config> {
         let mut dir = if start.is_dir() {
             start
         } else {
@@ -1166,7 +1266,13 @@ impl Config {
             }
         }
         let mut merged = toml::Value::Table(Default::default());
-        for path in chain.iter().rev() {
+        // A project under the config directory already has the file in its
+        // chain; merging it twice would change nothing but is not free.
+        let global = global.filter(|g| g.is_file() && !chain.iter().any(|c| c == g));
+        for path in global
+            .into_iter()
+            .chain(chain.iter().rev().map(PathBuf::as_path))
+        {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {}", path.display()))?;
             let value: toml::Value = text
@@ -1186,6 +1292,18 @@ impl Config {
                 .with_context(|| format!("invalid [languages.map] pattern {pattern:?}"))?;
             map.push((glob.compile_matcher(), lang.clone()));
         }
+        let mut tools = raw.tools;
+        let mut editor_tools = BTreeSet::new();
+        if let Ok(text) = std::env::var(EDITOR_TOOLS) {
+            let editor: BTreeMap<String, String> = toml::from_str(&text)
+                .with_context(|| format!("parsing {EDITOR_TOOLS} (the poly.tools setting)"))?;
+            editor_tools.extend(editor.keys().cloned());
+            tools.extend(editor);
+        }
+        let root = chain
+            .first()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf);
         Ok(Config {
             map,
             format_fail_on: parse_fail_on(raw.format.fail_on.as_deref(), "format")?,
@@ -1200,15 +1318,14 @@ impl Config {
                 .map(|entry| Suppression::parse(entry, "[lint] ignore"))
                 .collect::<Result<Vec<_>>>()?,
             lint_severity: compile_severities(&raw.lint.severity)?,
+            lint_schemas: compile_schemas(&raw.lint.schemas, root.as_deref())?,
             format_exclude: raw.format.exclude,
             lint_exclude: raw.lint.exclude,
             format_options: raw.format.languages,
-            tools: raw.tools,
+            tools,
+            editor_tools,
             include_hidden: raw.walk.include_hidden,
-            root: chain
-                .first()
-                .and_then(|p| p.parent())
-                .map(Path::to_path_buf),
+            root,
         })
     }
 
@@ -1224,10 +1341,23 @@ impl Config {
             lint_ignores: Vec::new(),
             lint_ignore: Vec::new(),
             lint_severity: Vec::new(),
+            lint_schemas: Vec::new(),
             format_options: BTreeMap::new(),
             tools: BTreeMap::new(),
+            editor_tools: BTreeSet::new(),
             include_hidden: false,
             root: None,
+        }
+    }
+
+    /// Where `name`'s `[tools]` entry was written, as a sentence names it. A
+    /// reader sent to poly.toml for a line that lives in their editor settings
+    /// would search the repository for it and find nothing.
+    pub fn tool_source(&self, name: &str) -> &'static str {
+        if self.editor_tools.contains(name) {
+            "the poly.tools setting"
+        } else {
+            "poly.toml"
         }
     }
 
@@ -1288,6 +1418,26 @@ impl Config {
             .iter()
             .find(|(rule, _)| rule.matches(source, code))
             .map(|(_, severity)| *severity)
+    }
+
+    /// The JSON Schemas `[lint.schemas]` maps `path` to, as URLs or absolute
+    /// paths.
+    ///
+    /// Every matching entry rather than the first, because a BTreeMap's first is
+    /// alphabetical and not anything the project said: two globs that both claim
+    /// a file are two schemas it has to satisfy, which is also how VS Code's JSON
+    /// support combines them. A schema the file names for itself replaces these
+    /// (poly-engines' `schema::lint`), and both the CLI and the daemon ask here.
+    pub fn lint_schemas(&self, path: &Path) -> Vec<String> {
+        if self.lint_schemas.is_empty() {
+            return Vec::new();
+        }
+        let relative = self.relative(path);
+        self.lint_schemas
+            .iter()
+            .filter(|(matcher, _)| matcher.is_match(relative))
+            .map(|(_, schema)| schema.clone())
+            .collect()
     }
 
     /// Path as the patterns in this config were written: relative to the
@@ -1353,6 +1503,32 @@ fn parse_fail_on(value: Option<&str>, section: &str) -> Result<crate::diag::Fail
         None => Ok(crate::diag::FailOn::default()),
         Some(v) => crate::diag::FailOn::parse(v).map_err(|e| anyhow::anyhow!("[{section}] {e}")),
     }
+}
+
+/// `[lint.schemas]`, with each schema resolved where it was written: a URL as
+/// is, a path against the config root, the directory the globs are anchored at
+/// too. Resolved here rather than at lint time because "relative to what" is a
+/// question only the config knows the answer to.
+fn compile_schemas(
+    raw: &BTreeMap<String, String>,
+    root: Option<&Path>,
+) -> Result<Vec<(GlobMatcher, String)>> {
+    let mut compiled = Vec::new();
+    for (pattern, schema) in raw {
+        let glob = Glob::new(pattern)
+            .with_context(|| format!("invalid [lint.schemas] pattern {pattern:?}"))?;
+        let schema = if schema.contains("://") {
+            schema.clone()
+        } else {
+            let path = Path::new(schema);
+            match root {
+                Some(root) if path.is_relative() => root.join(path).to_string_lossy().into_owned(),
+                _ => schema.clone(),
+            }
+        };
+        compiled.push((glob.compile_matcher(), schema));
+    }
+    Ok(compiled)
 }
 
 fn compile_per_file_ignores(
@@ -1645,6 +1821,17 @@ mod tests {
             ("a.zsh", Some("zsh")),
             ("a.php", Some("php")),
             ("a.phtml", Some("php")),
+            // Diagram editors own these and rewrite them whole on every save;
+            // their plain siblings are still ordinary XML and JSON.
+            ("docs/arch.drawio.svg", None),
+            ("a.dio.svg", None),
+            ("A.Excalidraw.SVG", None),
+            ("a.excalidraw.json", None),
+            ("a.excalidraw", None),
+            ("a.excalidrawlib", None),
+            ("icon.svg", Some("xml")),
+            ("drawio.svg", Some("xml")),
+            ("a.json", Some("json")),
         ];
         for (path, expected) in cases {
             assert_eq!(builtin_language(Path::new(path)), expected, "{path}");
@@ -1739,6 +1926,40 @@ mod tests {
         assert_eq!(inner.format_options("python").line_width, Some(79));
         assert_eq!(inner.format_options("python").indent_width, Some(4));
         assert_eq!(inner.format_options("typescript").use_tabs, Some(true));
+    }
+
+    /// The user's own poly.toml fills in what a project leaves unsaid, and
+    /// nothing more: the project's answer wins key by key, and the project --
+    /// not the config directory -- stays the root that excludes, schema paths
+    /// and the lock are anchored to.
+    #[test]
+    fn the_global_config_is_the_bottom_layer_and_never_the_root() {
+        let home = tempfile::tempdir().unwrap();
+        let global = home.path().join("poly.toml");
+        std::fs::write(
+            &global,
+            "[format.python]\nline-width = 100\nindent-width = 2\n[lint]\nfail-on = \"error\"\n",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("poly.toml"), "[format.python]\nline-width = 79\n").unwrap();
+
+        let config = Config::discover_over(root, Some(&global)).unwrap();
+        assert_eq!(config.format_options("python").line_width, Some(79));
+        assert_eq!(config.format_options("python").indent_width, Some(2));
+        assert_eq!(
+            config.lint_fail_on,
+            crate::diag::FailOn::Severity(crate::diag::Severity::Error)
+        );
+        assert_eq!(config.root.as_deref(), Some(root));
+
+        // No project file at all: the global one still applies, and there is
+        // still no root -- a lone file is not a project.
+        let bare = tempfile::tempdir().unwrap();
+        let config = Config::discover_over(bare.path(), Some(&global)).unwrap();
+        assert_eq!(config.format_options("python").line_width, Some(100));
+        assert_eq!(config.root, None);
     }
 
     #[test]
@@ -2396,7 +2617,14 @@ mod tests {
                 walk_files(&[root.to_path_buf()], &["vendor/**".into()], None, options).unwrap();
             files
                 .iter()
-                .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap().to_string())
+                // `/` on Windows too, so one expectation serves both.
+                .map(|p| {
+                    p.strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/")
+                })
                 .collect::<Vec<_>>()
         };
 
@@ -2434,7 +2662,14 @@ mod tests {
             walk_files(&[root.to_path_buf()], &[], None, options)
                 .unwrap()
                 .iter()
-                .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap().to_string())
+                // `/` on Windows too, so one expectation serves both.
+                .map(|p| {
+                    p.strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/")
+                })
                 .collect::<Vec<_>>()
         };
 

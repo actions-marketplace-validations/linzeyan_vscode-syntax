@@ -2,8 +2,8 @@
  * Which declarations get a reference count, and what the count says.
  *
  * poly computes no references. It asks the editor, the editor asks whichever
- * provider is registered for the language -- for Go that is poly's own proxy in
- * front of gopls -- and this file only decides where to put the number and how
+ * provider is registered for the language -- for Go that is gopls, run by the
+ * Go extension -- and this file only decides where to put the number and how
  * to word it. That distinction is what lets the feature live here at all:
  * counting an answer somebody else produced is not implementing a language
  * feature, it is handing over data already in hand.
@@ -180,6 +180,121 @@ export function lensTargets<T extends LensSymbol>(
   };
   walk(symbols, 1, false);
   return found;
+}
+
+/** lua-language-server's kinds for a value: String, Number, Boolean, Array, Object. */
+const LUA_VALUE_KINDS: ReadonlySet<number> = new Set([14, 15, 16, 17, 18]);
+
+/**
+ * lua-language-server's outline, reshaped into declarations `lensTargets` reads.
+ *
+ * It names a symbol's kind after the value assigned, not the declaration --
+ * measured 2026-10-05: `local M = {}` is an Object, `local NAME = "x"` a
+ * String, `local n = 0` a Number -- so the module table and every literal
+ * constant fell outside `COUNTED_KINDS` and drew nothing. It also reports each
+ * assignment as a symbol of its own: `count = count + 1` and
+ * `Class.__index = Class` came back as Variables, and those were the ones that
+ * did get a lens, over a line that declares nothing.
+ *
+ * So a value becomes a Variable, a name already seen is an assignment, and a
+ * dotted name is a field write unless it is a function -- `function M.add` is
+ * how a Lua module declares its exports. A method becomes a Function: Lua has
+ * no interfaces, and lua-language-server declares an implementation provider,
+ * so `Class:method` would otherwise be asked what it implements.
+ *
+ * ponytail: a table becomes a Variable, so a function written inside its
+ * constructor (`return { setup = function() end }`) gets no lens of its own;
+ * walk an Object's callable children if that style needs one.
+ */
+export function luaDeclarations<T extends LensSymbol & { readonly name: string }>(
+  symbols: readonly T[],
+): T[] {
+  const seen = new Set<string>();
+  const declared: T[] = [];
+  for (const symbol of symbols) {
+    const callable = symbol.kind === 11 || symbol.kind === 5; // Function, Method
+    if (seen.has(symbol.name) || (!callable && /[.:]/.test(symbol.name))) {
+      continue;
+    }
+    seen.add(symbol.name);
+    if (LUA_VALUE_KINDS.has(symbol.kind)) {
+      declared.push({ ...symbol, kind: 12 /* Variable */ });
+    } else {
+      declared.push(symbol.kind === 5 ? { ...symbol, kind: 11 } : symbol);
+    }
+  }
+  return declared;
+}
+
+/**
+ * arity's outline of an R file, cut down to what another file names.
+ *
+ * Measured 2026-10-06 (arity 0.22.0): every top-level assignment is a symbol of
+ * its own, so `df <- df[...]` after `df <- data.frame()` is a second lens with
+ * a different count, and an R script reassigns like that all the way down. The
+ * first assignment is the declaration.
+ *
+ * And an S3 method runs through its generic -- `print(r)` reaches
+ * `print.record` -- so nothing ever writes its name, arity answers with the
+ * declaration alone, and the lens reads `no refs` over code that runs. A
+ * package's NAMESPACE lists every one (`S3method(print, record)`), and R CMD
+ * check holds it to that, so those get no lens rather than a wrong one.
+ *
+ * ponytail: an S3 method in a script has no NAMESPACE to say so and keeps its
+ * `no refs`; S4 (`setClass`, `setGeneric`) has no symbols in arity at all.
+ */
+export function rDeclarations<T extends LensSymbol & { readonly name: string }>(
+  symbols: readonly T[],
+  namespace: string,
+): T[] {
+  const methods = s3Methods(namespace);
+  const seen = new Set<string>();
+  return symbols.filter((symbol) => {
+    // arity names `%+%` with its backticks, and NAMESPACE writes it without.
+    const name = symbol.name.replace(/^`(.*)`$/, "$1");
+    if (seen.has(name) || methods.has(name)) {
+      return false;
+    }
+    seen.add(name);
+    return true;
+  });
+}
+
+/**
+ * The functions a NAMESPACE registers as S3 methods.
+ *
+ * `S3method(print, record)` is `print.record`; a third argument names the
+ * function outright. roxygen2 quotes some generics (`"["`) and qualifies the
+ * delayed ones (`dplyr::filter`), and the function is named without either.
+ */
+export function s3Methods(namespace: string): Set<string> {
+  const bare = (arg: string) => arg.trim().replace(/^["'`](.*)["'`]$/, "$1").replace(/^\w[\w.]*::/, "");
+  const methods = new Set<string>();
+  for (const [, args] of namespace.matchAll(/^\s*S3method\(([^)]*)\)/gm)) {
+    const [generic, cls, method] = args.split(",").map(bare);
+    if (generic && cls) {
+      methods.add(method || `${generic}.${cls}`);
+    }
+  }
+  return methods;
+}
+
+/**
+ * A markdown outline, flattened into headings `lensTargets` counts.
+ *
+ * Measured 2026-10-14 (VSCode 1.139): the built-in markdown server reports a
+ * heading as a `String` and nests each level under the one above it, so a
+ * heading failed both the kind test and the depth test. Its reference provider
+ * answers anywhere on the heading's line with every `#slug` link to it in the
+ * workspace -- who links to this section, which is the count worth having.
+ * A Constant because that kind is counted and asked nothing about
+ * implementations.
+ */
+export function markdownHeadings<T extends LensSymbol>(symbols: readonly T[]): T[] {
+  return symbols.flatMap((symbol) => [
+    { ...symbol, kind: 13 /* Constant */ },
+    ...markdownHeadings((symbol.children ?? []) as readonly T[]),
+  ]);
 }
 
 /**

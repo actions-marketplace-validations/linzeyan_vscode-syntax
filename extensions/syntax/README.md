@@ -1,16 +1,16 @@
 # Poly Syntax Highlight
 
-153 份 syntax highlighting 文法，一個 extension。輸出標準 TextMate scope，任何 VSCode
+156 份 syntax highlighting 文法，一個 extension。輸出標準 TextMate scope，任何 VSCode
 color theme 直接生效。唯一的執行期程式碼是更新檢查，平常不做任何事。
 
 ## 涵蓋
 
 - **接管 49 個 VSCode 內建語言**：多數與內建同源，更新節奏由 poly 控制；rust 改用
   dustypomerleau/rust-syntax，scope 比內建細。
-- **另加 47 個內建沒有的語言**：HCL／Terraform、nginx、zig、toml、go template、dotenv、
+- **另加 49 個內建沒有的語言**：HCL／Terraform、nginx、zig、toml、go template、dotenv、
   protobuf、mermaid、svelte、graphql、jsonnet、just、nix、cabal、dune、ocaml、elixir、
   erlang、haskell、scala、caddyfile、systemd unit、apacheconf、ssh_config、jinja 家族、
-  Solidity／Cairo／Vyper，以及 csv／tsv 的 rainbow 欄位上色。
+  Solidity／Cairo／Vyper、DBML（含 snippets 與檔案圖示）、PlantUML（含 snippets），以及 csv／tsv 的 rainbow 欄位上色。
 
 完整清單在 `package.json` 的 `contributes.languages`；授權與各文法釘住的 commit 在
 THIRD-PARTY-NOTICES.md。文法一律從上游 repo／marketplace VSIX 以 pinned commit 同步，不手改。
@@ -28,10 +28,11 @@ Poly（poly-lsp）的話 Enter 由它接管**，兩者都有。
 
 poly 不帶配色：文法只替 token 取名（scope），顏色是主題給的。
 
-要改某個 scope 的顏色，用 VSCode 本來就有的 `editor.tokenColorCustomizations.textMateRules`。
-scope 名稱哪裡查：裝了 Poly 就用 `Poly: Syntax Colors for This Language`（一次列出
-這個語言的全部 scope），沒裝就用內建的 `Developer: Inspect Editor Tokens and Scopes`
-（一次一個，游標下的那個）。
+要改某個 scope 的顏色：裝了 Poly（poly-lsp）的話，settings.json 的 `poly` 區塊裡 `syntaxColors` 是一張
+scope → 顏色的表，`Poly: Set Syntax Color` 從目前這個檔的全部 scope 挑一個寫進去。這個
+extension 本身不帶設定——它沒有執行期程式碼能把設定套到主題上——所以只裝它的話，用 VSCode
+本來就有的 `editor.tokenColorCustomizations.textMateRules`，scope 名稱用內建的
+`Developer: Inspect Editor Tokens and Scopes` 查（一次一個，游標下的那個）。
 
 **沒有「只關掉某一份文法」的開關**：VSCode 的文法是靜態註冊的，沒有任何 contribution point
 能在執行期停用其中一份。唯一的關法是停用整個 extension；poly 不做按了沒作用的假開關。

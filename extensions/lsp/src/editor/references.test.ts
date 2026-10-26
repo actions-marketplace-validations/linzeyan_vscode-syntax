@@ -1,7 +1,20 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Answered, At, declarationKeys, elsewhere, implLabel, lensTargets, nameStart, refLabel } from "./references";
+import {
+  Answered,
+  At,
+  declarationKeys,
+  elsewhere,
+  implLabel,
+  lensTargets,
+  luaDeclarations,
+  markdownHeadings,
+  nameStart,
+  rDeclarations,
+  refLabel,
+  s3Methods,
+} from "./references";
 
 // vscode.SymbolKind, by the numbers the provider actually hands over.
 const FUNCTION = 11;
@@ -169,6 +182,28 @@ test("a Go method is asked too, though it is nobody's child", () => {
   );
 });
 
+test("every markdown heading gets a lens, however deep, and no implementation question", () => {
+  // The built-in server's shape: headings are Strings, each level a child of
+  // the one above. Read as it comes, `### From source` is too deep and every
+  // heading the wrong kind, so not one of them was counted.
+  const STRING = 14;
+  const file = [
+    symbol("# Guide", STRING, [
+      symbol("## Install", STRING, [symbol("### From source", STRING)]),
+      symbol("## Usage", STRING),
+    ]),
+  ];
+  assert.deepEqual(
+    lensTargets(markdownHeadings(file), 100).map((t) => [t.symbol.name, t.implementation]),
+    [
+      ["# Guide", undefined],
+      ["## Install", undefined],
+      ["### From source", undefined],
+      ["## Usage", undefined],
+    ],
+  );
+});
+
 // bash-language-server gives a shell function one range, the whole definition,
 // and the editor copies it into `selectionRange`. Asked at that range's start,
 // `function greet {` is asked at a keyword and answers nothing -- which is how
@@ -213,4 +248,82 @@ test("a count is reused for a while and then asked again", () => {
   assert.equal(answered.get("file:///b.go", "22:Circle#0"), undefined);
   answered.forget("file:///a.go");
   assert.equal(answered.get("file:///a.go", "22:Circle#0"), undefined);
+});
+
+test("a Lua file's declarations get a lens, and its assignments do not", () => {
+  // lua-language-server's outline of one file, as it answered on 2026-10-05
+  // (LSP kinds minus one): it names a kind after the value, so the module table
+  // is an Object and a literal a String or Number, and it repeats a name for
+  // every assignment to it.
+  const STRING = 14;
+  const NUMBER = 15;
+  const BOOLEAN = 16;
+  const ARRAY = 17;
+  const OBJECT = 18;
+  const file = [
+    symbol("NAME", STRING), // local NAME = "x"
+    symbol("enabled", BOOLEAN), // local enabled = true
+    symbol("list", ARRAY, [symbol("[1]", NUMBER)]), // local list = { 1 }
+    symbol("obj", VARIABLE), // local obj = setmetatable({}, {})
+    symbol("uninit", VARIABLE), // local uninit
+    symbol("GLOBAL", NUMBER), // GLOBAL = 1
+    symbol("Class", OBJECT), // local Class = {}
+    symbol("Class.__index", VARIABLE), // Class.__index = Class
+    symbol("Class.new", FUNCTION), // function Class.new() ... end
+    symbol("Class:method", METHOD), // function Class:method() ... end
+    symbol("t", OBJECT, [symbol("field", NUMBER), symbol("fn", FUNCTION)]),
+    symbol("outer", FUNCTION, [symbol("inner", NUMBER)]), // its local
+    symbol("uninit", NUMBER), // uninit = 2
+  ];
+  assert.deepEqual(
+    lensTargets(luaDeclarations(file), 100).map((t) => t.symbol.name),
+    ["NAME", "enabled", "list", "obj", "uninit", "GLOBAL", "Class", "Class.new", "Class:method", "t", "outer"],
+  );
+  // Nothing here implements anything, so no Lua declaration asks that question.
+  assert.ok(lensTargets(luaDeclarations(file), 100).every((t) => t.implementation === undefined));
+});
+
+test("an R file's first assignment gets a lens, and its S3 methods do not", () => {
+  // arity's outline, as it answered on 2026-10-06 (LSP kinds minus one): a
+  // symbol per top-level assignment, and S3 methods as plain functions whose
+  // references are the declaration alone, because dispatch never names them.
+  const file = [
+    symbol("THRESHOLD", VARIABLE), // THRESHOLD <- 10
+    symbol("helper", FUNCTION, [symbol("doubled", VARIABLE)]), // its local
+    symbol("count", VARIABLE), // count <- 0
+    symbol("count", VARIABLE), // count <- count + 1
+    symbol("`%+%`", FUNCTION), // `%+%` <- function(a, b) paste(a, b)
+    symbol("summarise_it", FUNCTION), // the generic: UseMethod("summarise_it")
+    symbol("summarise_it.default", FUNCTION),
+    symbol("print.record", FUNCTION),
+    // A dot in a name is old R style and not a method: only NAMESPACE says
+    // which functions dispatch, so this one keeps its count.
+    symbol("is.ok", FUNCTION),
+    symbol("df", VARIABLE), // df <- data.frame(a = 1:3)
+    symbol("df", VARIABLE), // df <- df[df$a > 1, ]
+    symbol("df", VARIABLE), // df <- transform(df, b = a * 2)
+  ];
+  const namespace = "export(summarise_it)\nS3method(summarise_it,default)\nS3method(print, record)\n";
+  assert.deepEqual(
+    lensTargets(rDeclarations(file, namespace), 100).map((t) => t.symbol.name),
+    ["THRESHOLD", "helper", "count", "`%+%`", "summarise_it", "is.ok", "df"],
+  );
+  // A script has no NAMESPACE, and nothing else says what is a method.
+  assert.deepEqual(
+    lensTargets(rDeclarations(file, ""), 100).map((t) => t.symbol.name),
+    ["THRESHOLD", "helper", "count", "`%+%`", "summarise_it", "summarise_it.default", "print.record", "is.ok", "df"],
+  );
+});
+
+test("a NAMESPACE names its S3 methods however roxygen2 wrote them", () => {
+  const namespace = [
+    "# Generated by roxygen2: do not edit by hand",
+    "",
+    "S3method(\"[\",record)",
+    "S3method(dplyr::filter,record)",
+    "S3method(format, record, format_record)",
+    "export(new_record)",
+    "# S3method(print, gone)",
+  ].join("\n");
+  assert.deepEqual([...s3Methods(namespace)].sort(), ["[.record", "filter.record", "format_record"]);
 });

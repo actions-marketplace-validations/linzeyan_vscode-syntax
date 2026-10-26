@@ -281,11 +281,14 @@ fn hidden_files_need_asking_for_by_flag_or_config() {
     assert_eq!(code, 1, "{stdout}");
     assert!(!stdout.contains(".config"), "hidden by default: {stdout}");
 
+    // Windows prints `.config\a.json`; the path is the point, not its separator.
     let (_, stdout, _) = poly(root, &["fmt", "--check", "--hidden", "."]);
+    let stdout = stdout.replace('\\', "/");
     assert!(stdout.contains(".config/a.json"), "{stdout}");
 
     std::fs::write(root.join("poly.toml"), "[walk]\ninclude-hidden = true\n").unwrap();
     let (_, stdout, _) = poly(root, &["fmt", "--check", "."]);
+    let stdout = stdout.replace('\\', "/");
     assert!(
         stdout.contains(".config/a.json"),
         "config ignored: {stdout}"
@@ -354,6 +357,25 @@ fn strict_turns_an_unavailable_formatter_into_a_failure() {
     assert!(stderr.contains("gofumpt"), "{stderr}");
 }
 
+/// Both Jsonnet extensions route to jsonnetfmt. `off` stands in for the tool
+/// being absent, as above, which keeps this offline; what it pins is the
+/// routing. The assertion is on "formatters missing" rather than on the tool's
+/// name, because a poly that did not know the tool would also name it -- in the
+/// error rejecting the `[tools]` key.
+#[test]
+fn jsonnet_files_go_to_jsonnetfmt() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("poly.toml"), "[tools]\njsonnetfmt = \"off\"\n").unwrap();
+    std::fs::write(root.join("a.jsonnet"), "{a:1}\n").unwrap();
+    std::fs::write(root.join("b.libsonnet"), "{b:2}\n").unwrap();
+
+    let (code, _, stderr) = poly(root, &["fmt", "--check", "--strict", "."]);
+    assert_eq!(code, 2, "--strict must fail: {stderr}");
+    assert!(stderr.contains("1 formatters missing"), "{stderr}");
+    assert!(stderr.contains("jsonnetfmt"), "{stderr}");
+}
+
 /// rustfmt was the one formatter that skipped without saying so: it resolves
 /// straight off PATH instead of through `poly_tools::resolve`, so it never
 /// reached the code that records a missing formatter. An unformatted .rs file
@@ -392,4 +414,33 @@ fn a_missing_rustfmt_is_reported_like_any_other_formatter() {
 
     let (code, stderr) = run(&["fmt", "--check", "--strict", "."]);
     assert_eq!(code, 2, "--strict must fail: {stderr}");
+}
+
+/// Windows scripts are the files most likely to be CRLF on disk, and cmd.exe is
+/// the reader most likely to care: the reindent works on LF like every engine,
+/// and the file has to come back with the endings it went in with.
+#[test]
+fn powershell_and_batch_are_reindented_and_keep_crlf() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.ps1"), "if ($a) {\r\nWrite-Host a\r\n}\r\n").unwrap();
+    std::fs::write(root.join("b.cmd"), "if x (\r\necho b\r\n)\r\n").unwrap();
+
+    let (code, stdout, stderr) = poly(root, &["fmt", "--check", "."]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("a.ps1") && stdout.contains("b.cmd"),
+        "{stdout}"
+    );
+
+    let (code, _, stderr) = poly(root, &["fmt", "."]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.ps1")).unwrap(),
+        "if ($a) {\r\n    Write-Host a\r\n}\r\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("b.cmd")).unwrap(),
+        "if x (\r\n    echo b\r\n)\r\n"
+    );
 }

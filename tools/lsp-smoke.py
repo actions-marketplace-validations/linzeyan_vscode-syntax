@@ -14,9 +14,9 @@ import tempfile
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "cli/target/release/poly"
 
-# The daemon's own log, kept rather than inherited: `poly.memoryLog` writes one
-# line per open and close saying what poly is holding, and the soak at the
-# bottom reads them. Everything else poly reports goes here too, which is why
+# The daemon's own log, kept rather than inherited: at Debug it writes one line
+# per open and close saying what poly is holding, and the soak at the bottom
+# reads them. Everything else poly reports goes here too, which is why
 # the path is printed on the way out -- a failure worth reading is usually
 # explained by a line above it.
 LOG_PATH = os.path.join(tempfile.mkdtemp(prefix="poly-smoke-log-"), "daemon.log")
@@ -89,9 +89,9 @@ send(
             "processId": None,
             "rootUri": None,
             "capabilities": {},
-            # On for the whole run, because the soak needs the per-close lines
-            # and there is nothing to be gained by turning it on halfway.
-            "initializationOptions": {"memoryLog": True},
+            # Debug (vscode.LogLevel 2) until the log check below turns it
+            # down; the soak turns it back up for the per-close lines.
+            "initializationOptions": {"logLevel": 2},
         },
     }
 )
@@ -189,6 +189,25 @@ send(
     }
 )
 assert recv_response(5).get("result") is None, "hover away from any finding"
+
+# At Debug the log names where each request was asked, numbered as the editor
+# shows it, so a line in it can be opened with Go to Line. Then Info, sent the
+# way the Output panel's level gear sends it, and nothing more at debug -- the
+# check before the soak. Each line is written before its response, so
+# both are on disk by now.
+with open(LOG_PATH) as f:
+    said = f.read()
+start = flagged["range"]["start"]
+hovered = f"/tmp/smoke.sql:{start['line'] + 1}:{start['character'] + 1}"
+for line in (
+    f"[poly:debug] textDocument/formatting /tmp/smoke.ts: {len(edits)} items in",
+    f"[poly:debug] textDocument/hover {hovered}: an answer in",
+    "[poly:debug] textDocument/hover /tmp/smoke.sql:51:1: nothing in",
+    "[poly:debug] opened /tmp/smoke.sql as sql",
+):
+    assert line in said, f"no {line!r} in the daemon log at Debug -- see {LOG_PATH}"
+send({"jsonrpc": "2.0", "method": "poly/logLevel", "params": {"level": 3}})
+quiet_from = len(said)
 
 # Batch formatting via executeCommand, shared code path with the CLI.
 batch_dir = tempfile.mkdtemp(prefix="poly-smoke-")
@@ -407,8 +426,10 @@ assert len(edits) == 1, f"only the selected line: {edits}"
 assert edits[0]["newText"] == '  "c": 3\n', edits[0]["newText"]
 assert edits[0]["range"]["start"] == {"line": 3, "character": 0}, edits[0]["range"]
 
-# Same document, no range: the whole file in one edit. Without this the
-# assertion above passes just as well for a server that formats nothing.
+# Same document, no range: both changed lines, and only those. Without this the
+# assertion above passes just as well for a server that formats nothing. Not one
+# edit over the file, which is what this used to be: the format shortcut applies
+# edits as they arrive, and replacing every line moved the cursor and the view.
 send(
     {
         "jsonrpc": "2.0",
@@ -421,8 +442,9 @@ send(
     }
 )
 whole = recv_response(13).get("result")
-assert whole and len(whole) == 1, f"expected one whole-file edit: {whole}"
-assert '"a": 1' in whole[0]["newText"], whole[0]["newText"]
+assert whole, f"expected edits: {whole}"
+assert [e["range"]["start"]["line"] for e in whole] == [1, 3], whole
+assert whole[0]["newText"] == '  "a": 1,\n', whole[0]["newText"]
 
 # Every request gets an answer, including the ones poly does not implement.
 # Silence is not a polite decline: the editor keeps waiting on that id, so the
@@ -448,6 +470,12 @@ assert declined.get("error", {}).get("code") == -32601, (
 # What is true is the shape, and the soak below is what checks it: RSS is a
 # high-water mark set by the heaviest buffer the session has seen, not a slope
 # that follows how much work has been done.
+with open(LOG_PATH) as f:
+    loud = [
+        line for line in f.read()[quiet_from:].splitlines() if "[poly:debug]" in line
+    ]
+assert not loud, f"debug lines after the level went to Info: {loud[:3]}"
+
 if sys.platform != "win32":
 
     def rss_kb_now():
@@ -523,6 +551,8 @@ somewhere is going to have an opinion about, followed by a list:
         ("css", "css", grow(CSS_BLOCK)),
     ]
     soak_dir = tempfile.mkdtemp(prefix="poly-smoke-soak-")
+    # The per-close memory lines are Debug's.
+    send({"jsonrpc": "2.0", "method": "poly/logLevel", "params": {"level": 2}})
     marks = []
     soak_id = 1000
     for round_no in range(SOAK_ROUNDS):
@@ -612,7 +642,7 @@ somewhere is going to have an opinion about, followed by a list:
     # `ps` reports one number for a process that keeps documents, lint hashes,
     # package scopes and four kinds of finding, so a drift within budget is
     # consistent with one of those maps never letting go of an entry -- the
-    # allocator hides small leaks behind blocks it already had. `poly.memoryLog`
+    # allocator hides small leaks behind blocks it already had. The memory line
     # is the daemon saying what it holds, and these counts are exact rather than
     # sampled: every round opens four documents and closes all four, so the line
     # written by the last close of round 120 has to read the same as the line
@@ -628,12 +658,12 @@ somewhere is going to have an opinion about, followed by a list:
         r"memory after didClose: .*?(?P<documents>\d+) documents .*?"
         r"(?P<hashes>\d+) lint hashes; (?P<scopes>\d+) package scopes; "
         r"findings lint (?P<lint>\d+) package (?P<package>\d+) over (?P<files>\d+) files, "
-        r"format (?P<format>\d+), downstream (?P<downstream>\d+)"
+        r"format (?P<format>\d+)"
     )
     with open(LOG_PATH) as f:
         held = [m.groupdict() for m in (HELD.search(line) for line in f) if m]
     assert len(held) >= SOAK_ROUNDS, (
-        f"poly.memoryLog wrote {len(held)} usable close lines for {SOAK_ROUNDS}"
+        f"the daemon wrote {len(held)} usable memory lines for {SOAK_ROUNDS}"
         f" rounds of four documents -- the log is in {LOG_PATH}"
     )
     # One line per closed document, four per round, so a round's last close is
@@ -663,5 +693,5 @@ print(
     "LSP SMOKE PASS: formatting, Format Selection, diagnostics, spelling,"
     " lint excludes, rule hover, batch executeCommand, minify, .editorconfig,"
     " unhandled methods declined, RSS settles under a soak, poly hands back"
-    " everything it held, clean shutdown"
+    " everything it held, debug lines name the line and follow the level, clean shutdown"
 )

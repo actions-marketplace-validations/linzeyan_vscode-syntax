@@ -6,7 +6,40 @@ node_modules/
 /docs
 extensions/lsp/bin/
 extensions/lsp/out/
+# The bundles not committed with the rest of dist/: @dbml/core, 16 MB
+# minified, the Excalidraw editor's page, 9 MB in 185 files, and markdown
+# export's converter, 4.5 MB of puppeteer and KaTeX, with the 580 styles and fonts it reads. None is
+# poly's code, and CI and release build all from source. CodeSnap's page is a
+# copy of src/editor/codeSnap, Paste Image's scripts of src/editor/pasteImage,
+# and the Swagger preview's page of src/editor/swaggerViewer with Swagger UI's
+# files beside it. Data Preview's readers are 1.3 MB of Arrow, Avro, Parquet and
+# SheetJS, and its page a copy of src/editor/dataPreview with Perspective's
+# release beside it. Marp is 18 MB of marp-core, MathJax, marp-cli and puppeteer
+# around src/editor/marp. Chinese conversion is 1 MB of OpenCC's dictionaries,
+# and AutoCorrect a 3 MB wasm with its glue. Git Graph's commands are 230 KB,
+# most of it markdown-it, and its page carries the codicon font. Code Runner's
+# output grammar and licence are copies from src/editor/codeRunner. Error Lens
+# is usernamehw.errorlens's source in src/editor/errorLens, bundled.
+extensions/lsp/dist/dbml.js
+extensions/lsp/dist/chinese.js
+extensions/lsp/dist/opencc-js/
+extensions/lsp/dist/autocorrect.js
+extensions/lsp/dist/autocorrect_bg.wasm
+extensions/lsp/dist/excalidraw/
+extensions/lsp/dist/markdownPdf.js
+extensions/lsp/dist/markdown-pdf/
+extensions/lsp/dist/codesnap/
+extensions/lsp/dist/paste-image/
+extensions/lsp/dist/dataPreview.js
+extensions/lsp/dist/data-preview/
+extensions/lsp/dist/swagger/
+extensions/lsp/dist/marp/
+extensions/lsp/dist/gitGraph.js
+extensions/lsp/dist/git-graph/
+extensions/lsp/dist/code-runner/
+extensions/lsp/dist/errorLens/
 extensions/lsp/.vscode-test/
 # tools/*.py are scripts, never imported -- except that engine-diff's own
 # self-test imports it to tamper with its EXPECTED table, and that writes here.
 __pycache__/
+.vscode-test/

@@ -16,11 +16,12 @@
 
 ### poly-syntax-highlight — highlighting
 
-- **153 個文法**：接管 49 個 VSCode 內建語言，另加 47 個內建沒有的語言
+- **156 個文法**：接管 49 個 VSCode 內建語言，另加 49 個內建沒有的語言
   （HCL／Terraform、nginx、zig、dotenv、protobuf、mermaid、caddyfile、systemd
   unit、jsonnet、just、nix、cabal、dune、ssh_config、Solidity／Cairo／Vyper、
-  CSV/TSV rainbow…）。
-- 來源共 96 條、30 個 pinned 上游 repo；只有 CSV／TSV／ssh_config 三個是自產的
+  DBML、PlantUML、CSV/TSV rainbow…）。DBML 另附 snippets 與檔案圖示，PlantUML 另附
+  snippets。
+- 來源共 97 條、31 個 pinned 上游 repo；只有 CSV／TSV／ssh_config 三個是自產的
   （上游要嘛不存在，要嘛沒有授權檔）。
 - 輸出標準 TextMate scope，**任何現有 color theme 直接生效**，不自帶配色。
 - 部分語言改採比內建更好的社群文法（如 rust 用 dustypomerleau/rust-syntax）。
@@ -37,6 +38,9 @@
   File／Folder／Workspace／Git Repo／Git Changed Files。專案有 `.editorconfig`
   的話直接沿用，縮排與行寬不必再抄一份到 `poly.toml`。
 - **Format Selection**：只格式化選取的範圍，其餘的行原封不動。
+- **未信任的資料夾（Restricted Mode）**：照樣格式化與 lint，但只用內嵌的引擎，不執行其他程式
+  （專案內或 PATH 上的工具、下載、git、Code Runner、PlantUML、PDF／圖片匯出），也不讀資料夾
+  `.vscode/settings.json` 裡的 `poly` 設定；信任之後全部回來，不必重開視窗。
 - **Lint**：存檔即時 diagnostics 進 Problems panel；`Poly: Lint (poly check)`
   在終端跑完整 CLI。
 - **`Poly: Minify`**（`cmd+alt+m`／`ctrl+alt+m`）：把當前 buffer 壓成一行，涵蓋
@@ -47,34 +51,8 @@
 - **規則說明**：滑鼠移到 SQL 的波浪線上會顯示 sqruff 該條規則的 anti-pattern／
   best-practice 全文。sqruff 沒有文件站可連，那份說明編在 binary 裡，版本精確、
   離線可讀。其他工具有自己的規則頁，走規則代碼上的超連結。
-- **語言伺服器（預設關閉）**：`poly.languageServers` 打開後，poly 會啟動專案自己
-  toolchain 裡的 language server，把 hover、go-to-definition、declaration、type
-  definition、implementation、references、outline、completion、signature help、
-  symbol highlight、folding、expand selection、rename、code action 路由給它。目前九個：
-  gopls（Go）、rust-analyzer（Rust）、clangd（C／C++）、sourcekit-lsp（Swift）、terraform-ls
-  （Terraform）、lua-language-server（Lua）、bash-language-server（Shell）、buf（Protobuf）、
-  arity（R）。poly **不實作**這些功能，
-  server 一律從 PATH 找，找不到就說一聲——所以品質就是那支 server 的品質。
-  **buf 與 arity 是例外**，poly 會代抓：其他 server 都得配合建置專案的 toolchain（gopls 讀
-  go.mod 的 Go 版本、rust-analyzer 要編譯該 crate 的 rustc），而 `.proto` 與 `.R` 背後沒有建置，
-  這兩支也早就是 poly 釘死版本代抓的 formatter／linter，所以 protobuf 與 R 不必先裝
-  任何東西。實際能用
-  哪幾項由 server 自己宣告，十四項裡：clangd 與 rust-analyzer 給滿 14、gopls 13、
-  sourcekit-lsp 12、lua-language-server 12、arity 11、buf 10、terraform-ls 只有 7。有兩個例外值得知道：
-  Swift 的 Go to Declaration 會失敗，Go to Definition 正常；arity 的 hover 讀的是
-  `arity index` 從機器上已安裝的 R 套件收集來的說明，沒裝 R 就是空的（其餘十項照常）。**code action 只給燈泡那
-  些**：`editor.codeActionsOnSave` 跑的 `source.*` 一律不轉，否則會跟 poly 的格式化在
-  同一次存檔搶同一段程式碼；代價是 gopls 的「Source Action…」選單在 poly 下是空的。
-  **poly 自己的 lint 不會因此消失**：server 的診斷是跟 poly 的合併，不是取代，所以
-  lua 的 selene 與 swift 的 swiftlint 照常回報。預設關閉是因為它會跟你八成已經裝了
-  的官方 extension 重疊，要用請先移除那個 extension。改完要重新載入視窗。
-- **`poly.languageServerLogs`（預設開啟）**：把 language server 自己的 stderr 轉進
-  Poly 輸出面板。clangd 與 terraform-ls 每個請求寫一行，嫌吵就關掉——關掉是整份丟棄，
-  不是去叫各家 server 安靜（有些根本沒這種旗標）。poly 自己的訊息（server 不在 PATH、
-  啟動就掛）不受影響。
-- **`poly.memoryLog`（預設關閉）**：每開一個檔、關一個檔，寫一行 daemon 現在握著什麼：
-  常駐記憶體、幾份文件與多少位元組、lint 與整包快取、各來源留著幾筆診斷、哪些 language
-  server 在跑。RSS 只有一個數字，而 poly 有六個地方放東西——這一行的用處是讓漲上去的
+- **記憶體明細**：Poly 輸出面板開到 Debug 時，每開一個檔、關一個檔，寫一行 daemon 現在握著什麼：
+  常駐記憶體、幾份文件與多少位元組、lint 與整包快取、各來源留著幾筆診斷。RSS 只有一個數字，而 poly 有六個地方放東西——這一行的用處是讓漲上去的
   數字歸到某一個快取頭上。`tools/lsp-smoke.py` 的 soak 也讀它：120 輪開關之後，poly
   握著的每一項都必須跟第 1 輪一樣多（實測把 `lint_hashes` 的清除拿掉，RSS 只漂
   +0.2 MB 照樣綠，而這條直接指名 hashes 12 → 488）。
@@ -98,6 +76,87 @@
 - **`Poly: Toggle Bold` ／ `Toggle Italic`**：`cmd/ctrl+b`、`cmd/ctrl+i`，只在
   markdown 檔生效。產生 `**bold**` 與 `_italic_`——就是 `poly fmt` 正規化出來的那兩種，
   不會被下一次存檔改掉。
+- **`Poly: DBML to SQL` ／ `SQL to DBML`**：DBML 轉成 PostgreSQL／MySQL／SQL Server／
+  Oracle 的 SQL，或從 PostgreSQL／MySQL／SQL Server／Snowflake／Oracle 的 SQL 反推 DBML。
+  轉的是編輯器裡的內容，未存檔的修改也算；寫不進去的會指出第幾行第幾欄，存到哪裡用對話框選。
+  命令面板只在 `.dbml` 與 SQL 檔出現。
+- **簡繁轉換**：`Poly: 簡體轉繁體`、`繁體轉簡體`，以及各一個「含台灣用詞」的版本，取代
+  cipchk.zh-hans-tt-hant-vscode。有選取就轉選取（多重選取每一段都轉），沒有就轉整份。用 OpenCC
+  的詞組字典：含台灣用詞的那一對會換用語（软件 ↔ 軟體、鼠标 ↔ 滑鼠），另一對只換字；繁體一律是
+  台灣字形（裡、著）。一次 undo 復原。
+- **AutoCorrect**（`poly.autocorrect.enabled` 打開）：取代 huacnlee.autocorrect，用的是它自己的
+  引擎。中日韓文字與英數之間補空白、全半形標點、`.autocorrectrc` 裡的詞彙拼寫：開檔與打字時就
+  標出來，每條一個 quick fix，手動存檔時整份修正（自動存檔與「儲存但不格式化」不會），
+  `Poly: AutoCorrect: Format Document` 手動跑。讀 workspace 資料夾的 `.autocorrectrc` 與
+  `.autocorrectignore`（加上 `.gitignore`），改了立即生效——拿掉一條規則也是。狀態列的 Lint／Format
+  開關連它一起關；那個 extension 還裝著時 poly 讓開。
+- **Error Lens**（`poly.errorLens.enabled` 打開）：取代 usernamehw.errorlens。每個問題的訊息寫在那一行的
+  行尾，整行依嚴重度上色；gutter 圖示、狀態列的計數與訊息、CodeLens、hover 裡的按鈕可另外打開。命令面板的
+  `Error Lens: …`（切換各嚴重度、選取／複製／排除問題、上網搜尋、加上停用此行規則的註解等）關著時也能用。
+  設定在 `poly.errorLens.*`，名稱同它的。那個 extension 還裝著時 poly 讓開。
+- **PlantUML**：取代 jebbs.plantuml。`alt+d` 在旁邊預覽游標所在的那張圖（縮放、拖曳、分頁、
+  複製成圖片），匯出單張／整份檔案／整個 workspace（12 種格式，檔名與 `out/` 底下的路徑同
+  jebbs.plantuml，舊的匯出會被原地覆寫），產生 server URL，從匯出的 PNG 取回原始碼；另有
+  補全、`!define` 巨集的參數提示、大綱，以及同名圖（匯出會互相覆蓋）與未命名圖的檢查。
+  jar 由 poly 下載，settings 的 `poly.tools` 寫 `"plantuml": "<jar 路徑>"` 可改指向別的 jar；Java 自備，不在 PATH
+  上就設 `poly.plantuml.java`。MIT 版的 jar 畫不了 ditaa，需要就指向 GPL 版的 jar。
+  jebbs.plantuml 還裝著時 poly 讓開。
+- **Excalidraw**：取代 pomdtr.excalidraw-editor。`.excalidraw`、`.excalidraw.json`、
+  `.excalidraw.svg`、`.excalidraw.png` 用 Excalidraw 開，存出來的檔案與它的相同：SVG／PNG 存的是
+  圖片本身並嵌著 scene，放進文件直接能看、再開還能編輯。標題列可切換原始檔、圖片與編輯器，
+  元件庫可存在工作區裡跟著專案走，主題與語言可設。設定在 `poly.excalidraw.*`，名稱同它的。
+  介面與手寫字型打包在 extension 裡，中文字型要用時才從 esm.sh 下載。兩個都裝著時 VSCode 會請你
+  選預設的編輯器。
+- **Markdown 匯出**：取代 yzane.markdown-pdf。`Export Markdown (pdf)`／`(html)`／`(png)`／`(jpeg)`，
+  右鍵選單也有，也可以存檔時自動轉換；匯出的檔案與它的相同：語法上色、KaTeX 數學式、PlantUML 與
+  mermaid 圖、引入別的 markdown 檔，PDF 的紙張、邊界與頁首頁尾可設。設定在 `poly.markdownPdf.*`，
+  名稱同它的。PDF 與圖片由已安裝的 Chrome 或 Edge 印出；都沒有時第一次匯出才下載固定版本的
+  Chrome for Testing（macOS arm64 與 Windows x64），核對雜湊值後才使用。emoji 畫成字元，不是它的
+  Apple 圖片。兩個都裝著時 poly 的命令不放進右鍵選單。
+- **CodeSnap**：取代 adpyke.codesnap。選取程式碼後執行 `CodeSnap 📸`（右鍵選單也有），旁邊開出的
+  頁面照 VSCode 的顏色與字型把它畫成 macOS 風格的視窗，按快門存成 PNG 或複製到剪貼簿；拍出的圖與
+  它的相同。背景、陰影、視窗樣式與行號可設，設定在 `poly.codeSnap.*`，名稱同它的。頁面開著時，選取
+  會蓋掉剪貼簿，和它一樣。兩個都裝著時 poly 的命令不放進右鍵選單。
+- **貼上圖片**：取代 mushan.vscode-paste-image。截圖或複製圖片後，在檔案裡按 `cmd/ctrl+alt+shift+i`（或
+  `Paste Image`），圖片存成 PNG 放在檔案旁邊，游標處插入連結：markdown 是 `![](路徑)`，AsciiDoc 是
+  `image::路徑[]`。有選取文字就拿它當檔名，否則以貼上的時間命名。存放的資料夾、連結的寫法與檔名都可設，
+  設定在 `poly.pasteImage.*`，名稱同它的。它的 `cmd/ctrl+alt+v` 在 poly 是 Extract Variable，所以換了鍵；
+  兩個都裝著時各用各的鍵。
+- **資料預覽**：取代 RandomFractalsInc.vscode-data-preview。JSON、JSON Lines、JSON5、HJSON、YAML、CSV／TSV、
+  Markdown 表格、properties／ini／env、Excel 與 ODS、Arrow、Avro、Parquet 檔按編輯器標題的按鈕（或
+  `Preview Data`，檔案總管與分頁右鍵也有），開出可排序、篩選、分組的表格，也能換成圖表；網址上的檔也能
+  預覽。篩選後的資料可另存成別的格式，表格的設定可存成 `.config` 再載入。頁面與表格元件（Perspective
+  0.4）同它的，但不從網路載入任何東西。設定在 `poly.dataPreview.*`，名稱同它的。不綁快捷鍵；兩個都裝著時
+  poly 的按鈕與選單讓出來。
+- **Swagger 預覽**：取代 arjun.swagger-viewer。在 Swagger 2.0 或 OpenAPI 3 的 JSON／YAML 檔按
+  `shift+alt+p`（或 `Preview Swagger`，檔案總管右鍵也有），旁邊開出 Swagger UI，打字時跟著更新；也能
+  從網址預覽，檔案總管有工作區裡 spec 的清單。頁面與 Swagger UI 的版本同它的。JSON spec 照 schema
+  標出錯誤，YAML 的要另裝 redhat.vscode-yaml。spec 引用別的檔（外部 `$ref`）時，被引用的檔會併進預覽、
+  改了也跟著更新；它宣稱支援這點，實際上沒有作用。設定在 `poly.swaggerViewer.*`，名稱同它的。兩個都
+  裝著時 poly 讓出快捷鍵、右鍵選單與清單。
+- **Marp 投影片**：取代 marp-team.marp-vscode。front matter 寫了 `marp: true` 的 Markdown，預覽就是 Marp
+  投影片（主題、分頁、數學式、背景圖）；directive 有上色、說明、補全與檢查，多半附快速修正。
+  `Export Marp Slide Deck...` 匯出 HTML、PDF、PPTX、PNG、JPEG 或講者備忘稿，Copilot Chat 裡是
+  `#polyExportMarp`。編輯器標題列的 Marp 按鈕開出命令清單，`File > New File` 有 Marp Markdown。設定在
+  `poly.marp.*`，名稱同它的（已棄用的 `enableHtml`、`chromePath` 除外）。PDF、PPTX 與圖片用已安裝的
+  Chrome、Edge 或 Firefox 匯出，和它一樣不另外下載。兩個都裝著時 poly 整個讓出。
+- **Git History**：取代 mhutchie.git-graph。按 status bar 的 Git History、原始檔控制標題列的按鈕（或
+  `View Git History`），所有分支、tag 與 stash 畫成一張圖，未提交的變更在最上面。點 commit 在下面展開它的
+  訊息與變更的檔案，`cmd/ctrl` 加點另一個是比較兩者；開著的 diff 用標題列的 ← →（`cmd+alt+a`／`cmd+alt+z`）
+  換到同一個 commit 的上／下一個檔案；可搜尋、只看某些分支。commit、分支、tag、stash 與
+  檔案的右鍵選單做簽出、merge、rebase、cherry-pick、reset、push、刪除等操作，remote 在工具列管理。
+  檔案總管對檔案或資料夾按右鍵的 `View File History`／`View Folder History`（命令面板也有，作用在目前的檔案
+  與它所在的資料夾）只列改過它的 commit，展開的 commit 只列它底下的檔案；工具列的 ✕ 回到整個 repository。功能
+  照它的行為做；圖的畫法移植自 VSCode 的原始檔控制圖（Source Control Graph，MIT），顏色是它的
+  `scmGraph.*` 佈景主題色。沒有它的 `git-graph.*` 設定。兩個都裝著時 poly 讓出 status bar 與原始檔控制的按鈕。
+  電腦上沒有 git 時改由 poly 讀 repository，圖、commit 細節、比較與 diff 照常，但只能看：會改動
+  repository 的操作都需要 git。
+- **Code Runner**（`poly.codeRunner.enabled` 打開）：取代 formulahendry.code-runner。`ctrl+alt+n`（或
+  `Run Code`，編輯器標題的 ▶ 按鈕與右鍵選單也有）執行目前的檔案或選取的程式碼，結果在輸出面板的 Code Runner，
+  `runInTerminal` 改在終端機；`ctrl+alt+k` 執行自訂命令，`ctrl+alt+j` 先挑語言再執行，`ctrl+alt+m` 停止。
+  各語言用什麼命令執行照它的表，設定在 `poly.codeRunner.*`，名稱同它的；Go、Rust、Python 的預設改成
+  `go run .`、`cargo run` 與選定的 Python 直譯器（沒有時 `python3`）。formulahendry.code-runner 還裝著時
+  poly 讓開。
 - **清單接續**：在清單項目上按 Enter 接出下一項，**有序清單號碼遞增**（整份寫成 `1.` 的
   清單維持 `1.`），任務項接出 `- [ ]`，**空的項目按 Enter 結束清單**（往外退一層，最外層
   就清掉 marker）。markdown 家族與 yaml 都有，yaml 只認 sequence 的破折號——`>` 在那裡是
@@ -116,23 +175,38 @@
   `Extract subexpression to variable`／`Extract to constant in enclosing scope`），快捷鍵
   綁不到任何一個。poly 問的是 LSP 標準的 `refactor.extract`／`refactor.inline` kind，
   過濾掉 `Extract function` 那種不是變數的，剛好一項就直接套用。做事的是語言自己的 server。
+  你裝的別的擴充綁了同一組鍵（mushan.vscode-paste-image 的貼圖、quicktype 的 Paste JSON as Types）時
+  poly 讓出來，命令面板照樣叫得到。
 - **`Poly: Move to New File` ／ `Change Signature` ／ `Implement Interface`**：同一個形狀再
   三個，從命令面板叫。Move to New File 問 `refactor.extract` 挑 `toNewFile`；Change Signature
   在游標原位問 `refactor.rewrite`，**游標要在參數上**；Implement Interface 問 `quickfix` 挑
   「補上缺的方法」，**要先有一個編不過的斷言**（Go 是 `var _ Shape = Triangle{}`），因為
   server 是對著診斷提供那條修正的。
-- **引用與實作 CodeLens**：每個宣告一行 `11 refs`；interface 多一顆 `3 impls`，具體型別多一顆
-  `1 interface`，方法寫在型別外面的語言（Go）再多一顆 `4 methods`。只有一筆就直接跳過去，多筆
-  開檔案總管裡的 **References** 面板——那是 poly 自己的樹，每一列除了原始碼還帶**行號**與
+- **引用與實作 CodeLens**：每個宣告一行 `11 refs`；interface 多一顆 `3 impls`，具體型別有滿足
+  interface 才多一顆 `1 interface`，方法寫在型別外面的語言（Go）再多一顆 `4 methods`；
+  Markdown 有人連結的標題也有，數的是整個 workspace 連到它的 `#錨點` 連結。只有一筆就直接跳過去，多筆開檔案總管裡的 **References** 面板——那是 poly 自己的樹，每一列除了
+  原始碼還帶**行號**與
   **它落在哪個符號裡**（`method Handle`、`func main`），內建的 `references-view` 兩欄都沒有，
-  而別人的樹加不了欄位。全部的數字都來自該語言已註冊的 provider，poly 只數與畫。
-  數字存在 `$XDG_CACHE_HOME/poly/refs/`（預設 `~/.cache/poly/refs/`），重開視窗時先畫上次的
+  而別人的樹加不了欄位。數字來自該語言已註冊的 provider，poly 只數與畫。**GraphQL、nginx 與
+  Makefile** 沒有 server 答得出引用，由 poly 自己按名字算：GraphQL 的 type、fragment、directive；nginx 的
+  `upstream`、`location @name`、`set`／`map` 等宣告的變數、`limit_req_zone` 之類的 zone、
+  `log_format`；Makefile 的 target（`.PHONY` 與 prerequisites 算使用，`%.o` 這類 pattern 不算）
+  與變數（`$(X)`、`${X}`、`$(call x,…)` 算使用，`+=` 也算使用而不是宣告）。範圍是整個 workspace
+  folder，沒有 scope；同一份答案也給 outline 與 Find All References。數字存在 `$XDG_CACHE_HOME/poly/refs/`（預設 `~/.cache/poly/refs/`），重開視窗時先畫上次的
   數字、背景重新問過再更新。`poly.referencesCodeLens.enabled` 可關。
-- **`run | debug` CodeLens**：程式進入點（Go／Rust／C／C++／Java 的 `main`、C# 的 `Main`、
-  Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。`run` 存檔後在一個
-  叫 `Poly Run` 的終端機裡下命令（`go run .`／`cargo run`／`python3 檔名`／shebang 指定的
-  直譯器），不經過 debugger；要先編譯的 C／C++／Java／C# 只有 `debug`。poly 沒有
-  debugger，`debug` 是交給你已經裝的 debug extension。
+- **Makefile 與 shell 跳到定義**：F12（Go to Definition）在 Makefile 跳到 target、變數、`define`，
+  在 shell 跳到 function 與變數（`local`、`export`、`for`、`read`、`getopts` 給值的都算宣告）。先找
+  同一個檔，有好幾個宣告時取游標上方最近的一個——所以是游標所在 function 的 `local`；上方沒有才
+  取下方的。檔案裡沒宣告才找整個 workspace folder，`source` 進來的 lib 與 `include` 的 `.mk` 就是
+  這樣找到的（只認 `.sh`／`.bash`／`.zsh`／`.ksh`／`.bats` 與 VSCode 認得的 Makefile 檔名）。只比對
+  名字，不跟 `source`／`include` 的路徑。另外裝了 bash-language-server 的話，編輯器會把兩邊的答案
+  合在一起。
+- **`run | debug` CodeLens**：程式進入點（Go 只算 `package main` 的 `main`；Rust／C／C++／Java 的 `main`、
+  C# 的 `Main`、Python 的 `if __name__ == "__main__"`、shell 的 shebang）上方一行。`run` 存檔後像 Code Runner
+  的 `Run Code` 那樣執行整個檔案，命令來自 `poly.codeRunner.*`（`go run .`／`cargo run`／選定的
+  Python 直譯器／shebang 指定的直譯器），結果在輸出面板的 Code Runner，不經過 debugger；那些設定
+  有這個檔的命令就有 `run`，Code Runner 關著也一樣。poly 沒有 debugger，`debug` 是交給你已經裝的
+  debug extension。
   `poly.runCodeLens.enabled` 可關。
 - **protobuf → 生成的 Go**：`.proto` 的 `message`／`enum` 上方 `go type`，`service` 上方
   `go server`／`go client`，跳到 protoc 生出來的宣告；`rpc` 上方 `N impls`，跳到寫在 Go 裡的
@@ -142,26 +216,44 @@
   `cmd/ctrl+alt+z`／`cmd/ctrl+alt+a` 跳到上／下一個有改動的檔案並落在改動上，`alt+q`
   還原游標所在的 hunk 並存檔。VSCode 內建的是「同一個檔案裡的下一處改動」，跨檔案那
   一步沒有——而那是 review 一個 branch 時按最多次的一步。順序照路徑排，所以同一顆
-  按鍵按兩次一定走同一條路。
+  按鍵按兩次一定走同一條路。別的擴充綁了同一組鍵（Rewrap 的 `alt+q`）時 poly 讓出來。
 - **縮排上色**：每層縮排的空白塗底色，四色循環；**填不滿一層的空白另外標色**，那正是
   「縮排改到一半」的樣子。內建的 indent guides 畫線回答「block 從哪開始」，上色回答的
   是「我在第幾層」。只畫可見範圍，顏色走 theme color。
 - **Unicode 高亮**：gremlins 的替代。不可見字元、雙向控制字元、怪空白、冒充 ASCII 的字元
-  （en dash、彎引號），所有檔案、邊打邊標：gutter 記號、捲軸刻度、hover 說出字元名稱，
-  等級與顏色照 gremlins。`poly.unicodeHighlight.enabled` 打開。
+  （en dash、彎引號），所有檔案、邊打邊標：gutter 記號（error 😡、warning 🤔、info ℹ️）、
+  捲軸刻度、行尾寫出字元名稱，等級與顏色照 gremlins。`poly.unicodeHighlight.enabled` 打開。
 - **Gutter 圖片預覽**：某行提到的圖檔存在就在 gutter 放縮圖。不寫語法解析器——
   markdown／HTML／CSS 各有寫法，而檔案存不存在才是真正的過濾器。
 - **markdown preview 的 mermaid 圖表**：```mermaid fence 在 preview 裡畫成圖，配色與字型
   跟著編輯器主題。**VSCode 1.135 起內建就有這個功能，那時候 poly 會自動讓開**——所以這一項
   實際生效的是 1.85 到 1.134。`poly.markdownMermaid.enabled` 可關。
+- **markdown preview 的其他圖表**：fence 語言為 `nomnoml`、`flowchart`（或 `flow`）、
+  `sequence`、`vega`、`vega-lite`、`markmap`、`excalidraw`（scene 的 JSON），範圍與畫法同
+  MarkNote。函式庫在文件第一次用到時才載入；
+  深色主題下，本身不吃配色的圖畫在淺色底卡上。`plantuml`（或 `puml`、`uml`）也在內：有設
+  `poly.plantuml.server` 就交給 server，否則在本機用 Java 畫。`poly.markdownDiagrams.enabled`
+  打開。
+- **GitHub 樣式的 preview**：取代 Markdown Preview Github Styling，九種 GitHub 配色（含
+  高對比與色盲友善）、跟隨編輯器或系統的深淺色。`poly.markdownGithubStyle.enabled` 打開；
+  那個 extension 還裝著的時候 poly 讓開。
 - **TODOs 檢視**：檔案總管多一個面板，列出整個 workspace 的 `TODO`／`FIXME`／`HACK`／
   `XXX`／`BUG`。只在面板顯示時才掃描，排除規則沿用 `files.exclude`／`search.exclude`，
   而且掃描上限會寫在標題上——「清單很短」跟「清單被截斷」不該長得一樣。
-- **`Poly: Syntax Colors for This Language`**：列出目前這個檔的文法能產生的**全部**
-  TextMate scope，做成一份可以直接複製的 `editor.tokenColorCustomizations.textMateRules`。
-  改配色這件事 VSCode 一直都做得到，卡住的是沒人知道 scope 叫什麼——內建的
-  `Inspect Editor Tokens and Scopes` 一次只給游標下的那一個。顏色欄位是
-  `#RRGGBB` 佔位字串而不是某個預設色：整份貼上去不會改變任何顏色，你只會改你改過的那幾條。
+- **語法顏色設定 `poly.syntaxColors`**：使用者 settings.json 的 `poly` 區塊裡一張表，項目是
+  TextMate scope、值是顏色加選用樣式，例如 `comment` → `#6A9955 italic`。改完畫面當場重新上色，
+  刪掉那一項就回到 theme 的顏色。一個 scope 也套到它底下更長的 scope，`comment` 涵蓋每一種註解。
+  主題只讀 `editor.tokenColorCustomizations`，所以 poly 把這張表複製進去，成為名為
+  `poly.syntaxColors` 的 rule；你自己在那裡寫的 rule 與各 theme 專屬的設定不會被動到。
+  Go、TypeScript、Python 這類有 semantic tokens 的語言，language server 的顏色會蓋在上面，
+  那部分要改 `editor.semanticTokenColorCustomizations`。
+- **`Poly: Set Syntax Color`**：不知道 scope 叫什麼就用這個。從目前這個檔的文法的 scope 清單挑一個
+  （可打字過濾，已設定的會顯示目前的值），輸入 `#C586C0` 或 `#C586C0 italic`，寫進
+  `poly.syntaxColors`；留空就刪掉那一項。遠端視窗（WSL、SSH）讀不到文法，改成直接輸入 scope 名稱。
+- **`Poly: Syntax Colors for This Language`**：同一份清單整份列出，做成可以直接複製的
+  `poly.syntaxColors` 片段。改配色這件事 VSCode 一直都做得到，卡住的是沒人知道 scope 叫什麼——
+  內建的 `Inspect Editor Tokens and Scopes` 一次只給游標下的那一個。顏色欄位是 `#RRGGBB`
+  佔位字串而不是某個預設色：整份貼上去不會改變任何顏色，你只會改你改過的那幾條。
 
 ### poly — CLI
 
@@ -176,16 +268,22 @@
   hadolint 預設關閉，因為它跟 poly 的規則大部分重疊——見下面的外部工具），
   Lua（格式化 stylua、lint selene）、
   PHP（格式化與 lint 都是 mago，lint 是它 190 條規則裡的 7 條——見下面的說明）、
-  Protobuf（lint 是 poly 自己寫的規則，code 長 `poly/proto-*`；格式化仍是 buf）。
+  Protobuf（lint 是 poly 自己寫的規則，code 長 `poly/proto-*`；格式化仍是 buf）、
+  PowerShell／批次檔（`.ps1`／`.psm1`／`.psd1`、`.bat`／`.cmd`，格式化是 poly 自己寫的，
+  只重新縮排、清行尾空白與連續空行，行內照你寫的；批次檔的行尾空白不動）。
   這些都是編進 binary 的 Rust library，
   不再下載。拼字檢查（typos）也在裡面，而且不分語言——它讀的是每一個檔案，
   包含 poly 認不出語言的那些。
 - **外部工具**（受管下載）：shellcheck、shfmt、actionlint、
   tflint、gofumpt、golangci-lint、swiftlint、buf
-  （Protobuf 的格式化，同一支 binary 也是上面那個 language server）、
-  arity（R 的格式化與 lint，同樣也是上面那個 language server）。版本釘死，
-  每個平台的 sha256 都預先寫進 `poly-tools.lock`——下載對不上就直接失敗，而不是
-  信任第一次抓到的東西。
+  （Protobuf 的格式化）、
+  arity（R 的格式化與 lint）、
+  jsonnetfmt（Jsonnet 的格式化，`.jsonnet`／`.libsonnet`，用它的預設值，不另設旗標）、
+  PlantUML（MIT 版的 jar，給編輯器的預覽與匯出用，不做 lint；Java 要自己裝）。PATH 上
+  已經有同一個工具就直接用它，版本不同沒關係，只要主版號跟 poly 釘的一樣（golangci-lint
+  要 2.x，1.x 的命令列不相容）；PlantUML 例外，一律用 poly 下載的 jar。PATH 上沒有才
+  下載 poly 釘死的版本，每個平台的 sha256 都預先寫進 `poly-tools.lock` 並編進 poly——
+  下載對不上就直接失敗，而不是信任第一次抓到的東西。
 - **zsh 只格式化，不 lint**（`.zsh`）。shfmt 讀得懂 zsh 文法，shellcheck 讀不懂——它只支
   援 sh／bash／dash／ksh。以前 poly 把 `.zsh` 一起丟給 shellcheck，結果是拿 bash 文法解析
   zsh：361 個真實 `.zsh` 檔案上產生 2,454 條 findings，佔量測語料裡全部 shellcheck findings
@@ -258,6 +356,18 @@
   是「定義在別的檔案」——federation 的 `@link`、隔壁模組宣告的 type、只有幾個 type 而沒有
   root 的 schema 片段。一份 schema 是好幾個檔案組起來的，而 poly 一次看一個檔案，那些不是
   這個檔案的缺陷。
+- **YAML 與 TOML 照它們指定的 JSON Schema 驗證**（code 長 `schema/<keyword>`，例如
+  `schema/required`、`schema/type`、`schema/additionalProperties`，等級 warning）。schema 由
+  檔案自己指定，寫法跟 redhat.vscode-yaml 與 even-better-toml 讀的那行相同——YAML 寫
+  `# yaml-language-server: $schema=<網址或路徑>`，TOML 寫 `#:schema <網址或路徑>`——或在
+  `poly.toml` 的 `[lint.schemas]` 用 glob 對應。兩者都沒有就不檢查，`poly check` 的 coverage
+  只有在真的有檔案被檢查時才多一列 `schema`。錯誤標在出錯的那個 key 或值上：拼錯的 key、
+  型別不對的值、少了必填欄位的那個區段的 key。網址的 schema 一天抓一次、存在 poly 的快取，
+  沒網路時用快取的那份；完全讀不到時算「沒檢查到」（結束碼 2），不會當成通過。
+  **SchemaStore 的檔名對應不用**，這是量過的決定：1,329 個真實 YAML／TOML 上它對到 569 個，
+  其中 106 個是錯的檔（一個 `**/scenarios/*/*.yaml` 就把 104 個 QA fixture 當成資安工具的設
+  定檔）；而對得對的那些，報出來的東西大多是 schema 比讀它的程式還嚴或還舊。XML 的
+  XSD／DTD 不做；JSON 由 VSCode 內建的 JSON 支援驗證。
 - **Markdown 的 lint 是 rumdl 的 7 條規則**，全部只報壞掉的東西：相對連結指向不存在的檔
   （MD057）、錨點不存在（MD051）、連結寫反 `(文字)[網址]`（MD011）、空連結（MD042）、
   參考式連結沒有定義（MD052）、標題跳級（MD001）、圖片沒有 alt（MD045）。code 長
@@ -295,7 +405,7 @@
   獨立命令而不是 `poly fmt` 的旗標——兩者契約相反，`fmt` 是「符合專案風格」，而沒有
   人的風格是一行 40KB。不支援 `--strict`／`--format`／`--fail-on`（沒有 findings 可
   塑形，也沒有外部工具會缺席），拼對了卻無效的旗標一律拒絕。
-- 工具解析順序：`poly.toml` 指定 → 專案內工具 → 內嵌引擎 → 受管下載 → PATH。
+- 工具解析順序：指定（VSCode 的 `poly.tools`，其次 `poly.toml` 的 `[tools]`）→ 專案內工具 → 內嵌引擎 → PATH（主版號相同即可）→ 受管下載。指定版本號時跳過 PATH，直接下載那個版本。
 
 ## 安裝
 
@@ -304,19 +414,30 @@
 
 1. `poly-syntax-highlight-<版本>.vsix` — 通用，不分平台。
 2. `poly-lsp-<平台>-<版本>.vsix` — **要挑對平台**，內含對應的 poly binary：
-   `darwin-arm64`、`darwin-x64`、`linux-arm64`、`linux-x64`、`win32-arm64`、
-   `win32-x64`。
+   `darwin-arm64`（Apple Silicon）、`win32-x64`、`linux-x64`（WSL 也用這個）。其他平台沒有
+   poly-lsp，CLI 請用下方的獨立 binary。
 
 安裝方式：VSCode 側邊欄 Extensions → 右上角 `...` → **Install from VSIX...** →
 選檔案 → 重新載入視窗。或用命令列：
 
 ```sh
-code --install-extension poly-syntax-highlight-0.18.3.vsix
-code --install-extension poly-lsp-darwin-arm64-0.18.3.vsix
+code --install-extension poly-syntax-highlight-0.19.1.vsix
+code --install-extension poly-lsp-darwin-arm64-0.19.1.vsix
 ```
 
-之後的版本由 extension 自己提示更新，不必再手動抓——兩個各自照自己的間隔檢查，哪個先發現
-就一起更新你已經裝了的那幾個。
+之後的版本由 extension 自己下載安裝，裝好只問要不要重新載入視窗——兩個各自照自己的間隔檢查，
+哪個先發現就一起更新你已經裝了的那幾個。不想自動更新就關掉 `poly.updateCheck.enabled`
+（只裝 poly-syntax-highlight 的話是 `poly.syntax.updateCheck.enabled`）。
+
+Extensions 面板齒輪選單裡的「自動更新」勾選框管不到 poly：那是 VSCode 從 Marketplace 更新用的，
+poly 不在 Marketplace 上，勾了也沒有東西可以更新，而且每次從 VSIX 安裝都會被 VSCode 重設。
+
+### 從 0.18.20 以前升上來
+
+設定從一項一行（`"poly.format.enabled": false`）改成一個 `poly` 區塊（見[設定](#設定)）。
+升上來之後，把舊的那幾行的值填進區塊裡對應的項目，再刪掉舊的；poly 不會替你搬。
+`poly.languageServers` 與 `poly.languageServerLogs` 已經拿掉：poly 只做格式化與 lint，
+跳到定義、補全這些語言功能交給各語言自己的 extension（Go 是 golang.go），舊的設定直接刪掉。
 
 ### 從 0.18.2 以前升上來
 
@@ -332,7 +453,7 @@ extension，只能手動裝。
 0.5.0 的更新提示還是會跳，但按下 Install 一定失敗，而且訊息會騙你：
 
 > Poly: automatic install failed (Error: release has no asset
-> poly-syntax-0.18.3.vsix). The VSIX files were downloaded — install them
+> poly-syntax-0.19.1.vsix). The VSIX files were downloaded — install them
 > manually via "Extensions: Install from VSIX".
 
 其實一個檔都沒下載（它在第一個找不到的 asset 就放棄了），所以「Show Files」按下
@@ -366,7 +487,7 @@ irm https://raw.githubusercontent.com/linzeyan/vscode-syntax/main/install.ps1 | 
 版本就設環境變數——`irm | iex` 沒辦法傳參數，所以兩邊都認得：
 
 ```sh
-POLY_VERSION=0.18.3 POLY_INSTALL_DIR=~/bin sh install.sh
+POLY_VERSION=0.19.1 POLY_INSTALL_DIR=~/bin sh install.sh
 ```
 
 Windows on ARM 上會裝 arm64 版，即使腳本本身跑在 x64 模擬層裡（從 ssh 或某些
@@ -392,7 +513,7 @@ SmartScreen 擋，處理方式見
 - run: poly check --strict .
 ```
 
-`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.18.3" }`——poly
+`@v0` 會跟著最新的 release 走。要釘死版本就寫 `with: { version: "0.19.1" }`——poly
 會改寫檔案，所以新版本自己跑進來有可能把綠的分支變紅。
 
 Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、放進 PATH。順便
@@ -405,7 +526,7 @@ Action 做三件事：抓對應平台的 binary、對 `SHA256SUMS` 驗 sha256、
 docker run --rm -v "$PWD:/work" ghcr.io/linzeyan/poly check --strict .
 ```
 
-`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.18.3`、`0.18`；pre-release
+`linux/amd64` 與 `linux/arm64` 都有。tag 有 `latest`、`0.19.1`、`0.19`；pre-release
 不會動到 `latest`。image 裡的 binary 就是 release 附的那一支，不是另外編的。
 
 image **不含任何語言 toolchain**，只含 poly 自己會下載的那些 linter。所以 Rust
@@ -739,31 +860,42 @@ code frame），`fix` 是跟終端機、編輯器一字不差的同一句話，`
 
 ## 設定
 
-### 要自己在 `settings.json` 設的
+### VSCode：`settings.json` 的 `poly` 區塊
 
-poly **不寫使用者的 `settings.json`**（A8），所以下面這些必須自己來。少了它們，功能是
-接好的，只是畫面上什麼都不會出現：
+poly-lsp 的設定全部在一個 `poly` 物件裡，extension 啟用時把它整個寫進使用者的
+`settings.json`：每一項上面的註解寫用途、可選的值與預設值（照編輯器的語言，英文或正體中文），
+沒設的項目是註解掉的預設值。要改哪一項就取消註解再改值。每次啟用都會依裝的版本重寫註解與
+預設值，你設過的值原樣保留，poly 不認得的鍵也留著並註明。
 
 ```jsonc
-{
-  // 語言功能（definition／references／inlay hints／call hierarchy…）預設是關的。
-  "poly.languageServers": true,
-  // gopls 出貨時 inlay hint 全關，而且開關是它跟 client 要的（workspace/configuration
-  // 的 gopls 區段）。rust-analyzer 與 clangd 預設就開，不必動。
-  "gopls": {
-    "hints": {
-      "assignVariableTypes": true,
-      "compositeLiteralFields": true,
-      "constantValues": true,
-      "parameterNames": true,
-      "rangeVariableTypes": true
-    }
+"poly": {
+  "format": {
+    // 用途：允許 poly 改寫檔案：Format Document、存檔時格式化、Format Selection……
+    // 可選：true｜false；預設：true
+    "enabled": false,
   },
-  // 編輯器自己的 Find All References 開 peek 還是開內建的 References 面板。預設 "peek"；
-  // 設成 "view" 會和 poly 的 `N refs` CodeLens 一樣留著清單不跑掉——但兩邊是不同的樹，
-  // 帶行號與符號欄位的是 poly 那棵。
-  "references.preferredLocation": "view"
+  …
 }
+```
+
+這份 README 寫 `poly.format.enabled` 的地方，指的就是 `"poly": { "format": { "enabled": … } }`。
+設定畫面裡 poly 只有一項「在 settings.json 內編輯」；要逐項挑值，用命令 **Poly: Settings**
+（設定畫面那一項的說明裡也有連結）：每一列是一項與它目前的值，可以用鍵名、值或用途篩選；
+選了就從清單挑值或輸入，挑回預設值等於取消設定，陣列與物件則跳到 `settings.json` 的那一行。
+它寫的就是這個區塊。Format／Lint 開關與
+`Poly: Set Syntax Color` 直接改這個區塊，註解不會掉；`settings.json` 有沒存檔的修改時它們會請你
+先存檔，啟用時的重寫則等下一次。工作區的 `.vscode/settings.json` 用同樣的巢狀寫法，只寫要覆蓋的
+那幾項。
+
+### 要自己在 `settings.json` 設的
+
+這項是 VSCode 自己的，poly 不改它：
+
+```jsonc
+// 編輯器自己的 Find All References 開 peek 還是開內建的 References 面板。預設 "peek"；
+// 設成 "view" 會和 poly 的 `N refs` CodeLens 一樣留著清單不跑掉——但兩邊是不同的樹，
+// 帶行號與符號欄位的是 poly 那棵。
+"references.preferredLocation": "view"
 ```
 
 ### `poly.toml`
@@ -774,6 +906,12 @@ poly **不寫使用者的 `settings.json`**（A8），所以下面這些必須�
 `$XDG_CONFIG_HOME/git/ignore`），沿路每一層祖先目錄的都算。跟 git 一樣，全域忽略
 檔只在 git repo 裡生效。點開頭的檔案與目錄預設跳過，`.github/` 例外（workflow 是原
 始碼，actionlint 就是為它接的）。
+
+drawio 與 excalidraw 的存檔（`.drawio`、`.dio`、`.drawio.svg`、`.dio.svg`、
+`.excalidraw`、`.excalidraw.svg`、`.excalidraw.json`）不歸任何語言：編輯器每次存檔都照自己的排版整份重寫，格式化它只會
+跟下一次存檔來回改。拼字與 Unicode 也不檢查，抓到的多半是編輯器產生的 id 片段，在檔案
+裡改不掉。真的要 poly 管，在 `[languages.map]` 指定；map 比內建判斷優先而且分大小寫，
+所以 `"*.json" = "jsonc"` 這種寬的 pattern 也會把它們一起接回來。
 
 `--no-ignore` 關掉前一段的忽略檔，`--hidden` 讓走訪進入點開頭的路徑；`.git/` 兩者
 都進不去，物件庫不是原始碼。用在要檢查的正好是被藏起來的東西：generated code、
@@ -818,10 +956,14 @@ unpinned-dependency = "info"
 "tests/fixtures/**" = ["ruff/F401"]
 "vendor/*.sh" = ["shellcheck/*"] # tool/* 是整支工具
 
+[lint.schemas] # 這些 YAML／TOML 照哪份 JSON Schema 驗證；檔案自己的 $schema 行優先
+"compose*.yaml" = "https://json.schemastore.org/docker-compose.json"
+"config/*.toml" = "schemas/config.schema.json" # 路徑相對於這個 poly.toml
+
 [walk]
 include-hidden = false # 預設；true 會連點開頭的路徑一起走（.git/ 仍然跳過）
 
-[tools] # 指定路徑、釘版本，或設 "off" 關掉
+[tools] # 指定路徑、釘版本，或設 "off" 關掉；VSCode 裡改用 settings 的 poly.tools，見下
 shellcheck = "C:/tools/shellcheck.exe"
 tflint = "off"
 ```
@@ -874,22 +1016,28 @@ per-file-ignores 一條路。註釋裡寫了 poly 讀不懂的代碼會以 `poly
 這是遷移提示不是相容層：講一次，讓你把註釋換掉然後刪了它。把 hadolint 開回來
 （`[tools] hadolint = "on"`）的話這行註釋照常有效，poly 也就不再提。
 
-「要不要開語言伺服器」只認 VSCode settings 的 `poly.languageServers`，不進
-`poly.toml`——那是「這台機器上我要不要讓 poly 接管 Go」的個人偏好，CI 根本不跑
-`poly lsp`，寫進專案設定只會讓兩邊看到一個對方不在乎的鍵。server 一律從 PATH 找，poly
-永遠不代裝：它必須跟蓋出這個專案的 toolchain 對得上，poly 選版本就是 poly 選錯版本。
-找不到會在 `Poly` 輸出頻道說一聲，不會靜默沒作用。
+**用 VSCode 的話，`[tools]` 這張表改寫在 settings.json 的 `poly.tools`**，鍵與值都一樣
+（`"off"`、`"on"`、版本號、路徑；路徑請寫絕對路徑），不必為了釘一個版本在 repo 裡多放一個
+`poly.toml`：
 
-**「用哪一支」則是專案的事，寫在 `[tools]` 裡**，用 poly 啟動它的那個名字
-（`gopls`、`rust-analyzer`、`clangd`、`sourcekit-lsp`、`terraform-ls`、
-`lua-language-server`、`buf`）：`rust-analyzer = "off"` 只關掉 Rust 的語言功能而不動
-其他語言，`rust-analyzer = "/opt/rust-glancer"` 換成別的實作。版本號不是這裡的合法值
-——這些跟著專案 toolchain 走，poly 不下載。
+```jsonc
+"poly": {
+  "tools": {
+    "shellcheck": "off",
+    "tflint": "0.53.0",
+  },
+}
+```
+
+extension 啟動的每個 poly 都會套用：daemon（`poly lsp`）、PlantUML 的 jar、終端機裡的 `poly check`
+與 dead code 分析；改了會自動重啟 daemon。同一個工具兩邊都有寫時以 settings 為準，其他
+工具照 `poly.toml`。純命令列（包括 CI）不讀 settings，只讀 `poly.toml`——要讓 CI 也用同一個
+版本，就寫在 `poly.toml`。
 
 `[format.<lang>]` 只認 `line-width`（1-1000）／`indent-width`（1-16）／`use-tabs`
 三個鍵，拼錯或超出範圍都會直接讓解析失敗而不是靜默忽略；只作用於內嵌引擎，走外部
-工具的語言請用該工具自己的設定檔。VSCode settings 只放個人偏好
-（`poly.serverPath`、`poly.lintOnSave`、`poly.updateCheck.*`）。
+工具的語言請用該工具自己的設定檔。VSCode settings 放個人偏好
+（`poly.serverPath`、`poly.lintOnSave`、`poly.updateCheck.*`）與上面的 `poly.tools`。
 
 專案已經有 `.editorconfig` 的話什麼都不用做：內嵌引擎會沿用它的 `indent_style`／
 `indent_size`／`max_line_length`，這三個鍵剛好就是上面那三個 knob，不是另一套要維護
@@ -902,6 +1050,11 @@ poly 壞了。走外部工具的語言不經過這條路，那些工具自己就
 編輯器那半也一併沿用：打字時的 tab 寬度、存檔時的行尾空白與檔尾換行、行尾字元，
 連 poly 不格式化的檔案（`.ini`、Makefile……）都算。`charset` 與 `max_line_length`
 不處理。
+
+專案之外還有一份全域的：`~/.config/poly/poly.toml`（設了 `XDG_CONFIG_HOME` 就在它底下；
+Windows 是 `%APPDATA%\poly\poly.toml`），命令列與編輯器都讀。它在最底層，專案裡的 `poly.toml`
+逐鍵壓過它，而且它永遠不算專案根目錄。`poly lsp` 啟動時發現它不存在，就用 `poly config export`
+寫一份完整的；之後只要裡面的值都還是預設值，就跟著新版重寫，改過任何一個值就不再動它。
 
 完整的鍵、可填的值、每個引擎的預設值都寫在
 [poly.example.toml](poly.example.toml) 裡。那份檔案是 `poly config export` 產生

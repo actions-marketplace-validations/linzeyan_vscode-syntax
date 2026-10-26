@@ -77,16 +77,20 @@ jobs:
   # tag is pushed is a Dockerfile that breaks when a tag is pushed. Native
   # amd64 only: the release build covers arm64 under emulation, and paying for
   # that on every push would buy nothing this job can catch.
+  #
+  # 24.04 is the image's base, as release.yml builds the binary it ships: a
+  # binary from ubuntu-latest (26.04 since October 2026) needs glibc 2.43 and
+  # does not start in it. Its own cache for the same reason -- the shared one
+  # is built on ubuntu-latest, and would come back as an up-to-date binary.
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: cli
-          shared-key: ci
-          save-if: false
+          shared-key: docker-ubuntu-24.04
           cache-on-failure: true
       # The binary this stages is a fixture, not a shipped artifact: what the
       # job asks is whether the Dockerfile assembles around a binary and whether
@@ -115,6 +119,9 @@ jobs:
       # and Rust would therefore be missing here forever -- the cli job lints
       # it on a runner that has cargo. These four cover every tool the image
       # does download: actionlint, hadolint and shellcheck.
+      #
+      # No tool cache here, unlike cli and acceptance: the download is what
+      # this step is testing.
       - name: The image can lint a repository
         run: |
           docker run --rm -v "$PWD:/work" poly:ci --version
@@ -163,6 +170,17 @@ jobs:
           workspaces: cli
           shared-key: ci
           cache-on-failure: true
+      # The tools poly downloads for the dogfood gate. poly-tools.lock records
+      # every (version, platform) with its sha256, so it is the whole key: a
+      # bump misses once and saves the new set. Per job, because each job
+      # downloads a different set and only the first save under a key sticks.
+      # Not for time -- measured at 0.18.18 these cost seconds -- but because
+      # a release-asset host answering 500 four times failed this job.
+      - name: Cache poly's downloaded tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/poly/tools
+          key: poly-tools-${{ github.job }}-${{ runner.os }}-${{ hashFiles('poly-tools.lock') }}
       # rustfmt first: it needs no build, so a formatting slip fails in seconds
       # instead of after the workspace compiles.
       - name: Rust formatting
@@ -303,8 +321,6 @@ jobs:
       # Was `@latest`, which made the analyser under test a different program on
       # different days and gave the cache nothing to key on.
       DEADCODE_VERSION: v0.49.0
-      TERRAFORM_LS_VERSION: 0.39.0
-      LUA_LS_VERSION: 3.19.1
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -318,99 +334,51 @@ jobs:
           shared-key: ci
           save-if: false
           cache-on-failure: true
+      # As in the cli job, for this job's set: golangci-lint, tflint, and the
+      # buf the lens probe asks.
+      - name: Cache poly's downloaded tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/poly/tools
+          key: poly-tools-${{ github.job }}-${{ runner.os }}-${{ hashFiles('poly-tools.lock') }}
       # The pinned half of the toolchain, and the expensive half: `go install
       # gopls` compiles a large Go program from source, and it did so on every
       # push. Everything here is content-addressed by version, so the only miss
       # is a bump.
-      #
-      # They install under $HOME rather than /usr/local and /opt because a cache
-      # cannot restore what it needed sudo to write.
       - name: Cache the pinned servers and analysers
         id: servers
         uses: actions/cache@v4
         with:
-          path: |
-            ~/go/bin
-            ~/ci-tools
-          key: servers-${{ runner.os }}-gopls${{ env.GOPLS_VERSION }}-deadcode${{ env.DEADCODE_VERSION }}-tfls${{ env.TERRAFORM_LS_VERSION }}-lua${{ env.LUA_LS_VERSION }}
+          path: ~/go/bin
+          key: servers-${{ runner.os }}-gopls${{ env.GOPLS_VERSION }}-deadcode${{ env.DEADCODE_VERSION }}
       - name: Install the pinned servers and analysers
         if: steps.servers.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/ci-tools/bin"
           go install "golang.org/x/tools/gopls@$GOPLS_VERSION"
           # Not part of the Go toolchain: deadcode lives in golang.org/x/tools,
           # and without it the cross-module section of the Go gate would be the
           # one thing here nobody measures.
           go install "golang.org/x/tools/cmd/deadcode@$DEADCODE_VERSION"
-          # terraform-ls is the only server whose binary is not itself the
-          # language server (`terraform-ls serve`), so it is the only thing
-          # exercising the LAUNCH table. Without it that path is untested here.
-          curl -sSLo /tmp/terraform-ls.zip \
-            "https://releases.hashicorp.com/terraform-ls/${TERRAFORM_LS_VERSION}/terraform-ls_${TERRAFORM_LS_VERSION}_linux_amd64.zip"
-          unzip -q -o -d "$HOME/ci-tools/bin" /tmp/terraform-ls.zip
-          # lua carries the probe's only merged-diagnostics case: it is the one
-          # language here where poly runs a linter of its own (selene) while a
-          # server is also publishing, so it is the only thing proving the two
-          # sets are merged rather than one erasing the other.
-          #
-          # The tarball has no top-level directory and the binary needs the
-          # meta/ and script/ trees beside it, so it gets its own prefix rather
-          # than being unpacked next to the loose binaries.
-          curl -sSLo /tmp/lua-ls.tar.gz \
-            "https://github.com/LuaLS/lua-language-server/releases/download/${LUA_LS_VERSION}/lua-language-server-${LUA_LS_VERSION}-linux-x64.tar.gz"
-          mkdir -p "$HOME/ci-tools/lua-language-server"
-          tar xzf /tmp/lua-ls.tar.gz -C "$HOME/ci-tools/lua-language-server"
       # Runs whether or not the cache hit -- PATH does not survive in a cache.
       - name: Put them on PATH
-        run: |
-          {
-            echo "$(go env GOPATH)/bin"
-            echo "$HOME/ci-tools/bin"
-            echo "$HOME/ci-tools/lua-language-server/bin"
-          } >> "$GITHUB_PATH"
-      # The three that are not worth caching: each comes from a package manager
-      # already on the runner, and none is compiled here.
-      - name: Install clangd, rust-analyzer and bash-language-server
-        run: |
-          sudo apt-get install -y clangd
-          rustup component add rust-analyzer
-          npm install -g bash-language-server
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      # Not worth caching: it comes from a package manager already on the
+      # runner, and nothing is compiled.
+      - name: Install bash-language-server
+        run: npm install -g bash-language-server
       - name: Build poly
         run: cargo build --release --manifest-path cli/Cargo.toml
-      - name: Language server proxy probe
-        run: |
-          # The probe skips a language when its server is missing, which is
-          # right on a developer's machine and wrong here: a gate that silently
-          # turns into a no-op is worse than no gate. Assert each one is
-          # present before running it. Since the servers are cached, this is
-          # also what catches a cache that restored something unusable.
-          #
-          # swift is the one language left out: there is no Swift toolchain on
-          # these runners. It stays verified locally on macOS, and the probe
-          # prints the skip rather than passing quietly.
-          #
-          # buf is absent from this list on purpose, not by oversight: poly
-          # downloads it rather than finding it on PATH, so PATH has nothing to
-          # assert. Its case runs unconditionally for the same reason -- if buf
-          # does not come up, that is the finding.
-          gopls version
-          rust-analyzer --version
-          clangd --version
-          terraform-ls version
-          lua-language-server --version
-          bash-language-server --version
-          python tools/lsp-proxy-probe.py cli/target/release/poly
       - name: Lens probe
         run: |
-          # What poly's lenses route to, asked of gopls and buf directly.
+          # What poly's lenses ask for, asked of gopls and buf directly.
           # `--require` turns its skip into a failure: the tools are right here
-          # -- gopls is asserted above and buf is poly's own download -- so a
+          # -- gopls is installed above and buf is poly's own download -- so a
           # skip in this job means something broke, not that a machine is thin.
           #
-          # It is separate from the step above because it is the only thing
-          # standing behind `make ref-lens`'s protobuf and shell sections, which
-          # are deliberately blind to a server changing shape.
+          # It is the only thing standing behind `make ref-lens`'s protobuf
+          # and shell sections, which are deliberately blind to a server
+          # changing shape.
           python tools/lens-probe.py cli/target/release/poly --require
       # The other half of Go, and the half no gate touched until it was written:
       # gofumpt and golangci-lint are poly's own to drive, and the Rust tests
@@ -506,6 +474,14 @@ jobs:
       # esbuild the e2e step installed rather than a window.
       - name: Image gutter cache stays the size of the screen
         run: node tools/gutter-cache-check.js
+      # Git History's reads through `poly git` against git's own, for where
+      # there is no git. Here for the poly this job built and the esbuild the
+      # e2e step installed; the checkout is shallow, so its own history adds
+      # little and the fixtures carry the check.
+      - name: Git History reads the same through poly git
+        env:
+          POLY_BIN: ${{ github.workspace }}/cli/target/release/poly
+        run: node tools/git-embed-check.js
       # The other half of A9, here because it needs the tree the e2e step
       # installed: what the bundles carry is decided by pnpm's resolution, not
       # by a manifest anyone can read without it.

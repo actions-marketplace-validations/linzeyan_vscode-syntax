@@ -2,7 +2,19 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 
+import { affects, setPoly } from "../settings";
+import { registerAutocorrect } from "./autocorrectEditor";
 import { nextChangedFile } from "./changes";
+import type { Conversion } from "./chinese";
+import { Binding, YIELDING, yieldKey, yieldsTo } from "./chords";
+import { registerCodeRunner } from "./codeRunner";
+import { CodeManager, executorFor } from "./codeRunner/codeManager";
+import { registerCodeSnap } from "./codeSnap";
+import { registerDataPreview } from "./dataPreview";
+import type { FromSql, ToSql } from "./dbml";
+import { registerErrorLens } from "./errorLens";
+import { registerExcalidraw } from "./excalidrawEditor";
+import { registerGitGraph, stepHistoryDiff } from "./gitGraph";
 import { imageReferences } from "./images";
 import { indentSpans } from "./indent";
 import {
@@ -17,8 +29,20 @@ import {
   Rewrite,
 } from "./list";
 import { toc, TOC_END, TOC_START } from "./markdown";
-import { mermaidPlugin } from "./markdownIt";
+import { registerMarkdownExport } from "./markdownExport";
+import {
+  diagramPlugin,
+  GithubStyle,
+  githubStyleOf,
+  githubStylePlugin,
+  MarkdownIt,
+  mermaidPlugin,
+  plantumlPlugin,
+} from "./markdownIt";
+import { registerMarp } from "./marp";
 import { methodLabel, methodsByType } from "./methods";
+import { registerPasteImage } from "./pasteImage";
+import { registerPlantuml } from "./plantumlEditor";
 import { describe, EXPR_MARK, POSTFIX_LANGUAGES, postfixesFor, postfixTarget } from "./postfix";
 import { generatedFiles, goLinksFor, goServerMethod, protoPackage } from "./protobuf";
 import { refactorChoices, Refactoring, REFACTORINGS } from "./refactors";
@@ -30,19 +54,19 @@ import {
   implLabel,
   LensTarget,
   lensTargets,
+  luaDeclarations,
+  markdownHeadings,
   nameStart,
+  rDeclarations,
   refLabel,
 } from "./references";
 import { ReferenceTree, registerReferenceTree } from "./referenceTree";
 import { cacheDir, RefStore } from "./refStore";
-import { entryLine, entryPoints, findsEntryInText, runLine } from "./runnable";
-import { colorSheet, scopesIn } from "./scopes";
-import { offerMessage, serverToOffer } from "./servers";
+import { canHoldEntry, entryLine, entryPoints, findsEntryInText } from "./runnable";
+import { colorSheet, parseStyle, scopesIn, styleText, withSyntaxColors } from "./scopes";
+import { registerSwaggerViewer } from "./swaggerViewer";
 import { registerTodoTree } from "./todoTree";
-import { drawsNothing, explain, findSuspects, Level, levelOf, SUSPECTS } from "./unicode";
-
-/** Languages already offered a server this session — see `offerServer`. */
-const offered = new Set<string>();
+import { drawsNothing, explain, findSuspects, label, Level, levelOf, Suspect, SUSPECTS } from "./unicode";
 
 /**
  * The editor features' own log, "Poly Editor" in the Output panel -- apart
@@ -55,39 +79,6 @@ const offered = new Set<string>();
  * a missing lens turns them on with "Developer: Set Log Level".
  */
 let log: vscode.LogOutputChannel | undefined;
-
-/**
- * Say why a lens that is switched on is drawing nothing, once.
- *
- * Called only where a provider has already been asked and come back empty, so
- * this never fires for someone whose official extension is answering happily.
- * Silent unless `poly.languageServers` is off: it is the only setting this can
- * offer, and offering to change one that is already on would be advice that
- * does nothing.
- */
-async function offerServer(what: string, languageId: string): Promise<void> {
-  const server = serverToOffer(languageId, offered);
-  if (!server) {
-    return;
-  }
-  const config = vscode.workspace.getConfiguration("poly");
-  if (config.get<boolean>("languageServers", false)) {
-    return;
-  }
-  offered.add(languageId);
-  const pick = await vscode.window.showInformationMessage(
-    offerMessage(what, languageId, server),
-    "Enable and Reload",
-    "Not now",
-  );
-  if (pick === "Enable and Reload") {
-    // The daemon reads this when it spawns, so a running one keeps the answer
-    // it started with -- which is why the offer says "and reload" rather than
-    // leaving the user to discover that it changed nothing.
-    await config.update("languageServers", true, vscode.ConfigurationTarget.Global);
-    await vscode.commands.executeCommand("workbench.action.reloadWindow");
-  }
-}
 
 /**
  * A `path:line` reference, in the shape poly's diagnostics already print.
@@ -462,6 +453,97 @@ async function insertToc(editor: vscode.TextEditor): Promise<void> {
   });
 }
 
+/**
+ * DBML to SQL, or SQL to DBML, from the active editor.
+ *
+ * Converts the buffer rather than the file on disk -- the extension this stands
+ * in for read the file, so unsaved edits never reached the output -- and
+ * converts before asking where to save, so a parse error is reported before
+ * anyone has picked a path for a file that will not be written.
+ *
+ * `.dbml` is matched by extension as well as by id: the id comes from
+ * poly-syntax-highlight, and poly-lsp has to work installed on its own.
+ */
+async function convertDbml(editor: vscode.TextEditor, to: "sql" | "dbml"): Promise<void> {
+  const document = editor.document;
+  const isDbml = document.languageId === "dbml" || /\.dbml$/i.test(document.fileName);
+  const fits = to === "sql" ? isDbml : document.languageId === "sql";
+  if (!fits) {
+    const want = to === "sql" ? "a DBML" : "an SQL";
+    vscode.window.showWarningMessage(
+      `Poly: this needs ${want} file (this one is ${document.languageId})`,
+    );
+    return;
+  }
+  // Its own bundle, loaded on first use; see dbml.ts for why.
+  const dbml: typeof import("./dbml") = require(path.join(__dirname, "dbml.js"));
+  const dialect = await vscode.window.showQuickPick(
+    [...(to === "sql" ? dbml.TO_SQL : dbml.FROM_SQL)],
+    { placeHolder: to === "sql" ? "SQL dialect to write" : "SQL dialect to read" },
+  );
+  if (!dialect) {
+    return;
+  }
+  let output: string;
+  try {
+    output = to === "sql"
+      ? dbml.toSql(document.getText(), dialect as ToSql)
+      : dbml.toDbml(document.getText(), dialect as FromSql);
+  } catch (error) {
+    vscode.window.showErrorMessage(
+      `Poly: ${path.basename(document.fileName)}: ${dbml.describe(error)}`,
+    );
+    return;
+  }
+  const target = await vscode.window.showSaveDialog({
+    defaultUri: document.isUntitled
+      ? undefined
+      : vscode.Uri.file(dbml.outputPath(document.uri.fsPath, to)),
+    filters: to === "sql" ? { SQL: ["sql"] } : { DBML: ["dbml"] },
+  });
+  if (!target) {
+    return;
+  }
+  await vscode.workspace.fs.writeFile(target, Buffer.from(output, "utf8"));
+  await vscode.window.showTextDocument(target);
+}
+
+/**
+ * The four Simplified/Traditional commands, by the name each is registered
+ * under (`poly.<conversion>`). Spelled out rather than read off `CONVERSIONS`,
+ * because that is a value, and importing it would pull the dictionaries into
+ * this bundle -- the type still holds every name here to one that exists.
+ */
+const CHINESE: Conversion[] = [
+  "toTraditionalChinese",
+  "toSimplifiedChinese",
+  "toTraditionalChineseTaiwan",
+  "toSimplifiedChineseTaiwan",
+];
+
+/**
+ * Convert what is selected between Simplified and Traditional Chinese, or the
+ * whole document when nothing is.
+ *
+ * Every selection rather than only the first, which is all the extension this
+ * replaces looked at: with several cursors, converting one of them and leaving
+ * the rest as they were reads as a bug. One edit, so one undo puts it back.
+ */
+async function convertChinese(editor: vscode.TextEditor, conversion: Conversion): Promise<void> {
+  // Its own bundle, loaded on first use; see chinese.ts for why.
+  const chinese: typeof import("./chinese") = require(path.join(__dirname, "chinese.js"));
+  const document = editor.document;
+  const selected = editor.selections.filter((selection) => !selection.isEmpty);
+  const ranges = selected.length > 0
+    ? selected
+    : [new vscode.Range(new vscode.Position(0, 0), document.lineAt(document.lineCount - 1).range.end)];
+  await editor.edit((edit) => {
+    for (const range of ranges) {
+      edit.replace(range, chinese.convert(conversion, document.getText(range)));
+    }
+  });
+}
+
 /** Run `action` against the active editor, or say why it cannot run. */
 function withEditor(
   what: string,
@@ -549,7 +631,7 @@ function tintIndentation(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.indentTint")) {
+      if (affects(event, "poly.indentTint")) {
         repaintAll();
       }
     }),
@@ -596,24 +678,48 @@ function highlightUnicode(context: vscode.ExtensionContext): void {
     return type;
   };
   context.subscriptions.push({ dispose: () => types.forEach((type) => type.dispose()) });
+  // The name goes at the end of the line rather than beside the character: a
+  // name is several words, and inline it would push the rest of the line aside
+  // at every curly quote in a paragraph. The mark says where, this says what,
+  // and it is muted like a code lens because the mark is what should catch the
+  // eye. Italic, or in the same monospace as the line it reads as part of the
+  // file. Styled per instance, since the text is.
+  const names = vscode.window.createTextEditorDecorationType({});
+  context.subscriptions.push(names);
+  const nameColor = new vscode.ThemeColor("editorCodeLens.foreground");
 
   const paint = (editor: vscode.TextEditor) => {
     const ranges = new Map<vscode.TextEditorDecorationType, vscode.Range[]>(
       [...types.values()].map((type) => [type, []]),
     );
+    const tags: vscode.DecorationOptions[] = [];
     if (on()) {
       const { document } = editor;
+      const lines = new Map<number, Suspect[]>();
       for (const { offset, suspect } of findSuspects(document.getText())) {
         const start = document.positionAt(offset);
         const type = typeOf(levelOf(suspect), drawsNothing(suspect));
         const list = ranges.get(type) ?? [];
         list.push(new vscode.Range(start, start.translate(0, 1)));
         ranges.set(type, list);
+        const onLine = lines.get(start.line) ?? [];
+        onLine.push(suspect);
+        lines.set(start.line, onLine);
       }
+      lines.forEach((suspects, line) => {
+        const end = document.lineAt(line).range.end;
+        tags.push({
+          range: new vscode.Range(end, end),
+          renderOptions: {
+            after: { contentText: label(suspects), color: nameColor, fontStyle: "italic", margin: "0 0 0 2ch" },
+          },
+        });
+      });
     }
     // Every type, including the ones with nothing to draw now: setting an
     // empty list is the only way to clear what the last paint left.
     ranges.forEach((list, type) => editor.setDecorations(type, list));
+    editor.setDecorations(names, tags);
   };
 
   // Same debounce as the indent tint, for the same reason.
@@ -633,7 +739,7 @@ function highlightUnicode(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.unicodeHighlight")) {
+      if (affects(event, "poly.unicodeHighlight")) {
         repaintAll();
       }
     }),
@@ -803,7 +909,7 @@ function previewImages(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.imagePreview")) {
+      if (affects(event, "poly.imagePreview")) {
         repaintAll();
       }
     }),
@@ -829,6 +935,11 @@ class ReferenceLens extends vscode.CodeLens {
     /** The declaration, as `declarationKeys` names it -- what `Answered` keys on. */
     readonly key: string,
     range: vscode.Range,
+    /**
+     * On a refs lens over a declaration asked the upward question: the count
+     * the `up` lens beside it was drawn from, 0 when it was not drawn.
+     */
+    readonly up?: number,
   ) {
     super(range);
   }
@@ -920,7 +1031,21 @@ const ASKED: Readonly<Record<"refs" | Direction, string>> = {
  * the thing that felt broken. The quick pick also showed a name and nothing
  * else, where the tree has a line number and a file.
  */
-async function present(title: string, locations: readonly vscode.Location[]): Promise<void> {
+async function present(
+  title: string,
+  locations: readonly vscode.Location[],
+  uri?: vscode.Uri,
+  position?: vscode.Position,
+): Promise<void> {
+  // `uri` and `position` are the clicked lens's declaration. A click on a lens
+  // leaves the cursor where it was, so Go Back returned to that cursor rather
+  // than to the declaration the reader acted on. VSCode files any cursor move
+  // in the active editor under that editor's history entry (measured in 1.141's
+  // workbench), so the cursor is put there first.
+  const editor = vscode.window.activeTextEditor;
+  if (editor && uri && position && locations.length > 0 && editor.document.uri.toString() === uri.toString()) {
+    editor.selection = new vscode.Selection(position, position);
+  }
   const only = locations.length === 1 ? locations[0] : undefined;
   if (only) {
     await vscode.window.showTextDocument(only.uri, { selection: only.range });
@@ -955,9 +1080,26 @@ async function showReferences(
   uri: vscode.Uri,
   position: vscode.Position,
   counts: "refs" | Direction,
+  // The lens's own declaration, for `present`: the rpc's lens asks elsewhere.
+  lensUri = uri,
+  lensPosition = position,
 ): Promise<void> {
   const others = await othersAt(uri, position, counts);
-  await present(ASKED[counts], others);
+  await present(ASKED[counts], others, lensUri, lensPosition);
+}
+
+/**
+ * The NAMESPACE of the package an R file belongs to, or "" for a script.
+ *
+ * R CMD build reads a package's code from `<package>/R/` and nowhere deeper,
+ * so that directory's parent is the one place it can be.
+ */
+function namespaceOf(file: string): Promise<string> {
+  const dir = path.dirname(file);
+  if (path.basename(dir) !== "R") {
+    return Promise.resolve("");
+  }
+  return fs.promises.readFile(path.join(path.dirname(dir), "NAMESPACE"), "utf8").catch(() => "");
 }
 
 /**
@@ -1047,29 +1189,135 @@ function grammarFor(languageId: string): { path: string; from: string } | undefi
  */
 async function showSyntaxColors(editor: vscode.TextEditor): Promise<void> {
   const languageId = editor.document.languageId;
+  const found = grammarScopes(languageId);
+  if (!found) {
+    return;
+  }
+  const sheet = await vscode.workspace.openTextDocument({
+    language: "jsonc",
+    content: colorSheet(languageId, `${found.grammar.from} — ${found.grammar.path}`, found.scopes),
+  });
+  await vscode.window.showTextDocument(sheet);
+}
+
+/**
+ * Recolour one scope of the current file's grammar, in `poly.syntaxColors`.
+ *
+ * The sheet above refuses to write settings.json because it would be hundreds
+ * of entries at once. This writes one, chosen by name, so what lands in the
+ * file is exactly what was asked for -- and the editor recolours on the spot,
+ * which is the preview. Into the setting rather than straight into
+ * `editor.tokenColorCustomizations`, so that every colour poly set is in the
+ * one list, the `poly` block's `syntaxColors`, and can be taken back out there.
+ */
+async function setSyntaxColor(editor: vscode.TextEditor): Promise<void> {
+  const languageId = editor.document.languageId;
+  const config = vscode.workspace.getConfiguration("poly");
+  const colors = { ...config.inspect<Record<string, string>>("syntaxColors")?.globalValue };
+  let scope: string | undefined;
+  if (grammarFor(languageId)) {
+    const found = grammarScopes(languageId);
+    if (!found) {
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      found.scopes.map((one) => ({ label: one, description: colors[one] ?? "" })),
+      { placeHolder: `The ${languageId} scope to colour -- type to filter, e.g. comment or keyword` },
+    );
+    scope = picked?.label;
+  } else {
+    // Typed rather than refused: in a remote window this host sees only the
+    // remote side's extensions and the server ships no grammars, so the one
+    // painting the file is out of reach -- but a scope name still colours it.
+    const named = await vscode.window.showInputBox({
+      title: "Set Syntax Color",
+      prompt: `Poly cannot see the ${languageId} grammar${
+        vscode.env.remoteName ? " from a remote window" : ""
+      }. Type the scope to colour, e.g. comment or keyword.`,
+      validateInput: (text) => (text.trim() ? undefined : "A scope name, e.g. comment"),
+    });
+    scope = named?.trim();
+  }
+  if (!scope) {
+    return;
+  }
+  const typed = await vscode.window.showInputBox({
+    title: scope,
+    prompt: "A colour and optional styles, e.g. #C586C0 or #C586C0 italic. Empty goes back to the theme's.",
+    value: colors[scope] ?? "",
+    validateInput: (text) => {
+      const style = parseStyle(text);
+      return typeof style === "string" ? style : undefined;
+    },
+  });
+  if (typed === undefined) {
+    return;
+  }
+  const style = parseStyle(typed);
+  if (typeof style === "string") {
+    return;
+  }
+  if (style) {
+    colors[scope] = styleText(style);
+  } else {
+    delete colors[scope];
+  }
+  await setPoly("syntaxColors", colors);
+}
+
+/**
+ * Keep `editor.tokenColorCustomizations` in step with `poly.syntaxColors`.
+ *
+ * On activation as well as on change, because settings.json can be edited, or
+ * synced in, while no window is open to see it happen. Every window does this
+ * and they agree: each reads the user's value alone, never a workspace's --
+ * that one would differ per window, and be written into the user's settings
+ * -- so `withSyntaxColors` says there is nothing to write once one has.
+ */
+function mirrorSyntaxColors(context: vscode.ExtensionContext): void {
+  const mirror = async () => {
+    const colors = vscode.workspace.getConfiguration("poly").inspect<Record<string, unknown>>("syntaxColors")
+      ?.globalValue ?? {};
+    const editor = vscode.workspace.getConfiguration("editor");
+    const next = withSyntaxColors(editor.inspect("tokenColorCustomizations")?.globalValue, colors);
+    if (next) {
+      await editor.update("tokenColorCustomizations", next, vscode.ConfigurationTarget.Global);
+    }
+  };
+  void mirror();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (affects(event, "poly.syntaxColors")) {
+        void mirror();
+      }
+    }),
+  );
+}
+
+/**
+ * The grammar that paints `languageId` and every scope it can produce, or
+ * nothing -- having said why.
+ */
+function grammarScopes(
+  languageId: string,
+): { grammar: { path: string; from: string }; scopes: string[] } | undefined {
   const grammar = grammarFor(languageId);
   if (!grammar) {
     vscode.window.showWarningMessage(
       `Poly: no grammar is registered for ${languageId}, so it has no scopes to colour`,
     );
-    return;
+    return undefined;
   }
-  let scopes: string[];
   try {
-    scopes = scopesIn(JSON.parse(fs.readFileSync(grammar.path, "utf8")));
+    return { grammar, scopes: scopesIn(JSON.parse(fs.readFileSync(grammar.path, "utf8"))) };
   } catch (error) {
     // A grammar can be a plist rather than JSON -- poly converts those at sync
     // time, but another extension may ship one as it came.
     vscode.window.showWarningMessage(
       `Poly: could not read the ${languageId} grammar at ${grammar.path}: ${error}`,
     );
-    return;
+    return undefined;
   }
-  const sheet = await vscode.workspace.openTextDocument({
-    language: "jsonc",
-    content: colorSheet(languageId, `${grammar.from} — ${grammar.path}`, scopes),
-  });
-  await vscode.window.showTextDocument(sheet);
 }
 
 /**
@@ -1229,7 +1477,7 @@ async function answersImplementations(
  *
  * The counts come from `vscode.executeReferenceProvider` and
  * `vscode.executeImplementationProvider`, which is to say from whichever
- * providers are registered — for Go that is poly-lsp's proxy in front of gopls,
+ * providers are registered — for Go that is gopls via the Go extension,
  * for TypeScript the built-in server, for Python whatever the user installed.
  * poly analyses nothing here; see `references.ts`.
  *
@@ -1336,6 +1584,12 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       .finally(() => refreshing.delete(flight));
   };
 
+  /** The last count for `id`, from this session or an earlier one; 0 when none. */
+  const known = (at: vscode.Uri, id: string) => {
+    const place = placeOf(at);
+    return counted.get(at.toString(), id) ?? (place && store.get(place.folder, place.file, id)) ?? 0;
+  };
+
   const provider: vscode.CodeLensProvider = {
     onDidChangeCodeLenses: changed.event,
 
@@ -1359,11 +1613,17 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       // No symbol provider, or one that has not finished loading the project.
       // Either way there is nothing to hang a count on yet.
       if (!symbols) {
-        void offerServer("the outline", document.languageId);
         askAgainLater(document.uri, "no outline");
         return [];
       }
-      const found = lensTargets(symbols, MAX_LENSES);
+      const declared = document.languageId === "lua"
+        ? luaDeclarations(symbols)
+        : document.languageId === "r"
+        ? rDeclarations(symbols, await namespaceOf(document.uri.fsPath))
+        : MARKDOWN_LANGUAGES.has(document.languageId)
+        ? markdownHeadings(symbols)
+        : symbols;
+      const found = lensTargets(declared, MAX_LENSES);
       const keys = declarationKeys(found.map((target) => target.symbol));
       const targets: Anchored[] = found.map((target, index) => ({
         ...target,
@@ -1372,8 +1632,8 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
       }));
       // Before any lens is drawn, because a file full of `no refs` over a
       // language nothing can answer for is worse than no lens: it reads as an
-      // answer. JSON and markdown never reach here (their symbols are not the
-      // kinds this counts); CSS and YAML do, and this is what decides them.
+      // answer. JSON never reaches here (its symbols are not the kinds this
+      // counts); CSS and YAML do, and this is what decides them.
       if (targets.length === 0) {
         return [];
       }
@@ -1393,10 +1653,7 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
         if (token.isCancellationRequested) {
           return [];
         }
-        // There are declarations and nothing will say who uses them. For a
-        // shell function that is the whole feature missing, and it was
-        // reported as one.
-        void offerServer("references", document.languageId);
+        // There are declarations and nothing will say who uses them.
         askAgainLater(document.uri, "no reference provider answered");
         return [];
       }
@@ -1415,14 +1672,38 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
         return [];
       }
       const methods = methodsByType(symbols);
+      const markdown = MARKDOWN_LANGUAGES.has(document.languageId);
       const lenses = targets.flatMap((target) => {
         const range = target.at;
-        const lenses: vscode.CodeLens[] = [
-          new ReferenceLens(document.uri, "refs", target.key, range),
-        ];
         const direction = target.implementation;
-        if (direction && answers[direction]) {
-          lenses.push(new ReferenceLens(document.uri, direction, target.key, range));
+        // An unlinked heading is most headings, so `no refs` over one is noise
+        // where over code it is news. Like the upward count, it is drawn only
+        // once known to be above zero, and asked for behind the drawing.
+        // ponytail: every heading is asked, not just those on screen; filter by
+        // visible range if a long document makes that slow.
+        if (markdown) {
+          const id = `refs|${target.key}`;
+          if (counted.get(document.uri.toString(), id) === undefined) {
+            refresh(document.uri, range.start, "refs", id, known(document.uri, id));
+          }
+          if (known(document.uri, id) === 0) {
+            return [];
+          }
+        }
+        // `no interfaces` is not news -- most types and methods satisfy
+        // nothing -- and a lens cannot be taken back once it is resolved, so
+        // the upward count is drawn only once it is known to be above zero.
+        // Until then the refs lens asks for it, which keeps the question to
+        // declarations on screen, and a yes redraws.
+        const up = direction === "up" && answers.up ? known(document.uri, `up|${target.key}`) : undefined;
+        const lenses: vscode.CodeLens[] = [
+          new ReferenceLens(document.uri, "refs", target.key, range, up),
+        ];
+        if (direction === "down" && answers.down) {
+          lenses.push(new ReferenceLens(document.uri, "down", target.key, range));
+        }
+        if (up) {
+          lenses.push(new ReferenceLens(document.uri, "up", target.key, range));
         }
         // Already resolved, and the only lens here that is: the count is in the
         // symbol tree that has already been fetched, so there is nothing to ask
@@ -1438,6 +1719,8 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
               arguments: [
                 "Methods",
                 mine.map((method) => new vscode.Location(document.uri, method.selectionRange)),
+                document.uri,
+                range.start,
               ],
             }),
           );
@@ -1453,7 +1736,7 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
     },
 
     async resolveCodeLens(lens, token) {
-      const { uri: at, counts, key } = lens as ReferenceLens;
+      const { uri: at, counts, key, up } = lens as ReferenceLens;
       const start = lens.range.start;
       const id = `${counts}|${key}`;
       let count = counted.get(at.toString(), id);
@@ -1480,6 +1763,14 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
         }
         count = others?.length ?? 0;
         settle(at, id, count);
+        // Drawn on a count that went to zero before it resolved; the redraw
+        // leaves it out.
+        if (counts === "up" && count === 0) {
+          redrawSoon();
+        }
+      }
+      if (up !== undefined && counted.get(at.toString(), `up|${key}`) === undefined) {
+        refresh(at, start, "up", `up|${key}`, up);
       }
       lens.command = {
         title: counts === "refs" ? refLabel(count) : implLabel(count, counts),
@@ -1502,7 +1793,7 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
     // stale the moment it changed.
     vscode.languages.registerCodeLensProvider({ scheme: "file" }, provider),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.referencesCodeLens")) {
+      if (affects(event, "poly.referencesCodeLens")) {
         changed.fire();
       }
     }),
@@ -1523,75 +1814,13 @@ function countReferencesInGutter(context: vscode.ExtensionContext): void {
  * and still raises the debug toolbar -- so the pair was one behaviour wearing
  * two labels. See `runnable.ts` for what poly had to learn to fix that.
  *
- * `run` appears only where poly knows the command. Go, Rust, Python and shell
- * have one; C, C++, Java and C# have an entry point and no one-line way to
- * run it, so they get `debug` alone rather than a button that opens a terminal
- * and prints an error.
+ * `run` is Code Runner's Run Code on the whole file, saved first, and appears
+ * wherever Code Runner's executor maps have an answer for the file -- one
+ * table, so the lens and Run Code cannot disagree about what a file is run
+ * with. A language they do not cover gets `debug` alone rather than a button
+ * that would only report it cannot.
  */
-/**
- * The terminal `run` uses, and the directory it was opened in.
- *
- * Both, because the command lines are relative -- `go run .` means the
- * directory the shell is in. Reusing a terminal opened somewhere else would
- * run a different program and say nothing about it.
- */
-let runTerminal: { terminal: vscode.Terminal; cwd: string } | undefined;
-
-/**
- * Run one file, in a terminal the user can read, scroll and kill.
- *
- * A terminal rather than a task or a child process: a task needs a
- * tasks.json-shaped problem matcher to be worth anything and hides its output
- * behind a panel switch, and a child process would put the program's stdout in
- * an output channel with no stdin and no ^C. The point of the button is "show
- * me this running", and a terminal is the thing that does that.
- *
- * One terminal, reused. The alternative is a new tab per press, and the press
- * people repeat most is the one after an edit.
- */
-async function runFile(uri?: vscode.Uri, line?: string): Promise<void> {
-  // The lens passes both; the command palette passes neither, and means the
-  // file being looked at. Worth supporting rather than hiding the command,
-  // because a keyboard route to "run this" is the half a lens cannot give.
-  const document = uri
-    ? vscode.workspace.textDocuments.find((open) => open.uri.toString() === uri.toString())
-    : vscode.window.activeTextEditor?.document;
-  if (!document || document.uri.scheme !== "file") {
-    return;
-  }
-  const command = line
-    ?? runLine(
-      document.languageId,
-      path.basename(document.uri.fsPath),
-      document.getText(),
-      process.platform === "win32",
-    );
-  if (!command) {
-    vscode.window.showWarningMessage(
-      `Poly: no way to run a ${document.languageId} file from a shell`,
-    );
-    return;
-  }
-  // Saved first, or the run is of the last version the user happened to save
-  // -- which looks exactly like a change that did not work.
-  if (document.isDirty) {
-    await document.save();
-  }
-  const cwd = path.dirname(document.uri.fsPath);
-  if (runTerminal && (runTerminal.terminal.exitStatus !== undefined || runTerminal.cwd !== cwd)) {
-    runTerminal.terminal.dispose();
-    runTerminal = undefined;
-  }
-  if (!runTerminal) {
-    runTerminal = { terminal: vscode.window.createTerminal({ name: "Poly Run", cwd }), cwd };
-  }
-  // Not stealing focus: the useful thing is watching the output, and a cursor
-  // that jumps out of the editor after every run is a cursor put back by hand.
-  runTerminal.terminal.show(true);
-  runTerminal.terminal.sendText(command);
-}
-
-function runFromGutter(context: vscode.ExtensionContext): void {
+function runFromGutter(context: vscode.ExtensionContext, codeRunner: CodeManager): void {
   const changed = new vscode.EventEmitter<void>();
   const provider: vscode.CodeLensProvider = {
     onDidChangeCodeLenses: changed.event,
@@ -1603,17 +1832,10 @@ function runFromGutter(context: vscode.ExtensionContext): void {
       if (!on) {
         return [];
       }
-      const runs = runLine(
-        document.languageId,
-        path.basename(document.uri.fsPath),
-        document.getText(),
-        process.platform === "win32",
-      );
+      const runs = executorFor(document) !== undefined;
       const buttons = (range: vscode.Range) =>
         [
-          ...(runs
-            ? [{ title: "run", command: "poly.runFile", arguments: [document.uri, runs] }]
-            : []),
+          ...(runs ? [{ title: "run", command: "poly.runFile", arguments: [document.uri] }] : []),
           { title: "debug", command: "workbench.action.debug.start", arguments: [] },
         ].map((command) => new vscode.CodeLens(range, command));
 
@@ -1622,6 +1844,9 @@ function runFromGutter(context: vscode.ExtensionContext): void {
       if (findsEntryInText(document.languageId)) {
         const line = entryLine(document.languageId, document.getText());
         return line === undefined ? [] : buttons(document.lineAt(line).range);
+      }
+      if (!canHoldEntry(document.languageId, document.getText())) {
+        return [];
       }
       const symbols = await vscode.commands.executeCommand<
         vscode.DocumentSymbol[]
@@ -1633,12 +1858,13 @@ function runFromGutter(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     changed,
     vscode.languages.registerCodeLensProvider({ scheme: "file" }, provider),
-    vscode.commands.registerCommand("poly.runFile", runFile),
-    // The terminal outlives the lens that opened it, so it is disposed with
-    // the extension rather than left behind on reload.
-    { dispose: () => runTerminal?.terminal.dispose() },
+    // The lens passes its file; the command palette passes nothing and means
+    // the file being looked at -- a keyboard route to "run this" is the half
+    // a lens cannot give.
+    vscode.commands.registerCommand("poly.runFile", (uri?: vscode.Uri) => codeRunner.run(null, uri, true)),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.runCodeLens")) {
+      // The executor maps decide where `run` appears.
+      if (affects(event, "poly.runCodeLens") || affects(event, "poly.codeRunner")) {
         changed.fire();
       }
     }),
@@ -1653,7 +1879,7 @@ function runFromGutter(context: vscode.ExtensionContext): void {
  * generated `GreeterServer.SayHello` that gopls knows about.
  */
 class ProtoImplLens extends vscode.CodeLens {
-  constructor(readonly generated: vscode.Location, range: vscode.Range) {
+  constructor(readonly generated: vscode.Location, range: vscode.Range, readonly proto: vscode.Uri) {
     super(range);
   }
 }
@@ -1716,12 +1942,9 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
       const symbols = await vscode.commands.executeCommand<
         vscode.DocumentSymbol[]
       >("vscode.executeDocumentSymbolProvider", document.uri);
-      // The generated Go is right there and the .proto side is blank, which
-      // means nothing is reading the .proto. This is the one place that can
-      // tell the difference between "not generated yet" -- handled above, by
-      // returning early -- and "generated, but poly is not running buf".
+      // The generated Go is right there and the .proto side is blank: nothing
+      // installed reads a .proto outline (the Buf extension does).
       if (!symbols || symbols.length === 0) {
-        void offerServer("the .proto outline", document.languageId);
         return [];
       }
       const pkg = protoPackage(document.getText());
@@ -1733,7 +1956,7 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
               new vscode.CodeLens(symbol.selectionRange, {
                 title: link.label,
                 command: "poly.showLocations",
-                arguments: ["Generated Go", found],
+                arguments: ["Generated Go", found, document.uri, symbol.selectionRange.start],
               }),
             ]
             : [];
@@ -1744,7 +1967,7 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
         const method = goServerMethod(symbol.name, pkg);
         const at = method ? generated.get(method)?.[0] : undefined;
         return at
-          ? [...links, new ProtoImplLens(at, symbol.selectionRange)]
+          ? [...links, new ProtoImplLens(at, symbol.selectionRange, document.uri)]
           : links;
       });
     },
@@ -1753,14 +1976,14 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
       if (token.isCancellationRequested) {
         return lens;
       }
-      const { generated } = lens as ProtoImplLens;
+      const { generated, proto } = lens as ProtoImplLens;
       // The generated interface declares the method; it does not implement it,
       // and `othersAt` subtracts it for that reason.
       const count = (await othersAt(generated.uri, generated.range.start, "down")).length;
       lens.command = {
         title: implLabel(count, "down"),
         command: count > 0 ? "poly.showReferences" : "",
-        arguments: [generated.uri, generated.range.start, "down"],
+        arguments: [generated.uri, generated.range.start, "down", proto, lens.range.start],
       };
       return lens;
     },
@@ -1770,7 +1993,7 @@ function linkGeneratedGo(context: vscode.ExtensionContext): void {
     changed,
     vscode.languages.registerCodeLensProvider({ language: "protobuf" }, provider),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.protobufCodeLens")) {
+      if (affects(event, "poly.protobufCodeLens")) {
         changed.fire();
       }
     }),
@@ -1897,9 +2120,13 @@ async function changedFiles(): Promise<string[] | undefined> {
  *
  * VSCode has next/previous change within a file and a list of changed files in
  * the SCM view; what it has no command for is the step between two files, which
- * is the one a review pass makes most often.
+ * is the one a review pass makes most often. In a diff Git History opened, the
+ * pass is over that commit's files instead.
  */
 async function stepChangedFile(direction: 1 | -1): Promise<void> {
+  if (await stepHistoryDiff(direction)) {
+    return;
+  }
   const files = await changedFiles();
   if (files === undefined) {
     vscode.window.showWarningMessage(
@@ -2044,15 +2271,78 @@ function rendersMermaid(): boolean {
     && vscode.extensions.getExtension(BUILT_IN_MERMAID) === undefined;
 }
 
+/** Whether poly draws the other diagram fences; read per render like mermaid's. */
+function rendersDiagrams(): boolean {
+  return vscode.workspace.getConfiguration("poly").get<boolean>("markdownDiagrams.enabled", false);
+}
+
 /**
- * The preview's markdown-it instance, taught both diagram shapes.
+ * The extension poly's GitHub styling is taken from. Installed, it wraps every
+ * render itself, and a second wrapper would put the stylesheets' padding and
+ * width limits on the page twice.
+ */
+const GITHUB_STYLES = "bierner.markdown-preview-github-styles";
+
+function githubStyle(): GithubStyle | undefined {
+  const config = vscode.workspace.getConfiguration("poly.markdownGithubStyle");
+  if (!config.get<boolean>("enabled", false) || vscode.extensions.getExtension(GITHUB_STYLES)) {
+    return undefined;
+  }
+  return githubStyleOf(config.get("colorTheme"), config.get("lightTheme"), config.get("darkTheme"));
+}
+
+/**
+ * The preview's markdown-it instance, taught the diagram fences, the GitHub
+ * wrapper and Marp.
+ *
+ * Marp goes on last: a Marp document is parsed and rendered by Marp's own
+ * markdown-it, so the wrappers around the rest must not wrap its slides, and
+ * every other document still goes through them.
  *
  * Returned from `activate` because that is the only way in;
  * `contributes["markdown.markdownItPlugins"]` is what makes the preview ask.
  */
-const extendMarkdownIt = mermaidPlugin(rendersMermaid);
+function extendMarkdownIt(md: MarkdownIt): MarkdownIt {
+  return marpPlugin(
+    githubStylePlugin(githubStyle)(
+      plantumlPlugin(drawPlantuml)(diagramPlugin(rendersDiagrams)(mermaidPlugin(rendersMermaid)(md))),
+    ),
+  );
+}
 
-export function activate(context: vscode.ExtensionContext) {
+/** Set in `activate`: the fences need the poly binary, which knows the jar. */
+let drawPlantuml: (source: string, env: unknown, line: number | undefined) => string | undefined = () => undefined;
+
+/** Set in `activate`, which is what knows whether marp-vscode is installed. */
+let marpPlugin: (md: MarkdownIt) => MarkdownIt = (md) => md;
+
+/**
+ * Hands poly's language-free keys to an installed extension that binds them
+ * too (see chords.ts). Re-checked when extensions come and go, so
+ * uninstalling the other one gives the key back without a reload.
+ */
+function yieldChords(context: vscode.ExtensionContext) {
+  // `keybindings` may be one object rather than an array; VSCode takes both.
+  const bindings = (e: vscode.Extension<unknown>): Binding[] => [e.packageJSON.contributes?.keybindings ?? []].flat();
+  const own = bindings(context.extension);
+  const check = () => {
+    const others = vscode.extensions.all
+      .filter((e) => !e.packageJSON.isBuiltin && e.id !== context.extension.id)
+      .map((e) => ({ id: e.id, bindings: bindings(e) }));
+    const taken = yieldsTo(own, others, process.platform);
+    for (const command of YIELDING) {
+      const taker = taken.get(command);
+      void vscode.commands.executeCommand("setContext", yieldKey(command), taker !== undefined);
+      if (taker) {
+        log?.info(`${command} leaves its key to ${taker}; bind it in keybindings.json to take it back`);
+      }
+    }
+  };
+  check();
+  context.subscriptions.push(vscode.extensions.onDidChange(check));
+}
+
+export function activate(context: vscode.ExtensionContext, poly: string) {
   tintIndentation(context);
   highlightUnicode(context);
   previewImages(context);
@@ -2065,19 +2355,36 @@ export function activate(context: vscode.ExtensionContext) {
     log,
     vscode.commands.registerCommand("poly.showLocations", present),
   );
+  yieldChords(context);
   countReferencesInGutter(context);
-  runFromGutter(context);
+  runFromGutter(context, registerCodeRunner(context));
   linkGeneratedGo(context);
   completePostfixes(context);
   registerTodoTree(context);
   referenceTree = registerReferenceTree(context);
+  drawPlantuml = registerPlantuml(context, poly);
+  registerExcalidraw(context);
+  registerMarkdownExport(context, (id) => MARKDOWN_LANGUAGES.has(id));
+  registerCodeSnap(context);
+  registerPasteImage(context, (id) => MARKDOWN_LANGUAGES.has(id));
+  registerDataPreview(context);
+  registerSwaggerViewer(context);
+  marpPlugin = registerMarp(context);
+  mirrorSyntaxColors(context);
+  registerAutocorrect(context, log);
+  registerGitGraph(context, log, poly);
+  registerErrorLens(context);
 
   // The fence rule reads the setting on every render, so turning the diagrams
   // off only has to reach previews that are already open. Same command the
   // built-in uses for its own settings.
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("poly.markdownMermaid")) {
+      if (
+        ["poly.markdownMermaid", "poly.markdownDiagrams", "poly.markdownGithubStyle"].some((section) =>
+          affects(event, section)
+        )
+      ) {
         void vscode.commands.executeCommand("markdown.preview.refresh");
       }
     }),
@@ -2104,6 +2411,12 @@ export function activate(context: vscode.ExtensionContext) {
       "poly.toggleItalic",
       withEditor("Toggle Italic", (editor) => toggleEmphasis(editor, "_")),
     ],
+    ["poly.dbmlToSql", withEditor("DBML to SQL", (editor) => convertDbml(editor, "sql"))],
+    ["poly.sqlToDbml", withEditor("SQL to DBML", (editor) => convertDbml(editor, "dbml"))],
+    ...CHINESE.map((conversion): [string, () => Promise<void>] => [
+      `poly.${conversion}`,
+      withEditor("Chinese conversion", (editor) => convertChinese(editor, conversion)),
+    ]),
     // One entry per refactoring, so the command id and the table cannot drift:
     // `poly.changeSignature` is `REFACTORINGS.changeSignature` by construction.
     ...(Object.keys(REFACTORINGS) as Refactoring[]).map(
@@ -2142,6 +2455,10 @@ export function activate(context: vscode.ExtensionContext) {
     [
       "poly.syntaxColors",
       withEditor("Syntax Colors", showSyntaxColors),
+    ],
+    [
+      "poly.setSyntaxColor",
+      withEditor("Set Syntax Color", setSyntaxColor),
     ],
     ["poly.nextChangedFile", () => stepChangedFile(1)],
     ["poly.previousChangedFile", () => stepChangedFile(-1)],

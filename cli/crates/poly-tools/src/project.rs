@@ -26,6 +26,9 @@ pub const BIOME_LANGUAGES: &[&str] = &["typescript", "json", "css", "graphql"];
 /// someone's files with a tool their CI does not run is worse than not
 /// formatting them (A3).
 fn project_tool(start: &Path, bin: &str, configured: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    if crate::restricted() {
+        return None;
+    }
     // Absolutize so upward walks from relative paths see the full chain.
     let start = std::path::absolute(start).unwrap_or_else(|_| start.to_path_buf());
     let start = start.as_path();

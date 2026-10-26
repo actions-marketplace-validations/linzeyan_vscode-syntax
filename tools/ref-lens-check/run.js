@@ -16,6 +16,8 @@ const { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } = requ
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 
+const markdown = require("./markdown");
+const navigate = require("./navigate");
 const proto = require("./proto");
 const runnable = require("./runnable");
 
@@ -152,6 +154,10 @@ async function main() {
           "poly.referencesCodeLens.enabled": true,
           "poly.runCodeLens.enabled": true,
           "poly.protobufCodeLens.enabled": true,
+          // The checkout's build, as `make e2e` does: GraphQL, nginx, Makefile
+          // and shell are answered by the daemon, and a bundled bin/poly is
+          // whichever release was last packaged here, not the code under test.
+          "poly.serverPath": process.env.POLY_BIN ?? join(ROOT, "cli", "target", "release", "poly"),
         },
         null,
         2,
@@ -160,6 +166,8 @@ async function main() {
   );
 
   const protoEnv = proto.writeFixture(WORKSPACE);
+  const navigateEnv = navigate.writeFixture(WORKSPACE);
+  const markdownEnv = markdown.writeFixture(WORKSPACE);
 
   execFileSync("pnpm", ["run", "build"], { cwd: LSP, stdio: "inherit" });
 
@@ -174,6 +182,8 @@ async function main() {
       POLY_LENS_OUT: OUT,
       POLY_COST_OUT: COST_OUT,
       ...protoEnv,
+      ...navigateEnv,
+      ...markdownEnv,
     },
     ...(cachedVSCode() ? { vscodeExecutablePath: cachedVSCode() } : {}),
     launchArgs: [
@@ -204,6 +214,15 @@ async function main() {
     problems.push(
       `the flat symbol shape got no usable lens — expected 1 ref on lines 1 and 3, got `
         + JSON.stringify(flatSaid),
+    );
+  }
+
+  // A provider that does answer upward, over a class that satisfies something
+  // and one that satisfies nothing -- see `observeUpward`.
+  const wantUp = ["0:1 interface", "0:1 ref", "2:1 ref"];
+  if ((report.upward ?? []).join() !== wantUp.join()) {
+    problems.push(
+      `the upward lens: expected ${JSON.stringify(wantUp)}, got ${JSON.stringify(report.upward)}`,
     );
   }
 
@@ -265,6 +284,8 @@ async function main() {
   }
 
   problems.push(...proto.checkProto(report.proto));
+  problems.push(...navigate.checkNavigate(report.navigate));
+  problems.push(...markdown.checkMarkdown(report.markdown));
 
   console.log(
     `\nVSCode ${report.vscode}, ${report.lenses.length} lines carry a lens; `

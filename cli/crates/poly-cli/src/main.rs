@@ -6,8 +6,9 @@
 mod batch;
 mod coverage;
 mod fmt;
+mod git;
 mod lsp;
-mod proxy;
+mod navigate;
 mod report;
 mod settings;
 mod usage;
@@ -36,6 +37,11 @@ fn main() {
 
 fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Before --help and --version: its arguments are git's, passed through
+    // verbatim, and a ref named `-h` is not a question for poly.
+    if args.first().is_some_and(|cmd| cmd == "git") {
+        return Ok(git::run(&args[1..]));
+    }
     // Answered wherever they appear. Someone typing `poly fmt --help` is
     // asking the same question as `poly --help`, and split_flags rejecting it
     // as an unknown flag would be a joke at their expense.
@@ -604,8 +610,13 @@ fn cmd_check(inv: &Invocation) -> Result<i32> {
     };
     // Every file the walk kept, and then the subset poly can name a language
     // for. Spelling wants the first list -- a LICENSE is worth reading and has
-    // no language -- and every other linter wants the second.
-    let walked = crate::batch::resolve_files(&scope, Scope::Lint, inv.walk())?;
+    // no language -- and every other linter wants the second. A diagram's save
+    // file is in neither (poly_core::diagram_file), named on the command line
+    // or not: a pre-commit hook names every staged file.
+    let walked: Vec<_> = crate::batch::resolve_files(&scope, Scope::Lint, inv.walk())?
+        .into_iter()
+        .filter(|(path, config)| config.language(path).is_some() || !poly_core::diagram_file(path))
+        .collect();
     let files: Vec<(PathBuf, String, Arc<poly_core::Config>)> = walked
         .iter()
         .filter_map(|(path, config)| {
@@ -729,16 +740,22 @@ fn cmd_check(inv: &Invocation) -> Result<i32> {
 
     if !walked.is_empty() {
         init_thread_pool();
-        let results: Vec<Result<Vec<FileIssue>>> = walked
+        // Each file's findings, and whether a JSON Schema checked it. Which
+        // files a schema reaches is only known once a file is read -- the
+        // directive is a line in it -- so unlike the engine rows below, the
+        // schema row is counted here rather than derived.
+        let results: Vec<Result<(Vec<FileIssue>, bool)>> = walked
             .par_iter()
             .map(|(path, config)| {
                 let mut found = poly_engines::lint::spell(path)?;
                 found.extend(poly_engines::lint::unicode(path)?);
+                let mut schema_checked = false;
                 if let Some(lang) = config.language(path) {
                     let linted = lint_engine(&lang, path).is_some();
                     let embeds = embedded_shellcheck.is_some()
                         && poly_engines::shell::hosts_shell(&lang, path);
-                    if linted || embeds {
+                    let schema = poly_engines::schema::applies(&lang);
+                    if linted || embeds || schema {
                         let text = std::fs::read_to_string(path)
                             .with_context(|| format!("reading {}", path.display()))?;
                         if linted {
@@ -752,15 +769,28 @@ fn cmd_check(inv: &Invocation) -> Result<i32> {
                                 &text,
                             )?);
                         }
+                        if schema {
+                            if let Some(more) = poly_engines::schema::lint(
+                                &lang,
+                                path,
+                                &text,
+                                &config.lint_schemas(path),
+                                poly_tools::schema,
+                            )? {
+                                found.extend(more);
+                                schema_checked = true;
+                            }
+                        }
                     }
                 }
-                Ok(found
+                let found = found
                     .into_iter()
                     .map(|issue| FileIssue {
                         file: path.clone(),
                         issue,
                     })
-                    .collect())
+                    .collect();
+                Ok((found, schema_checked))
             })
             .collect();
         let mut broken = 0usize;
@@ -774,9 +804,13 @@ fn cmd_check(inv: &Invocation) -> Result<i32> {
         // walk is ordered and a row that reads differently between two runs
         // over the same tree is a row nobody can diff.
         let mut first_failure: Option<String> = None;
+        let mut schema_files = 0usize;
         for result in results {
             match result {
-                Ok(found) => issues.extend(found),
+                Ok((found, schema_checked)) => {
+                    issues.extend(found);
+                    schema_files += usize::from(schema_checked);
+                }
                 Err(err) => {
                     broken += 1;
                     let message = format!("{err:#}");
@@ -807,6 +841,11 @@ fn cmd_check(inv: &Invocation) -> Result<i32> {
         // a .mailmap as readily as a .rs, so its scope is every file the walk
         // kept (`spell`).
         coverage.record("typos", walked.len(), coverage::Status::Ran);
+        // Only when a file named a schema: a row reading "schema 0 files" in
+        // every repository without one would be a line about nothing.
+        if schema_files > 0 {
+            coverage.record("schema", schema_files, coverage::Status::Ran);
+        }
         // Not attributed to an engine: the failure is a file poly could not
         // read or a configuration none of them could load, and blaming ruff for
         // an unreadable _typos.toml would be a worse answer than naming the
@@ -1341,7 +1380,10 @@ fn installable(name: &str, explicit: bool) -> bool {
 
 fn cmd_tools(rest: &[String]) -> Result<i32> {
     let action = rest.first().map(String::as_str).unwrap_or("list");
-    let config = poly_core::Config::discover(Path::new("."))?;
+    // Absolute: from "." discovery stops at the working directory, so a pin in
+    // the repo's poly.toml went unseen from a subdirectory, and the path it
+    // printed ("././x.jar") meant nothing to the editor that asked.
+    let config = poly_core::Config::discover(&std::env::current_dir()?)?;
     match action {
         "list" => {
             for tool in poly_tools::TOOLS {
@@ -1369,14 +1411,11 @@ fn cmd_tools(rest: &[String]) -> Result<i32> {
             for name in names {
                 match poly_tools::resolve(name, &config, false) {
                     poly_tools::Resolved::Managed(p) => println!("{name}: {}", p.display()),
-                    poly_tools::Resolved::Path(p) => {
-                        println!(
-                            "{name}: no managed build for this platform, PATH has {}",
-                            p.display()
-                        )
-                    }
+                    poly_tools::Resolved::Path(p) => println!("{name}: on PATH, {}", p.display()),
                     poly_tools::Resolved::Pinned(p) => println!("{name}: pinned {}", p.display()),
-                    poly_tools::Resolved::Disabled => println!("{name}: disabled in poly.toml"),
+                    poly_tools::Resolved::Disabled => {
+                        println!("{name}: disabled in {}", config.tool_source(name))
+                    }
                     // Not downloaded even when named. Fetching a binary poly
                     // would then never invoke is the confusing outcome; the
                     // one line that makes it run is the useful answer.

@@ -1,11 +1,13 @@
 import * as assert from "node:assert";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 
+import { findNodeAtLocation, parseTree } from "jsonc-parser";
 import * as vscode from "vscode";
 
 import { cacheDir, RefStore } from "../../editor/refStore";
+import { lineOf, rewrite, withValue, WORDS } from "../../editor/settingsBlock";
 import { commonRoot, useLines } from "../../gowork";
 import { knownNewer, revalidates, updateDue } from "../../update";
 
@@ -41,6 +43,20 @@ async function eventually<T>(
   }
 }
 
+/// Set a key inside `poly` at one scope, or unset it with `undefined`. `poly`
+/// is a single object setting, so the editor's writer takes the whole object at
+/// that scope -- as a hand edit of settings.json would leave it.
+async function setPoly(key: string, value: unknown, target: vscode.ConfigurationTarget): Promise<void> {
+  const config = vscode.workspace.getConfiguration();
+  const seen = config.inspect("poly");
+  const current = target === vscode.ConfigurationTarget.Global
+    ? seen?.globalValue
+    : target === vscode.ConfigurationTarget.Workspace
+    ? seen?.workspaceValue
+    : seen?.workspaceFolderValue;
+  await config.update("poly", withValue(current, key.split("."), value), target);
+}
+
 /// Format through the editor and return the resulting text. Asserting on the
 /// raw edits would be brittle: VSCode minimizes a whole-document replacement
 /// into a handful of one-character splices before handing it back.
@@ -64,6 +80,58 @@ async function formatted(uri: vscode.Uri): Promise<string> {
   return document.getText();
 }
 
+/// A script for Code Runner that says `said` and leaves `marker` behind, so a
+/// run is seen both in the output panel and on disk. A shebang, so that it
+/// runs under the interpreter it names and needs nothing on PATH.
+function runnable(name: string, marker: string, said: string): vscode.Uri {
+  rmSync(marker, { force: true });
+  return writeFile(name, `#!/bin/sh\necho ${said}\n: > "${marker}"\n`);
+}
+
+/// The text of the output panel that says `text`, once one does.
+function outputSaying(text: string): string | undefined {
+  return vscode.workspace.textDocuments
+    .find((one) => one.uri.scheme === "output" && one.getText().includes(text))
+    ?.getText();
+}
+
+/// Whether `runnable`'s scripts can run here. Windows has no `/bin/sh`, so
+/// there a run is seen starting -- Code Runner was handed the right file -- and
+/// what the script itself does is not looked for.
+const SH = existsSync("/bin/sh");
+
+/// The output panel's line naming `script`, which Code Runner prints first.
+const started = (script: vscode.Uri) => outputSaying(`${basename(script.fsPath)}"`);
+
+/// Code Runner started `script` and, where it can run, it ran: the marker is
+/// there and `said` is in the output panel. That panel's text.
+async function ran(script: vscode.Uri, marker: string, said: string): Promise<string> {
+  const output = await eventually("Code Runner to start the script", () => started(script));
+  if (!SH) {
+    return output;
+  }
+  await eventually("the script to run", () => existsSync(marker) || undefined);
+  return eventually("the run in the output panel", () => outputSaying(said));
+}
+
+/// Long enough for a run of `runnable`'s script to have started and left its
+/// marker, had one started: the command has resolved by then, and the process
+/// takes milliseconds.
+async function notRun(script: vscode.Uri, marker: string, why: string): Promise<void> {
+  await new Promise((done) => setTimeout(done, 2_000));
+  assert.ok(!existsSync(marker) && !started(script), why);
+}
+
+/// The `run` lens on `uri`, invoked the way a click does.
+async function clickRunLens(uri: vscode.Uri): Promise<void> {
+  const run = await eventually("the run lens", async () => {
+    const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>("vscode.executeCodeLensProvider", uri, 10);
+    return lenses?.find((lens) => lens.command?.title === "run")?.command;
+  });
+  assert.strictEqual(run.command, "poly.runFile");
+  await vscode.commands.executeCommand(run.command, ...(run.arguments ?? []));
+}
+
 suite("poly-lsp in a real editor", () => {
   suiteSetup(async function() {
     this.timeout(120_000);
@@ -77,6 +145,12 @@ suite("poly-lsp in a real editor", () => {
       ),
     );
     await eventually("the extension to activate", () => extension.isActive || undefined);
+    // Activation finds the user's settings.json by opening it, which a test
+    // that opens a file of its own meanwhile could be caught up in.
+    await eventually(
+      "the poly block in the user's settings.json",
+      () => vscode.workspace.getConfiguration().inspect("poly")?.globalValue !== undefined || undefined,
+    );
   });
 
   // The VSIX ships one binary with one extension and versions them together,
@@ -122,16 +196,23 @@ suite("poly-lsp in a real editor", () => {
     const bindings = pkg.contributes.keybindings as { command: string; key: string }[];
     // The one exception is a command that is a keystroke rather than an action:
     // continuing a list is what Enter does, and run from the palette it would
-    // act on whatever line the cursor was left on.
+    // act on whatever line the cursor was left on. Undo and redo in the
+    // Excalidraw editor are the same: a key kept from VSCode, not an action.
     const keystrokes = new Set(
-      bindings.filter((binding) => ["enter", "tab", "shift+tab"].includes(binding.key)).map((binding) =>
-        binding.command
-      ),
+      bindings.filter((binding) => ["enter", "tab", "shift+tab", "ctrl+z", "ctrl+y"].includes(binding.key)).map((
+        binding,
+      ) => binding.command),
+    );
+    // So is a command on a webview's context menu: it acts on the commit,
+    // branch or file right-clicked, and from the palette it would have nothing
+    // to act on. It is found where it applies, which is what the rule is for.
+    const onAThing = new Set(
+      (pkg.contributes.menus?.["webview/context"] ?? []).map((entry: { command: string }) => entry.command),
     );
     const hidden = (pkg.contributes.menus?.commandPalette ?? [])
       .filter((entry: { when?: string }) => entry.when === "false")
       .map((entry: { command: string }) => entry.command)
-      .filter((id: string) => !keystrokes.has(id));
+      .filter((id: string) => !keystrokes.has(id) && !onAThing.has(id));
     assert.deepStrictEqual(hidden, [], "declared but kept out of the palette");
 
     for (const command of ["poly.minify", "poly.formatDocument"]) {
@@ -219,19 +300,21 @@ suite("poly-lsp in a real editor", () => {
   });
 
   test("a go.work goes to the deepest directory covering every module", () => {
-    const root = commonRoot([join("/a", "liba"), join("/a", "appb")]);
-    assert.strictEqual(root, "/a");
-    assert.deepStrictEqual(useLines(root!, [join("/a", "liba"), join("/a", "appb")]), [
+    // Resolved, because that is what the folders are: on Windows `/a` is `C:\a`.
+    const a = resolve("/a");
+    const root = commonRoot([join(a, "liba"), join(a, "appb")]);
+    assert.strictEqual(root, a);
+    assert.deepStrictEqual(useLines(root!, [join(a, "liba"), join(a, "appb")]), [
       "./appb",
       "./liba",
     ]);
 
     // A module at the root itself is `.`, which is what go writes.
-    assert.deepStrictEqual(useLines("/a", ["/a", join("/a", "sub")]), [".", "./sub"]);
+    assert.deepStrictEqual(useLines(a, [a, join(a, "sub")]), [".", "./sub"]);
 
     // One module is its own root; nested modules resolve to the outer one.
-    assert.strictEqual(commonRoot([join("/a", "one")]), join("/a", "one"));
-    assert.strictEqual(commonRoot([join("/a", "one"), join("/a", "one", "in")]), join("/a", "one"));
+    assert.strictEqual(commonRoot([join(a, "one")]), join(a, "one"));
+    assert.strictEqual(commonRoot([join(a, "one"), join(a, "one", "in")]), join(a, "one"));
 
     // Nothing to cover, and nothing in common: both have to say so rather than
     // return a root that would put the file somewhere arbitrary.
@@ -261,11 +344,12 @@ suite("poly-lsp in a real editor", () => {
   });
 
   // What an interval setting promises -- a check at most every N days, 0 being
-  // every start -- and the two things allowed to override it: a newer release
-  // already on record that nobody acted on, and "Skip This Version". Both
-  // extensions ask this with their own section's numbers, so it is the whole
-  // of what poly.syntax.updateCheck.intervalDays means.
-  test("an update check is due by its own interval, sooner for a release nobody acted on", () => {
+  // every start -- and the one thing allowed to override it: a newer release
+  // already on record that is not installed yet, which is an install that
+  // failed and has to be retried at the next start rather than a week later.
+  // Both extensions ask this with their own section's numbers, so it is the
+  // whole of what poly.syntax.updateCheck.intervalDays means.
+  test("an update check is due by its own interval, sooner for a release not yet installed", () => {
     const day = 86_400_000;
     const now = 100 * day;
     const memento = (values: Record<string, unknown>) =>
@@ -281,8 +365,6 @@ suite("poly-lsp in a real editor", () => {
     const unacted = { "updateCheck.lastCheck": now - day, "updateCheck.cachedTag": "v0.18.4" };
     assert.strictEqual(updateDue(memento(unacted), "0.18.3", 7, now), true);
     assert.strictEqual(updateDue(memento(unacted), "0.18.4", 7, now), false, "installed since");
-    const skipped = memento({ ...unacted, "updateCheck.skippedVersion": "v0.18.4" });
-    assert.strictEqual(updateDue(skipped, "0.18.3", 7, now), false);
   });
 
   test("registers a formatter for sql", async () => {
@@ -297,6 +379,175 @@ suite("poly-lsp in a real editor", () => {
     assert.strictEqual(text, "def f(a, b):\n    return a + b\n");
   });
 
+  // Both ids are VSCode's own, and until poly re-indented them a .ps1 or a
+  // .cmd had no formatter at all.
+  test("formats PowerShell and batch files", async () => {
+    assert.strictEqual(
+      await formatted(writeFile("messy.ps1", "if ($a) {\nWrite-Host a\n}\n")),
+      "if ($a) {\n    Write-Host a\n}\n",
+    );
+    assert.strictEqual(await formatted(writeFile("messy.cmd", "if x (\necho a\n)\n")), "if x (\n    echo a\n)\n");
+  });
+
+  // A buffer that was never saved is outside the client's selector, so the
+  // formatter for it is the extension's own and the text travels with the
+  // request. Before it, a new markdown note had no formatter at all -- the
+  // format shortcut and Format Document both did nothing.
+  test("formats a buffer that was never saved", async () => {
+    const document = await vscode.workspace.openTextDocument({
+      language: "markdown",
+      content: "#  Title\n\n\n\ntext\n",
+    });
+    assert.strictEqual(await formatted(document.uri), "# Title\n\ntext\n");
+  });
+
+  // The user's settings.json is `vscode-userdata:`, and `[jsonc]` names poly
+  // as its formatter -- so before this, the one JSONC file everybody edits had
+  // no formatter at all. Comments and the trailing comma are the claim: a JSON
+  // formatter that dropped either would ruin the file it was asked to tidy.
+  test("formats the user's settings.json, comments and all", async () => {
+    await vscode.commands.executeCommand("workbench.action.openSettingsJson");
+    const editor = await eventually("the user settings editor", () => {
+      const active = vscode.window.activeTextEditor;
+      return active?.document.uri.scheme === "vscode-userdata" ? active : undefined;
+    });
+    try {
+      const { document } = editor;
+      const whole = new vscode.Range(0, 0, document.lineCount, 0);
+      await editor.edit((edit) => edit.replace(whole, "{\n    // kept\n  \"a\":   1,\n}\n"));
+      assert.strictEqual(await formatted(document.uri), "{\n  // kept\n  \"a\": 1,\n}\n");
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+    }
+  });
+
+  // A remote window's extension host sees a local file (File > Open File >
+  // Show Local) as `vscode-local:`. This host is local, so the scheme is stood
+  // up by hand; before poly served it, Format Document on such a file said no
+  // formatter was installed.
+  test("formats a local file opened in a remote window", async () => {
+    const content = vscode.workspace.registerTextDocumentContentProvider("vscode-local", {
+      provideTextDocumentContent: () => "#  Title\n\n\n\ntext\n",
+    });
+    try {
+      const uri = vscode.Uri.from({ scheme: "vscode-local", path: "/c:/Users/me/note.md" });
+      assert.strictEqual((await vscode.workspace.openTextDocument(uri)).languageId, "markdown");
+      await eventually("a formatter for a vscode-local: file", async () => {
+        const edits = await vscode.commands.executeCommand<vscode.TextEdit[]>(
+          "vscode.executeFormatDocumentProvider",
+          uri,
+          { tabSize: 2, insertSpaces: true },
+        );
+        return edits && edits.length > 0 ? edits : undefined;
+      }, 15_000);
+    } finally {
+      content.dispose();
+    }
+  });
+
+  // The block's text is unit-tested; what only a host shows is that poly finds
+  // the file at all -- no API says where it is -- and that a switch written
+  // into it keeps the comments, where the editor's own writer re-serialises the
+  // whole object without them.
+  test("the user's settings.json carries the poly block, and a switch keeps its comments", async () => {
+    const extension = vscode.extensions.getExtension(EXTENSION_ID)!;
+    const schema = extension.packageJSON.contributes.configuration.properties.poly;
+    const strings = JSON.parse(readFileSync(join(extension.extensionPath, "package.nls.json"), "utf8"));
+    const blockIn = (text: string) => {
+      const node = findNodeAtLocation(parseTree(text)!, ["poly"]);
+      assert.ok(node, "no poly block in the user's settings.json");
+      return text.slice(node.offset, node.offset + node.length);
+    };
+    const written = (text: string, change?: { key: string; value: unknown }) =>
+      blockIn(rewrite(text, schema, strings, WORDS.en, change));
+    await vscode.commands.executeCommand("workbench.action.openSettingsJson");
+    const editor = await eventually("the user settings editor", () => {
+      const active = vscode.window.activeTextEditor;
+      return active?.document.uri.scheme === "vscode-userdata" ? active : undefined;
+    });
+    try {
+      const before = editor.document.getText();
+      assert.strictEqual(blockIn(before), written(before), "the block is not the one this version writes");
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(blockIn(editor.document.getText()), written(before, { key: "format.enabled", value: false }));
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.strictEqual(blockIn(editor.document.getText()), blockIn(before), "the way back left the block changed");
+    } finally {
+      await switchedOn("poly.toggleFormat", "poly.format.enabled");
+      await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    }
+  });
+
+  // The Settings UI's row per key, for the object setting it cannot draw. The
+  // list is the real one, its row selected and poly's accept handler run --
+  // not Enter, which reaches the list only while this window has the
+  // foreground. The value is answered in place of the box. What only a host
+  // shows: the choice lands in the block as poly writes it, comments kept, and
+  // choosing the default takes the line out again rather than pinning a value
+  // the next release cannot change.
+  test("Poly: Settings sets a key from a list or a box, and choosing its default unsets it", async () => {
+    type Row = vscode.QuickPickItem & { key?: string };
+    const window = vscode.window as unknown as Record<string, unknown>;
+    const { createQuickPick, showQuickPick, showInputBox } = vscode.window;
+    const lists: { pick: vscode.QuickPick<Row>; accept: () => void }[] = [];
+    const answers: unknown[] = [];
+    window.createQuickPick = () => {
+      const pick = createQuickPick<Row>();
+      const list = { pick, accept: () => {} };
+      const onDidAccept = pick.onDidAccept;
+      Object.defineProperty(pick, "onDidAccept", {
+        value: (listener: () => void) => {
+          list.accept = listener;
+          return onDidAccept(listener);
+        },
+      });
+      lists.push(list);
+      return pick;
+    };
+    window.showQuickPick = async (items: Thenable<{ choice: unknown }[]> | { choice: unknown }[]) => {
+      const answer = answers.shift();
+      return (await items).find((item) => item.choice === answer);
+    };
+    window.showInputBox = () => Promise.resolve(answers.shift());
+    const user = (key: string) => vscode.workspace.getConfiguration("poly").inspect(key)?.globalValue;
+    let used = 0;
+    const nextList = () =>
+      eventually("the settings list", () => (lists[used]?.pick.items.length ? lists[used++] : undefined));
+    const choose = async (key: string, answer: unknown) => {
+      const { pick, accept } = await nextList();
+      answers.push(answer);
+      pick.selectedItems = pick.items.filter((item) => item.key === key);
+      accept();
+    };
+    const menu = vscode.commands.executeCommand("poly.openSettings");
+    try {
+      await choose("codeSnap.shutterAction", "copy");
+      await eventually("the chosen value", () => user("codeSnap.shutterAction") === "copy" || undefined);
+      await choose("swaggerViewer.defaultPort", "18600");
+      await eventually("the typed value", () => user("swaggerViewer.defaultPort") === 18600 || undefined);
+      const settings = vscode.workspace.textDocuments.find((doc) =>
+        doc.uri.scheme === "vscode-userdata" && doc.uri.path.endsWith("/settings.json")
+      )!;
+      const text = settings.getText();
+      assert.ok(text.includes(WORDS.en.header.slice(0, 40)), "the block lost its comments");
+      assert.match(text.split("\n")[lineOf(text, "codeSnap.shutterAction")!], /^\s+"shutterAction": "copy",$/);
+      await choose("codeSnap.shutterAction", "save");
+      await choose("swaggerViewer.defaultPort", "");
+      await eventually(
+        "both keys unset",
+        () =>
+          user("codeSnap.shutterAction") === undefined && user("swaggerViewer.defaultPort") === undefined || undefined,
+      );
+      assert.match(settings.getText().split("\n")[lineOf(settings.getText(), "codeSnap.shutterAction")!], /^\s+\/\/ /);
+      await nextList();
+      await vscode.commands.executeCommand("workbench.action.closeQuickOpen");
+      await menu;
+    } finally {
+      Object.assign(window, { createQuickPick, showQuickPick, showInputBox });
+      await vscode.commands.executeCommand("workbench.action.closeQuickOpen");
+    }
+  });
+
   // The suspend switch lives in the client's middleware, so nothing in the
   // protocol tests can see it: the daemon is asked the same question and gives
   // the same answer, and the whole feature is the client deciding not to ask.
@@ -307,10 +558,9 @@ suite("poly-lsp in a real editor", () => {
   // broken switch.
   test("suspending formatting stops poly rewriting a file", async () => {
     const messy = "select a,b from t\n";
-    const config = vscode.workspace.getConfiguration("poly");
     assert.strictEqual(await formatted(writeFile("resumed.sql", messy)), "select a, b from t\n");
 
-    await config.update("format.enabled", false, vscode.ConfigurationTarget.Workspace);
+    await setPoly("format.enabled", false, vscode.ConfigurationTarget.Workspace);
     try {
       const uri = writeFile("suspended.sql", messy);
       await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
@@ -321,7 +571,7 @@ suite("poly-lsp in a real editor", () => {
       );
       assert.deepStrictEqual(edits ?? [], [], "poly formatted a file while suspended");
     } finally {
-      await config.update("format.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+      await setPoly("format.enabled", undefined, vscode.ConfigurationTarget.Workspace);
     }
   });
 
@@ -332,8 +582,7 @@ suite("poly-lsp in a real editor", () => {
   // test above holds down.
   test("the format shortcut formats a file while formatting is stopped", async () => {
     const messy = "select a,b from t\n";
-    const config = vscode.workspace.getConfiguration("poly");
-    await config.update("format.enabled", false, vscode.ConfigurationTarget.Workspace);
+    await setPoly("format.enabled", false, vscode.ConfigurationTarget.Workspace);
     try {
       const document = await vscode.workspace.openTextDocument(writeFile("shortcut.sql", messy));
       await vscode.window.showTextDocument(document);
@@ -343,7 +592,7 @@ suite("poly-lsp in a real editor", () => {
       });
       assert.strictEqual(text, "select a, b from t\n");
     } finally {
-      await config.update("format.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+      await setPoly("format.enabled", undefined, vscode.ConfigurationTarget.Workspace);
     }
   });
 
@@ -351,8 +600,7 @@ suite("poly-lsp in a real editor", () => {
   // rules cannot do: a file type they are never sent, and a character nobody
   // has saved yet.
   test("the unicode highlight names a character typed into a plain-text file", async () => {
-    const config = vscode.workspace.getConfiguration("poly");
-    await config.update("unicodeHighlight.enabled", true, vscode.ConfigurationTarget.Workspace);
+    await setPoly("unicodeHighlight.enabled", true, vscode.ConfigurationTarget.Workspace);
     try {
       const document = await vscode.workspace.openTextDocument(writeFile("gremlin.txt", "plain line\n"));
       const editor = await vscode.window.showTextDocument(document);
@@ -373,7 +621,7 @@ suite("poly-lsp in a real editor", () => {
       assert.ok(document.isDirty, "the file was saved, so this no longer shows the unsaved case");
     } finally {
       await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
-      await config.update("unicodeHighlight.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+      await setPoly("unicodeHighlight.enabled", undefined, vscode.ConfigurationTarget.Workspace);
     }
   });
 
@@ -386,8 +634,7 @@ suite("poly-lsp in a real editor", () => {
     const store = new RefStore(cacheDir());
     store.set(folder, "kept.ts", `refs|${vscode.SymbolKind.Function}:kept#0`, 42);
     store.save();
-    const config = vscode.workspace.getConfiguration("poly");
-    await config.update("referencesCodeLens.enabled", true, vscode.ConfigurationTarget.Workspace);
+    await setPoly("referencesCodeLens.enabled", true, vscode.ConfigurationTarget.Workspace);
     try {
       await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
       const titles = async () => {
@@ -408,8 +655,105 @@ suite("poly-lsp in a real editor", () => {
       });
       assert.deepStrictEqual(corrected, ["no refs"]);
     } finally {
-      await config.update("referencesCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+      await setPoly("referencesCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);
       rmSync(store.fileFor(folder), { force: true });
+    }
+  });
+
+  // R's symbols came from arity through poly's relay, which is gone: the lens
+  // now stands on whatever R extension answers, and none is installed here.
+  // So nothing is drawn until something answers, and then the count is drawn
+  // over the first assignment -- the test plays the R extension.
+  test("an R file gets reference lenses from whichever extension answers for R", async () => {
+    const uri = writeFile("lens.R", "add <- function(a, b) a + b\nadd(1, 2)\n");
+    const document = await vscode.workspace.openTextDocument(uri);
+    assert.strictEqual(document.languageId, "r");
+    await setPoly("referencesCodeLens.enabled", true, vscode.ConfigurationTarget.Workspace);
+    const subscriptions: vscode.Disposable[] = [];
+    const titles = async () => {
+      const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>("vscode.executeCodeLensProvider", uri, 10);
+      return lenses.flatMap((lens) => lens.command?.title ?? []).filter((title) => / refs?$/.test(title));
+    };
+    try {
+      await vscode.window.showTextDocument(document);
+      assert.deepStrictEqual(await titles(), [], "a lens over R with nothing answering for R");
+      const declared = new vscode.Range(0, 0, 0, 3);
+      subscriptions.push(
+        vscode.languages.registerDocumentSymbolProvider({ language: "r" }, {
+          provideDocumentSymbols: () => [
+            new vscode.DocumentSymbol(
+              "add",
+              "",
+              vscode.SymbolKind.Function,
+              new vscode.Range(0, 0, 0, 27),
+              declared,
+            ),
+          ],
+        }),
+        vscode.languages.registerReferenceProvider({ language: "r" }, {
+          provideReferences: () => [
+            new vscode.Location(uri, declared),
+            new vscode.Location(uri, new vscode.Range(1, 0, 1, 3)),
+          ],
+        }),
+      );
+      const drawn = await eventually("the R lens", async () => {
+        const said = await titles();
+        return said.length > 0 && !said.includes("no refs") ? said : undefined;
+      });
+      assert.deepStrictEqual(drawn, ["1 ref"]);
+    } finally {
+      subscriptions.forEach((one) => one.dispose());
+      await setPoly("referencesCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  // A lens click does not move the cursor, so Go Back after `1 ref` went back
+  // to wherever the cursor had been rather than to the declaration clicked.
+  // The cursor starts more than 10 lines from both ends, the distance VSCode's
+  // history needs before it tells two places in one file apart.
+  test("Go Back after a lens jump returns to the declaration whose lens was clicked", async () => {
+    const filler = Array.from({ length: 20 }, (_, i) => `# ${i}`);
+    const uri = writeFile("back.R", ["add <- function(a, b) a + b", ...filler, "add(1, 2)", ""].join("\n"));
+    const document = await vscode.workspace.openTextDocument(uri);
+    const declared = new vscode.Range(0, 0, 0, 3);
+    const use = new vscode.Range(21, 0, 21, 3);
+    await setPoly("referencesCodeLens.enabled", true, vscode.ConfigurationTarget.Workspace);
+    const subscriptions = [
+      vscode.languages.registerDocumentSymbolProvider({ language: "r" }, {
+        provideDocumentSymbols: () => [
+          new vscode.DocumentSymbol("add", "", vscode.SymbolKind.Function, new vscode.Range(0, 0, 0, 27), declared),
+        ],
+      }),
+      vscode.languages.registerReferenceProvider({ language: "r" }, {
+        provideReferences: () => [new vscode.Location(uri, declared), new vscode.Location(uri, use)],
+      }),
+    ];
+    try {
+      const editor = await vscode.window.showTextDocument(document, { selection: new vscode.Range(11, 0, 11, 0) });
+      const lens = await eventually("the 1 ref lens", async () => {
+        const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
+          "vscode.executeCodeLensProvider",
+          uri,
+          10,
+        );
+        return lenses.find((one) => one.command?.title === "1 ref")?.command;
+      });
+      await vscode.commands.executeCommand(lens.command, ...(lens.arguments ?? []));
+      await eventually(
+        "the jump to the one reference",
+        () => editor.selection.active.line === use.start.line || undefined,
+        5_000,
+      );
+      await vscode.commands.executeCommand("workbench.action.navigateBack");
+      const back = await eventually("Go Back to land", () => {
+        const line = vscode.window.activeTextEditor?.selection.active.line;
+        return line !== use.start.line ? line : undefined;
+      }, 5_000);
+      assert.strictEqual(back, declared.start.line, "Go Back returned to the old cursor, not the declaration");
+    } finally {
+      subscriptions.forEach((one) => one.dispose());
+      await setPoly("referencesCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);
     }
   });
 
@@ -426,9 +770,7 @@ suite("poly-lsp in a real editor", () => {
       const written = vscode.workspace.getConfiguration("poly").inspect<boolean>("format.enabled");
       assert.strictEqual(written?.globalValue, undefined, "toggling back left a user setting behind");
     } finally {
-      await vscode.workspace
-        .getConfiguration("poly")
-        .update("format.enabled", undefined, vscode.ConfigurationTarget.Global);
+      await setPoly("format.enabled", undefined, vscode.ConfigurationTarget.Global);
     }
   });
 
@@ -449,6 +791,8 @@ suite("poly-lsp in a real editor", () => {
   // The case that made a global-only toggle useless: golang.go ships `[go]`
   // format-on-save as a language default, and a language default outranks a
   // global `false`. The fixture extension ships the same shape for `[bat]`.
+  // `[json]` is the other way a language gets its own value: the user's block,
+  // here with an `explicit` organizeImports, which still runs on every Cmd+S.
   test("stopping formatting reaches a language's own default, and resuming puts back exactly what was there", async () => {
     assert.strictEqual(
       inLanguage("bat").get("editor.formatOnSave"),
@@ -458,6 +802,8 @@ suite("poly-lsp in a real editor", () => {
     await root().update("editor.formatOnType", true, Global);
     await inLanguage("json").update("editor.formatOnPaste", true, Global, true);
     await root().update("editor.codeActionsOnSave", { "source.fixAll": "always" }, Global);
+    const explicit = { "source.organizeImports": "explicit" };
+    await inLanguage("json").update("editor.codeActionsOnSave", explicit, Global, true);
     try {
       await vscode.commands.executeCommand("poly.toggleFormat");
       assert.strictEqual(root().get("poly.format.enabled"), false);
@@ -472,7 +818,7 @@ suite("poly-lsp in a real editor", () => {
         false,
         "a user's [json] block outranked the switch",
       );
-      for (const scope of [root(), inLanguage("bat")]) {
+      for (const scope of [root(), inLanguage("bat"), inLanguage("json")]) {
         const actions = scope.get<Record<string, unknown>>("editor.codeActionsOnSave") ?? {};
         assert.ok(Object.values(actions).every((one) => one === "never"), JSON.stringify(actions));
       }
@@ -488,11 +834,18 @@ suite("poly-lsp in a real editor", () => {
       assert.strictEqual(root().inspect("editor.formatOnType")?.globalValue, true);
       assert.strictEqual(inLanguage("json").inspect("editor.formatOnPaste")?.globalLanguageValue, true);
       assert.deepStrictEqual(root().inspect("editor.codeActionsOnSave")?.globalValue, { "source.fixAll": "always" });
+      assert.strictEqual(
+        inLanguage("bat").inspect("editor.codeActionsOnSave")?.globalLanguageValue,
+        undefined,
+        "resuming left a [bat] organizeImports line in settings.json",
+      );
+      assert.deepStrictEqual(inLanguage("json").inspect("editor.codeActionsOnSave")?.globalLanguageValue, explicit);
     } finally {
       await switchedOn("poly.toggleFormat", "poly.format.enabled");
       await root().update("editor.formatOnType", undefined, Global);
       await inLanguage("json").update("editor.formatOnPaste", undefined, Global, true);
       await root().update("editor.codeActionsOnSave", undefined, Global);
+      await inLanguage("json").update("editor.codeActionsOnSave", undefined, Global, true);
     }
   });
 
@@ -513,6 +866,31 @@ suite("poly-lsp in a real editor", () => {
     } finally {
       await switchedOn("poly.toggleFormat", "poly.format.enabled");
       await root().update("files.trimTrailingWhitespace", undefined, Global);
+    }
+  });
+
+  // The other half of the rule above, and the one that left a user's synced
+  // settings.json full of `"never"`: a value that is still off is poly's, even
+  // when something reshaped it while stopped, and resuming has to take it back.
+  test("a value still off when formatting resumes is put back, whatever its shape", async () => {
+    await root().update("editor.codeActionsOnSave", { "source.fixAll": "always" }, Global);
+    try {
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.deepStrictEqual(root().inspect("editor.codeActionsOnSave")?.globalValue, { "source.fixAll": "never" });
+      await root().update(
+        "editor.codeActionsOnSave",
+        { "source.fixAll": "never", "source.organizeImports": "never" },
+        Global,
+      );
+      await vscode.commands.executeCommand("poly.toggleFormat");
+      assert.deepStrictEqual(
+        root().inspect("editor.codeActionsOnSave")?.globalValue,
+        { "source.fixAll": "always" },
+        "resuming left an off value behind",
+      );
+    } finally {
+      await switchedOn("poly.toggleFormat", "poly.format.enabled");
+      await root().update("editor.codeActionsOnSave", undefined, Global);
     }
   });
 
@@ -659,55 +1037,6 @@ suite("poly-lsp in a real editor", () => {
     assert.ok(text.includes("Best practice"), `not the rule docs: ${text}`);
   });
 
-  // poly declares no definition provider at initialize -- it cannot, because an
-  // LSP capability is server-wide and poly speaks for 29 languages while gopls
-  // answers for one. It registers dynamically once gopls is up, scoped to Go,
-  // and whether VSCode acts on a registration that arrives after initialize is
-  // precisely what no protocol test can tell us.
-  test("routes go-to-definition for Go to gopls", async function() {
-    this.timeout(60_000);
-    try {
-      execFileSync("gopls", ["version"], { stdio: "ignore" });
-    } catch {
-      // Loudly, not silently: poly never installs a language server, so a
-      // machine without one genuinely cannot run this.
-      console.log("      skipped: gopls is not on PATH");
-      this.skip();
-    }
-    const uri = writeFile(
-      "greet.go",
-      `package main
-
-func Greet(name string) string {
-\treturn "hello " + name
-}
-
-func main() {
-\tprintln(Greet("world"))
-}
-`,
-    );
-    await vscode.window.showTextDocument(
-      await vscode.workspace.openTextDocument(uri),
-    );
-    // Position is inside `Greet` at the call site on line 8; the definition is
-    // on line 3. gopls needs a moment to load the package, so poll.
-    const locations = await eventually("gopls to resolve the definition", async () => {
-      const found = await vscode.commands.executeCommand<vscode.Location[]>(
-        "vscode.executeDefinitionProvider",
-        uri,
-        new vscode.Position(7, 10),
-      );
-      return found?.length ? found : undefined;
-    });
-    assert.strictEqual(
-      locations[0].range.start.line,
-      2,
-      "definition did not land on the declaration",
-    );
-    assert.ok(locations[0].uri.fsPath.endsWith("greet.go"), locations[0].uri.fsPath);
-  });
-
   // A parse failure used to come back as an LSP error, which VSCode shows as a
   // toast that names no line and cannot be clicked. Only the real editor can
   // prove it now lands in Problems instead.
@@ -782,6 +1111,739 @@ func main() {
       vscode.Uri.file(folder),
     );
     assert.strictEqual(readFileSync(file, "utf8"), "{ \"b\": 1, \"a\": 2 }\n");
+  });
+
+  // The conversions are unit-tested; what only a real host shows is the wiring
+  // around them -- the lazy bundle found beside dist/extension.js, and the
+  // output landing where the save dialog said. The simple dialog turns the
+  // native one into a quick input, so both prompts accept the same way: the
+  // first dialect, then the proposed path. The file is plaintext here (the
+  // host has no poly-syntax-highlight), which is the extension check's case.
+  test("DBML to SQL writes the file the save dialog proposes", async () => {
+    await vscode.workspace
+      .getConfiguration("files")
+      .update("simpleDialog.enable", true, vscode.ConfigurationTarget.Global);
+    const target = join(workspaceRoot(), "schema.sql");
+    rmSync(target, { force: true });
+    const uri = writeFile("schema.dbml", "Table users {\n  id int [pk]\n}\n");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+    const running = vscode.commands.executeCommand("poly.dbmlToSql");
+    await eventually("the converted file", async () => {
+      await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+      try {
+        return readFileSync(target, "utf8");
+      } catch {
+        return undefined;
+      }
+    });
+    await running;
+    assert.match(readFileSync(target, "utf8"), /CREATE TABLE "users"/);
+  });
+
+  // What only a host shows: that a colour set in poly.syntaxColors reaches the
+  // one setting a theme reads. The merge is unit-tested; this is the write into
+  // the user's settings.json, which fails silently with the wrong target.
+  test("a syntax colour set in poly.syntaxColors reaches the theme, and goes when the entry does", async () => {
+    const rules = () =>
+      (vscode.workspace.getConfiguration("editor").inspect<{ textMateRules?: unknown[] }>(
+        "tokenColorCustomizations",
+      )?.globalValue?.textMateRules ?? []) as { name?: string; scope?: string; settings?: object }[];
+    try {
+      await setPoly("syntaxColors", { comment: "#6A9955 italic" }, vscode.ConfigurationTarget.Global);
+      const rule = await eventually("the mirrored rule", () => rules().find((one) => one.name === "poly.syntaxColors"));
+      assert.deepStrictEqual(rule, {
+        name: "poly.syntaxColors",
+        scope: "comment",
+        settings: { foreground: "#6A9955", fontStyle: "italic" },
+      });
+      await setPoly("syntaxColors", undefined, vscode.ConfigurationTarget.Global);
+      await eventually("the rule to go", () => rules().length === 0 ? true : undefined);
+    } finally {
+      await setPoly("syntaxColors", undefined, vscode.ConfigurationTarget.Global);
+      await vscode.workspace
+        .getConfiguration("editor")
+        .update("tokenColorCustomizations", undefined, vscode.ConfigurationTarget.Global);
+    }
+  });
+
+  // A remote window's case, made here: a file whose grammar poly cannot see,
+  // because a remote host sees none of the local side's. Refusing there left
+  // no way to colour anything; the scope is typed instead and lands like one
+  // picked from the list.
+  test("Set Syntax Color takes a typed scope when the file's grammar is out of sight", async () => {
+    await vscode.window.showTextDocument(
+      await vscode.workspace.openTextDocument({ language: "plaintext", content: "x\n" }),
+    );
+    assert.ok(
+      !vscode.extensions.all.some((one) =>
+        (one.packageJSON?.contributes?.grammars ?? []).some((grammar: { language?: string }) =>
+          grammar.language === "plaintext"
+        )
+      ),
+      "plaintext has a grammar now, so this no longer reaches the typed path",
+    );
+    const window = vscode.window as unknown as Record<string, unknown>;
+    const { showInputBox } = vscode.window;
+    const answers = ["comment", "#6A9955 italic"];
+    window.showInputBox = () => Promise.resolve(answers.shift());
+    try {
+      await vscode.commands.executeCommand("poly.setSyntaxColor");
+      assert.deepStrictEqual(answers, [], "the command stopped before asking for both");
+      await eventually(
+        "the typed scope in poly.syntaxColors",
+        () =>
+          vscode.workspace.getConfiguration("poly").inspect<Record<string, string>>("syntaxColors")?.globalValue
+              ?.comment === "#6A9955 italic" || undefined,
+      );
+    } finally {
+      window.showInputBox = showInputBox;
+      await setPoly("syntaxColors", undefined, vscode.ConfigurationTarget.Global);
+      await vscode.workspace
+        .getConfiguration("editor")
+        .update("tokenColorCustomizations", undefined, vscode.ConfigurationTarget.Global);
+      await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+    }
+  });
+
+  // The conversion is unit-tested against OpenCC; this is the bundle found
+  // beside dist/extension.js and the edit landing in every selection.
+  test("Chinese conversion rewrites each selection, and the whole file when there is none", async () => {
+    const editor = await vscode.window.showTextDocument(
+      await vscode.workspace.openTextDocument({ content: "鼠标\n软件\n里面\n" }),
+    );
+    editor.selections = [
+      new vscode.Selection(0, 0, 0, 2),
+      new vscode.Selection(1, 0, 1, 2),
+    ];
+    await vscode.commands.executeCommand("poly.toTraditionalChineseTaiwan");
+    assert.strictEqual(editor.document.getText(), "滑鼠\n軟體\n里面\n");
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await vscode.commands.executeCommand("poly.toSimplifiedChineseTaiwan");
+    assert.strictEqual(editor.document.getText(), "鼠标\n软件\n里面\n");
+    await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+  });
+
+  // The engine and the ranges are unit-tested; this is what only a host shows:
+  // the switch, the bundle and its wasm found beside dist/extension.js, a
+  // quick fix, a manual save, and `.autocorrectrc` followed both ways. The
+  // second way is the one the extension got wrong -- its engine only merges a
+  // configuration in, so a rule taken back out stayed off until a reload.
+  test("AutoCorrect reports, fixes, corrects on save, and follows .autocorrectrc both ways", async () => {
+    const rc = join(workspaceRoot(), ".autocorrectrc");
+    const uri = writeFile("autocorrect.md", "测试test文本\n第二行hello世界\n");
+    const findings = () => vscode.languages.getDiagnostics(uri).filter((one) => one.source === "AutoCorrect");
+    const said = (message: string) => () => findings().some((one) => one.message === message) ? true : undefined;
+    try {
+      await setPoly("autocorrect.enabled", true, vscode.ConfigurationTarget.Global);
+      const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+      await eventually("a finding on each line", () => findings().length === 2 ? true : undefined);
+
+      const first = findings().find((one) => one.range.start.line === 0);
+      assert.ok(first);
+      const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>(
+        "vscode.executeCodeActionProvider",
+        uri,
+        first.range,
+      );
+      const fix = actions.find((action) => action.title === "AutoCorrect: 测试 test 文本");
+      assert.ok(fix?.edit, `no quick fix among ${actions.map((action) => action.title)}`);
+      await vscode.workspace.applyEdit(fix.edit);
+      assert.strictEqual(editor.document.lineAt(0).text, "测试 test 文本");
+
+      await vscode.commands.executeCommand("workbench.action.files.save");
+      assert.strictEqual(readFileSync(uri.fsPath, "utf8"), "测试 test 文本\n第二行 hello 世界\n");
+
+      // Comma between CJK is a second rule, so each answer is a finding that
+      // says which rules were in force -- never just an absence of findings.
+      writeFileSync(rc, "rules:\n  space-word: 0\n");
+      await editor.edit((edit) => edit.replace(editor.document.lineAt(0).range, "测试test文本,中文"));
+      await eventually("space-word off", said("测试test文本，中文"));
+      rmSync(rc);
+      await editor.edit((edit) => edit.insert(editor.document.lineAt(1).range.end, " "));
+      await eventually("space-word back on", said("测试 test 文本，中文"));
+    } finally {
+      rmSync(rc, { force: true });
+      await setPoly("autocorrect.enabled", undefined, vscode.ConfigurationTarget.Global);
+      await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+    }
+  });
+
+  // What it draws is upstream's and unit-tested against a stub; what only a
+  // host shows is the wiring. Off by default; hidden from the palette only
+  // while usernamehw.errorlens runs instead; a command run while it is off
+  // loading the bundle beside dist/extension.js and acting; and drawing on a
+  // real editor without throwing once switched on.
+  test("Error Lens is off until switched on, and its commands work either way", async () => {
+    const pkg = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON;
+    const errorLens = () => vscode.workspace.getConfiguration("poly.errorLens");
+    assert.strictEqual(errorLens().inspect("enabled")?.defaultValue, false);
+    const commands = (pkg.contributes.commands as { command: string }[])
+      .map((entry) => entry.command)
+      .filter((id) => id.startsWith("poly.errorLens."));
+    const palette = pkg.contributes.menus.commandPalette as { command: string; when?: string }[];
+    for (const command of commands) {
+      const entry = palette.find((one) => one.command === command);
+      assert.strictEqual(entry?.when, "!poly.yield.errorLens", command);
+    }
+
+    const uri = writeFile("errorLens.txt", "first\nsecond line\n");
+    const planted = vscode.languages.createDiagnosticCollection("errorLens-test");
+    try {
+      const problem = new vscode.Diagnostic(
+        new vscode.Range(1, 7, 1, 11),
+        "a planted problem",
+        vscode.DiagnosticSeverity.Warning,
+      );
+      planted.set(uri, [problem]);
+      const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+      editor.selection = new vscode.Selection(0, 0, 0, 0);
+      await vscode.commands.executeCommand("poly.errorLens.selectProblem");
+      assert.deepStrictEqual(
+        [editor.selection.start.line, editor.selection.start.character, editor.selection.end.character],
+        [1, 7, 11],
+      );
+
+      // The toggle writes the setting without waiting for it, hence the polls.
+      await vscode.commands.executeCommand("poly.errorLens.toggle");
+      await eventually("Error Lens switched on", () => errorLens().get("enabled") === true || undefined);
+      await vscode.commands.executeCommand("poly.errorLens.updateEverything");
+      await vscode.commands.executeCommand("poly.errorLens.toggle");
+      await eventually("Error Lens switched off", () => errorLens().get("enabled") === false || undefined);
+    } finally {
+      planted.dispose();
+      await setPoly("errorLens.enabled", undefined, vscode.ConfigurationTarget.Global);
+      await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+    }
+  });
+
+  // The PlantUML logic is unit-tested and measured against jebbs.plantuml
+  // (tools/plantuml-diff); what only a host shows is the wiring: that the jar
+  // poly.toml pins is the one run, by the configured Java, and that the export
+  // and the markdown fence both land. The "Java" is a script that records its
+  // arguments and answers with a fixed picture, so neither a JVM nor a
+  // download is part of the test.
+  test("PlantUML runs the jar poly.toml pins with the configured Java", async () => {
+    const root = workspaceRoot();
+    const log = join(root, "java-args.txt");
+    const java = join(root, "fake-java");
+    const svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>poly-e2e</text></svg>";
+    writeFileSync(java, `#!/bin/sh\nprintf '%s\\n' "$@" >> '${log}'\ncat >/dev/null\nprintf '%s' '${svg}'\n`, {
+      mode: 0o755,
+    });
+    writeFileSync(join(root, "fake-plantuml.jar"), "not a jar");
+    writeFileSync(join(root, "poly.toml"), "[tools]\nplantuml = \"./fake-plantuml.jar\"\n");
+    const settings: [string, unknown][] = [
+      ["plantuml.java", java],
+      ["plantuml.exportFormat", "svg"],
+      ["markdownDiagrams.enabled", true],
+    ];
+    try {
+      for (const [key, value] of settings) {
+        await setPoly(key, value, vscode.ConfigurationTarget.Workspace);
+      }
+      const uri = writeFile("flow.puml", "@startuml flow\nA -> B\n@enduml\n");
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+      // Not awaited: it resolves when its report message is dismissed.
+      void vscode.commands.executeCommand("poly.plantumlExportDocument");
+      const exported = join(root, "out", "flow", "flow.svg");
+      await eventually("the export", () => {
+        try {
+          return readFileSync(exported, "utf8");
+        } catch {
+          return undefined;
+        }
+      });
+      assert.strictEqual(readFileSync(exported, "utf8"), svg);
+      const args = readFileSync(log, "utf8").split("\n");
+      // Compared as files: poly reports the pin under the real temp directory
+      // (/private/var on macOS), the workspace URI names it by its symlink.
+      const jar = args[args.indexOf("-jar") + 1];
+      assert.ok(
+        args.includes("-jar") && realpathSync(jar) === realpathSync(join(root, "fake-plantuml.jar")),
+        `not the pinned jar: ${args.join(" ")}`,
+      );
+      assert.ok(args.includes("-pipeimageindex") && args.includes("-tsvg"), args.join(" "));
+
+      const notes = await vscode.workspace.openTextDocument(writeFile("notes-puml.md", "```plantuml\nA -> B\n```\n"));
+      // The first render shows the source while Java runs; the picture comes
+      // with the refresh after it.
+      await eventually("the fence's picture", async () => {
+        const html = await vscode.commands.executeCommand<string>("markdown.api.render", notes);
+        return html.includes(Buffer.from(svg).toString("base64")) ? html : undefined;
+      });
+    } finally {
+      for (const [key] of settings) {
+        await setPoly(key, undefined, vscode.ConfigurationTarget.Workspace);
+      }
+      rmSync(join(root, "poly.toml"), { force: true });
+    }
+  });
+
+  // The page is pomdtr's, rebuilt and measured against it by
+  // tools/excalidraw-diff; what only a host shows is that it loads under its
+  // CSP and saves through the document. An empty file is the one the page
+  // writes to untouched, so a scene arriving on disk means the bundle ran.
+  test("an empty Excalidraw file opens in the editor and saves a scene", async () => {
+    const uri = writeFile("sketch.excalidraw", "");
+    await vscode.commands.executeCommand("vscode.open", uri);
+    const active = () => vscode.window.tabGroups.activeTabGroup.activeTab;
+    await eventually("the Excalidraw editor", () => {
+      const input = active()?.input;
+      return input instanceof vscode.TabInputCustom && input.viewType === "poly.excalidraw" ? input : undefined;
+    });
+    await eventually("the page's first change", () => active()?.isDirty || undefined);
+    await vscode.commands.executeCommand("workbench.action.files.save");
+    const scene = JSON.parse(readFileSync(uri.fsPath, "utf8"));
+    assert.strictEqual(scene.type, "excalidraw");
+    assert.strictEqual(scene.source, "https://github.com/linzeyan/vscode-syntax");
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+  });
+
+  // pomdtr's revert put back the file and left the page drawing what was
+  // thrown away; the next edit then saved all of it. The page reloads here,
+  // and an empty file shows that it did: reloaded, it writes to it again.
+  test("reverting an Excalidraw file reloads the page", async () => {
+    const uri = writeFile("reverted.excalidraw", "");
+    await vscode.commands.executeCommand("vscode.open", uri);
+    const dirty = () => vscode.window.tabGroups.activeTabGroup.activeTab?.isDirty;
+    await eventually("the page's first change", () => dirty() || undefined);
+    await vscode.commands.executeCommand("workbench.action.files.revert");
+    assert.strictEqual(dirty(), false, "revert left the document dirty");
+    await eventually("the reloaded page's change", () => dirty() || undefined, 15_000);
+    await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+  });
+
+  // The converter is yzane.markdown-pdf's, and everything it writes is measured
+  // against that extension by tools/markdown-pdf-diff. What only a host shows
+  // is the wiring: the lazy bundle found beside dist/extension.js, with the
+  // styles and KaTeX fonts the build lays out in dist/markdown-pdf. Also what
+  // poly does differently in the HTML: emoji as characters, and a folder named
+  // `*.md.d` kept in the path, where upstream's rename writes into a folder that
+  // does not exist.
+  test("markdown exports HTML beside the file, with its styles and emoji as characters", async () => {
+    const folder = join(workspaceRoot(), "notes.md.d");
+    mkdirSync(folder, { recursive: true });
+    const source = join(folder, "page.md");
+    writeFileSync(source, "# Page\n\n- [x] done\n\n:smile: and $x^2$\n\n```js\nlet a = 1;\n```\n");
+    const target = join(folder, "page.html");
+    rmSync(target, { force: true });
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(source));
+    await vscode.commands.executeCommand("poly.markdownExportHtml");
+    const html = readFileSync(target, "utf8");
+    assert.ok(html.includes("<p>😄 and <span class=\"katex\">"), "emoji or math not rendered");
+    assert.ok(
+      html.includes("<input type=\"checkbox\" id=\"checkbox0\" checked=\"true\"><label for=\"checkbox0\">done"),
+    );
+    assert.match(html, /\.hljs-keyword/, "no highlight.js theme: dist/markdown-pdf/styles is missing");
+    assert.match(html, /url\(data:font\/woff2;base64,/, "no KaTeX fonts: dist/markdown-pdf/styles/katex is missing");
+  });
+
+  // Upstream converts whichever editor is in front when anything is saved, so
+  // Save All or a save from the explorer exports the wrong file.
+  test("convert-on-save exports the file saved, not the one in front", async () => {
+    const settings: [string, unknown][] = [
+      ["markdownPdf.convertOnSave", true],
+      ["markdownPdf.type", ["html"]],
+    ];
+    const saved = join(workspaceRoot(), "saved.md");
+    const front = join(workspaceRoot(), "front.md");
+    try {
+      for (const [key, value] of settings) {
+        await setPoly(key, value, vscode.ConfigurationTarget.Workspace);
+      }
+      writeFileSync(saved, "# Saved\n");
+      writeFileSync(front, "# Front\n");
+      for (const file of [saved, front]) {
+        rmSync(file.replace(/\.md$/, ".html"), { force: true });
+      }
+      const document = await vscode.workspace.openTextDocument(saved);
+      await vscode.window.showTextDocument(document);
+      const edit = new vscode.WorkspaceEdit();
+      edit.insert(document.uri, new vscode.Position(1, 0), "\nMore.\n");
+      await vscode.workspace.applyEdit(edit);
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(front));
+      await document.save();
+      const html = await eventually("the saved file's export", () => {
+        try {
+          // Hundreds of KB with the styles and fonts inlined: read once it is
+          // whole, not while it is being written.
+          const text = readFileSync(saved.replace(/\.md$/, ".html"), "utf8");
+          return text.includes("</html>") ? text : undefined;
+        } catch {
+          return undefined;
+        }
+      });
+      assert.ok(html.includes("<p>More.</p>"), "exported before the save, or from the old text");
+      assert.throws(() => readFileSync(front.replace(/\.md$/, ".html")), "the editor in front was exported");
+    } finally {
+      for (const [key] of settings) {
+        await setPoly(key, undefined, vscode.ConfigurationTarget.Workspace);
+      }
+    }
+  });
+
+  // The page and the picture it takes are adpyke.codesnap's, measured against
+  // it by tools/codesnap-diff. What only a host shows is the wiring: the page
+  // read from dist/codesnap, opened beside the code without taking the focus
+  // from it, and each selection handed over -- by way of the clipboard, which
+  // is where the page pastes the colored code from.
+  test("CodeSnap opens beside the code and follows the selection", async () => {
+    const document = await vscode.workspace.openTextDocument(
+      writeFile("snap.ts", "const a = 1;\nconst b = 2;\nconst c = 3;\n"),
+    );
+    const editor = await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+    const page = () =>
+      vscode.window.tabGroups.all.flatMap((group) => group.tabs).find((tab) =>
+        tab.input instanceof vscode.TabInputWebview && tab.input.viewType.endsWith("poly.codeSnap")
+      );
+    await vscode.env.clipboard.writeText("before");
+    try {
+      editor.selection = new vscode.Selection(0, 0, 1, 12);
+      await vscode.commands.executeCommand("poly.codeSnap");
+      const tab = await eventually("the CodeSnap page", page);
+      assert.notStrictEqual(tab.group.viewColumn, vscode.ViewColumn.One, "the page did not open beside the code");
+      assert.strictEqual(vscode.window.activeTextEditor?.document, document, "the page took the focus");
+      await eventually(
+        "the selection handed over",
+        async () => await vscode.env.clipboard.readText() === "const a = 1;\nconst b = 2;" || undefined,
+      );
+      editor.selection = new vscode.Selection(2, 0, 2, 12);
+      await eventually(
+        "the new selection handed over",
+        async () => await vscode.env.clipboard.readText() === "const c = 3;" || undefined,
+      );
+    } finally {
+      const tab = page();
+      if (tab) await vscode.window.tabGroups.close(tab);
+    }
+  });
+
+  // The preview is a page served from localhost out of dist/swagger, framed in
+  // a webview; a JSON spec is validated by the schema `jsonValidation` names,
+  // which refers to the two beside it. A layout the build or the manifest gets
+  // wrong shows a blank frame or validates nothing, and fails nowhere else.
+  test("Swagger Preview serves the spec beside it, and a JSON spec is validated", async () => {
+    const uri = writeFile(
+      "api.json",
+      JSON.stringify({ swagger: "2.0", info: { title: "Pets", version: "1" }, paths: {}, bogus: 1 }, null, 2),
+    );
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+    const page = () =>
+      vscode.window.tabGroups.all.flatMap((group) => group.tabs).find((tab) =>
+        tab.input instanceof vscode.TabInputWebview && tab.input.viewType.endsWith("poly.swaggerPreview")
+      );
+    try {
+      await vscode.commands.executeCommand("poly.swaggerPreview");
+      const tab = await eventually("the Swagger preview", page);
+      assert.strictEqual(tab.label, `Swagger Preview - ${document.fileName}`);
+      assert.strictEqual(tab.group.viewColumn, vscode.ViewColumn.Two);
+
+      // The extension's own instance of the server: require shares it, keyed
+      // by the path as spelled, and on Windows `extensionPath` spells the
+      // drive `c:` where the extension's own require said `C:`.
+      const root = vscode.extensions.getExtension(EXTENSION_ID)!.extensionPath;
+      const file = join(root, "dist", "swaggerPreview.js");
+      const server: typeof import("../../editor/swaggerPreview") = require(
+        Object.keys(require.cache).find((one) => one.toLowerCase() === file.toLowerCase()) ?? file,
+      );
+      const address = server.url(document.fileName);
+      const html = await (await fetch(address)).text();
+      assert.match(html, /EventSource\('events\/' \+ fileHash\)/);
+      const bundle = await fetch(new URL("node_modules/swagger-ui-dist/swagger-ui-bundle.js", address));
+      assert.strictEqual(bundle.status, 200);
+      const events = await fetch(address.replace(/\/([^/]+)$/, "/events/$1"));
+      const reader = events.body!.getReader();
+      const { value } = await reader.read();
+      await reader.cancel();
+      const spec = JSON.parse(new TextDecoder().decode(value).replace(/^data: /, ""));
+      assert.strictEqual(spec.info.title, "Pets");
+
+      await eventually(
+        "the schema's complaint about the stray property",
+        () => vscode.languages.getDiagnostics(uri).find((one) => one.message.includes("bogus")),
+      );
+    } finally {
+      const tab = page();
+      if (tab) await vscode.window.tabGroups.close(tab);
+      await vscode.commands.executeCommand("poly.swaggerStop");
+    }
+  });
+
+  // Marp is three bundles loaded on demand, and each link only shows in a
+  // running editor: the preview has to hand a `marp: true` document to Marp's
+  // markdown-it and every other one to the usual chain; the directive checks
+  // have to be registered once the Markdown arrives; and the export has to
+  // find marp-cli, and the template script marp-cli reads from beside itself.
+  // HTML is the export that needs no browser, so it is the one checked here.
+  test("Marp renders a marp: true deck as slides, checks its directives and exports it", async () => {
+    const deck = writeFile("deck.md", "---\nmarp: true\ntheme: nonexistent\n---\n\n# One\n\n---\n\n# Two\n");
+    const document = await vscode.workspace.openTextDocument(deck);
+    await vscode.window.showTextDocument(document);
+
+    const slides: string = await vscode.commands.executeCommand("markdown.api.render", document);
+    assert.match(slides, /<style id="__marp-vscode-style">/);
+    assert.strictEqual(slides.match(/data-marp-vscode-slide-wrapper/g)?.length, 2);
+    const plain: string = await vscode.commands.executeCommand(
+      "markdown.api.render",
+      await vscode.workspace.openTextDocument(writeFile("plain.md", "# One\n\n---\n\n# Two\n")),
+    );
+    assert.doesNotMatch(plain, /__marp-vscode/);
+
+    const unknown = await eventually(
+      "the unknown theme to be reported",
+      () => vscode.languages.getDiagnostics(deck).find((one) => one.code === "unknown-theme"),
+    );
+    assert.strictEqual(unknown.source, "marp-vscode");
+    assert.strictEqual(unknown.range.start.line, 2);
+
+    const exported = join(workspaceRoot(), "deck.html");
+    const result = await vscode.lm.invokeTool("poly_export_marp", {
+      input: { inputFilePath: deck.fsPath, outputFilePath: exported },
+      toolInvocationToken: undefined,
+    });
+    const said = result.content.map((part) => (part instanceof vscode.LanguageModelTextPart ? part.value : "")).join(
+      "",
+    );
+    assert.match(said, /successfully exported/);
+    const html = readFileSync(exported, "utf8");
+    assert.match(html, /<h1[^>]*>One<\/h1>/);
+    assert.match(html, /bespoke/);
+  });
+
+  // The data and what each action does to a repository are held to
+  // mhutchie.git-graph's own by tools/git-graph-diff, the graph's lanes by
+  // gitGraphLayout's unit tests. What only a host shows is the wiring: every
+  // command the manifest declares reaching a handler in the half loaded on
+  // first use, the panel opening on the repository it was asked for, a menu
+  // command acting on the context the page puts on what was right-clicked, a
+  // diff side read out of a revision by the poly-git: scheme, which has to be
+  // registered before any of that has loaded, and a diff opened from the page
+  // stepping on through the files it was listed with.
+  test("Git History opens on a repository, and its commands act on what was right-clicked", async () => {
+    const repo = join(workspaceRoot(), "graph-repo");
+    rmSync(repo, { recursive: true, force: true });
+    mkdirSync(repo);
+    const git = (...args: string[]) =>
+      execFileSync("git", [
+        "-c",
+        "user.name=Ada",
+        "-c",
+        "user.email=ada@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ], {
+        cwd: repo,
+        encoding: "utf8",
+      }).trim();
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(repo, "a.txt"), "first\n");
+    git("add", "a.txt");
+    git("commit", "-q", "-m", "First");
+    const hash = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "a.txt"), "second\n");
+    writeFileSync(join(repo, "b.txt"), "new\n");
+    git("add", "a.txt", "b.txt");
+    git("commit", "-q", "-m", "Second");
+    const second = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "a.txt"), "changed\n");
+    writeFileSync(join(repo, "c.txt"), "untracked\n");
+
+    const extension = vscode.extensions.getExtension(EXTENSION_ID)!;
+    const host: typeof import("../../editor/gitGraphPanel") = require(
+      join(extension.extensionPath, "dist", "gitGraph.js"),
+    );
+    const declared = (extension.packageJSON.contributes.commands as { command: string }[])
+      .map((entry) => entry.command)
+      .filter((id) => id.startsWith("poly.gitGraph."))
+      .map((id) => id.slice("poly.gitGraph.".length));
+    assert.deepStrictEqual([...host.handled].sort(), declared.sort(), "declared commands and handlers differ");
+    // Without git the page drops polyGit, and only the reads may stay in its menus.
+    const menus = (extension.packageJSON.contributes.menus["webview/context"] as { command: string; when: string }[])
+      .filter((entry) => entry.command.startsWith("poly.gitGraph."));
+    for (const { command, when } of menus) {
+      const read = host.READS.has(command.slice("poly.gitGraph.".length));
+      assert.strictEqual(/&& polyGit\b/.test(when), !read, `${command}: polyGit in its menu ≠ needing git`);
+    }
+
+    const gitExtension = vscode.extensions.getExtension<
+      { getAPI(version: 1): { openRepository(root: vscode.Uri): Promise<unknown> } }
+    >(
+      "vscode.git",
+    )!;
+    await (await gitExtension.activate()).getAPI(1).openRepository(vscode.Uri.file(repo));
+    const page = () =>
+      vscode.window.tabGroups.all.flatMap((group) => group.tabs).find((tab) =>
+        tab.input instanceof vscode.TabInputWebview && tab.input.viewType.endsWith("poly.gitGraph")
+      );
+    const historyDiff = (tab: vscode.Tab | undefined) =>
+      tab?.input instanceof vscode.TabInputTextDiff && tab.input.original.scheme === "poly-git"
+        ? tab.input
+        : undefined;
+    try {
+      // From the Source Control title the argument is the repository itself.
+      await vscode.commands.executeCommand("poly.gitGraph.view", { rootUri: vscode.Uri.file(repo) });
+      assert.strictEqual((await eventually("the Git History panel", page)).label, "Git History");
+
+      // From the Explorer the argument is the file, which has to be found in
+      // its repository; the plain command goes back to all of it.
+      await vscode.commands.executeCommand("poly.gitGraph.viewFileHistory", vscode.Uri.file(join(repo, "b.txt")));
+      await eventually("the panel narrowed to b.txt", () => page()?.label === "Git History: b.txt" || undefined);
+      await vscode.commands.executeCommand("poly.gitGraph.view", { rootUri: vscode.Uri.file(repo) });
+      await eventually("the panel on the whole repository", () => page()?.label === "Git History" || undefined);
+
+      await vscode.env.clipboard.writeText("before");
+      await vscode.commands.executeCommand("poly.gitGraph.copyHash", { repo, hash });
+      assert.strictEqual(await vscode.env.clipboard.readText(), hash);
+
+      const side = vscode.Uri.file(join(repo, "a.txt")).with({
+        scheme: "poly-git",
+        query: JSON.stringify({ repo, ref: hash, path: "a.txt" }),
+      });
+      assert.strictEqual(
+        (await vscode.workspace.openTextDocument(side)).getText(),
+        "first\n",
+        "not the file as committed",
+      );
+
+      // A diff covers the panel it was opened from, so the commit's next file
+      // has to be reachable from the diff. The working tree has changes of its
+      // own here, which a plain Next Changed File would open instead; the
+      // uncommitted list's right side is the working file itself, not poly-git:.
+      const landsOn = (file: string, what: string) =>
+        eventually(what, () => {
+          const input = historyDiff(vscode.window.tabGroups.activeTabGroup.activeTab);
+          return input && basename(input.modified.fsPath) === file ? file : undefined;
+        }, 10_000);
+      const committed = [
+        { oldPath: "a.txt", newPath: "a.txt", type: "M" as const },
+        { oldPath: "b.txt", newPath: "b.txt", type: "A" as const },
+      ].map((file) => ({ ...file, additions: 1, deletions: 1, from: hash, to: second }));
+      await host.openListed(repo, committed, 0);
+      await landsOn("a.txt", "the listed file to open as a diff");
+      await vscode.commands.executeCommand("poly.nextChangedFile");
+      await landsOn("b.txt", "next to be the commit's next file");
+      await vscode.commands.executeCommand("poly.nextChangedFile");
+      await landsOn("a.txt", "next to wrap to the commit's first file");
+      await vscode.commands.executeCommand("poly.previousChangedFile");
+      await landsOn("b.txt", "previous to wrap to the commit's last file");
+
+      const uncommitted = [
+        { oldPath: "a.txt", newPath: "a.txt", type: "M" as const, from: "HEAD" },
+        { oldPath: "c.txt", newPath: "c.txt", type: "U" as const, from: "" },
+      ].map((file) => ({ ...file, additions: null, deletions: null, to: "*" }));
+      await host.openListed(repo, uncommitted, 0);
+      await landsOn("a.txt", "the uncommitted file to open as a diff");
+      await vscode.commands.executeCommand("poly.nextChangedFile");
+      await landsOn("c.txt", "next to be the next uncommitted file");
+    } finally {
+      const tab = page();
+      if (tab) await vscode.window.tabGroups.close(tab);
+      const diffs = vscode.window.tabGroups.all.flatMap((group) => group.tabs).filter((tab) => historyDiff(tab));
+      await vscode.window.tabGroups.close(diffs);
+    }
+  });
+
+  // Run only in the launch that disables vscode.git (runTest.ts), which is how
+  // a machine without git looks to Git History. What poly reads is held to git
+  // by tools/git-embed-check.js; what only a host shows is the switch: the
+  // repository found without vscode.git, a revision read through poly, and a
+  // command that would change the repository refused rather than run.
+  test("Git History without git reads through poly and changes nothing", async () => {
+    assert.strictEqual(vscode.extensions.getExtension("vscode.git"), undefined, "vscode.git is enabled here");
+    const repo = join(workspaceRoot(), "graph-repo");
+    rmSync(repo, { recursive: true, force: true });
+    mkdirSync(repo);
+    const git = (...args: string[]) =>
+      execFileSync("git", [
+        "-c",
+        "user.name=Ada",
+        "-c",
+        "user.email=ada@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ], {
+        cwd: repo,
+        encoding: "utf8",
+      }).trim();
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(repo, "a.txt"), "first\n");
+    git("add", "a.txt");
+    git("commit", "-q", "-m", "First");
+    git("branch", "other");
+    const hash = git("rev-parse", "HEAD");
+
+    const page = () =>
+      vscode.window.tabGroups.all.flatMap((group) => group.tabs).find((tab) =>
+        tab.input instanceof vscode.TabInputWebview && tab.input.viewType.endsWith("poly.gitGraph")
+      );
+    try {
+      await vscode.commands.executeCommand("poly.gitGraph.view");
+      assert.strictEqual((await eventually("the Git History panel", page)).label, "Git History");
+
+      await vscode.commands.executeCommand("poly.gitGraph.checkoutBranch", { repo, branch: "other" });
+      assert.strictEqual(git("symbolic-ref", "--short", "HEAD"), "main", "a checkout ran without git");
+
+      await vscode.env.clipboard.writeText("before");
+      await vscode.commands.executeCommand("poly.gitGraph.copyHash", { repo, hash });
+      assert.strictEqual(await vscode.env.clipboard.readText(), hash);
+
+      const side = vscode.Uri.file(join(repo, "a.txt")).with({
+        scheme: "poly-git",
+        query: JSON.stringify({ repo, ref: hash, path: "a.txt" }),
+      });
+      assert.strictEqual((await vscode.workspace.openTextDocument(side)).getText(), "first\n", "poly did not read it");
+    } finally {
+      const tab = page();
+      if (tab) await vscode.window.tabGroups.close(tab);
+    }
+  });
+
+  // Which command runs a file, and how it is spelled, is held to upstream's by
+  // codeRunner.test.ts. What only a host shows is the switch reaching the
+  // command -- a key bound in keybindings.json gets past every `when` -- and a
+  // process actually started, with what it says landing in Code Runner's panel.
+  test("Code Runner does nothing until switched on, then runs the file into its output panel", async () => {
+    const config = vscode.workspace.getConfiguration("poly");
+    assert.strictEqual(config.get("codeRunner.enabled"), false, "Code Runner ships switched on");
+    const marker = join(workspaceRoot(), "code-runner.ran");
+    const script = runnable("code-runner.sh", marker, "poly-code-runner-says-hello");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script));
+
+    await vscode.commands.executeCommand("poly.codeRunner.run");
+    await notRun(script, marker, "Run Code ran with Code Runner switched off");
+
+    await setPoly("codeRunner.enabled", true, vscode.ConfigurationTarget.Workspace);
+    try {
+      await vscode.commands.executeCommand("poly.codeRunner.run");
+      const output = await ran(script, marker, "poly-code-runner-says-hello");
+      // The line upstream prints first: the command it ran, shebang and all.
+      assert.match(output, /\[Running\] \/bin\/sh ".*code-runner\.sh"/);
+      // Finished, so the lens test below is not told "Code is already running!".
+      await eventually("the run to end", () => outputSaying(`[Done] exited with code=${SH ? "0" : ""}`));
+    } finally {
+      await setPoly("codeRunner.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  });
+
+  // The lens has one switch of its own, and Code Runner's is not it: a lens
+  // that vanished, or a click that did nothing, because a different feature
+  // was off would read as broken.
+  test("the run lens runs its file through Code Runner, with Code Runner switched off", async () => {
+    const config = vscode.workspace.getConfiguration("poly");
+    assert.strictEqual(config.get("codeRunner.enabled"), false);
+    await setPoly("runCodeLens.enabled", true, vscode.ConfigurationTarget.Workspace);
+    try {
+      const marker = join(workspaceRoot(), "run-lens.ran");
+      const script = runnable("run-lens.sh", marker, "poly-run-lens-says-hello");
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script));
+      await clickRunLens(script);
+      await ran(script, marker, "poly-run-lens-says-hello");
+    } finally {
+      await setPoly("runCodeLens.enabled", undefined, vscode.ConfigurationTarget.Workspace);
+    }
   });
 
   // poly claims the formatter slot and stops there. It used to also declare
@@ -895,5 +1957,79 @@ func main() {
       [],
       "claims the formatter slot but never activates poly",
     );
+  });
+
+  // Last, so that the tests above have had the daemon write to stderr. The log
+  // someone attaches to a report is the file in the extension's logs folder;
+  // a plain channel put it in a numbered file elsewhere, and a log channel fed
+  // the pipe's chunks as they come stamps some lines and runs others on.
+  test("the daemon's log is Poly.log in the extension's logs folder, a line to an entry", async () => {
+    const logs = process.env.POLY_E2E_LOGS;
+    assert.ok(logs, "the test host was given no logs folder");
+    const name = readdirSync(logs, { recursive: true, encoding: "utf8" })
+      .find((one) => one.endsWith(join(EXTENSION_ID, "Poly.log")));
+    assert.ok(name, `no ${EXTENSION_ID}/Poly.log under ${logs}`);
+    // The daemon times every request it answers.
+    const stderr = /^\S+ \S+ \[info\] \[poly\] textDocument\/formatting [\d.]+ms$/m;
+    const text = await eventually("a line of the daemon's stderr", () => {
+      const read = readFileSync(join(logs, name), "utf8");
+      return stderr.test(read) ? read : undefined;
+    });
+    assert.match(text, /^\S+ \S+ \[info\] \[poly\] binary .* reports /m, "poly's own lines are not in it");
+    assert.doesNotMatch(text, /^\[poly\]/m, "a line of stderr ran on from the one before, without its own stamp");
+  });
+});
+
+// Run in a launch of its own, beside a stand-in with formulahendry.code-runner's
+// id (src/test/fixture-code-runner) and with Code Runner and the run lens
+// switched on in that workspace; index.ts picks this suite out by its title.
+// Every other test has to run without the stand-in, since poly would stand
+// aside in all of them.
+suite("Code Runner beside formulahendry.code-runner", () => {
+  suiteSetup(async function() {
+    this.timeout(120_000);
+    assert.ok(vscode.extensions.getExtension("formulahendry.code-runner"), "the stand-in is not installed");
+    await vscode.extensions.getExtension(EXTENSION_ID)?.activate();
+  });
+
+  // Both installed and both answering ctrl+alt+n would run the file twice. The
+  // lens is poly's alone, so it stays.
+  test("poly's Run Code stands aside, switched on or not, and the run lens still runs", async () => {
+    const config = vscode.workspace.getConfiguration("poly");
+    assert.strictEqual(config.get("codeRunner.enabled"), true, "the workspace did not switch Code Runner on");
+    const marker = join(workspaceRoot(), "yield.ran");
+    const script = runnable("yield.sh", marker, "poly-yield-says-hello");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script));
+
+    await vscode.commands.executeCommand("poly.codeRunner.run");
+    await notRun(script, marker, "Run Code ran beside formulahendry.code-runner");
+
+    await clickRunLens(script);
+    await ran(script, marker, "poly-yield-says-hello");
+  });
+});
+
+suite("poly in Restricted Mode", () => {
+  suiteSetup(async function() {
+    this.timeout(120_000);
+    await vscode.extensions.getExtension(EXTENSION_ID)?.activate();
+  });
+
+  // Every other launch passes --disable-workspace-trust, so this is the one
+  // place a folder is not trusted, and the first assertion is what makes the
+  // rest mean anything.
+  test("poly in Restricted Mode formats with what it embeds and runs nothing the folder chose", async function() {
+    this.timeout(120_000);
+    assert.strictEqual(vscode.workspace.isTrusted, false, "the folder is trusted");
+    // The daemon answering at all says the folder's serverPath was ignored.
+    const text = await formatted(writeFile("untrusted.md", "# Title\nText\n"));
+    assert.ok(!existsSync(process.env.POLY_E2E_PRETTIER_RAN!), "the folder's own prettier ran");
+    assert.strictEqual(text, "# Title\n\nText\n");
+
+    const marker = join(workspaceRoot(), "restricted.ran");
+    const script = runnable("restricted.sh", marker, "poly-restricted-says-hello");
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script));
+    await vscode.commands.executeCommand("poly.codeRunner.run");
+    await notRun(script, marker, "Run Code ran in a folder that is not trusted");
   });
 });

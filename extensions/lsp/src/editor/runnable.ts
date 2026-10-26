@@ -12,12 +12,15 @@
  * launch configuration, and still puts the debug toolbar on screen. Two
  * buttons, one behaviour, and the one labelled `run` was the one lying. So D6
  * is narrowed rather than kept: poly starts one process, the one the user just
- * pressed a button labelled `run` on, in a visible terminal they can read and
- * kill. It does not attach to it, supervise it, or keep anything alive.
+ * pressed a button labelled `run` on, where they can read it and stop it. It
+ * does not attach to it, restart it, or keep it alive past the window.
  *
- * That costs poly a small amount of knowledge it did not have before -- how
- * four languages are run from a shell. `RUN_LINES` is all of it, and the lens
- * only offers `run` where there is an entry in it.
+ * How a file is run is not this file's to know. It is Code Runner's executor
+ * maps (`poly.codeRunner.*`, read by codeRunner/executor.ts), the same table
+ * Run Code reads, and `run` goes through the same engine: into the output
+ * panel, or a terminal with `poly.codeRunner.runInTerminal`. The lens offers
+ * `run` wherever that table has an answer; what is left here is where the
+ * lens sits.
  */
 
 /** As much of `vscode.DocumentSymbol` as the choice below depends on. */
@@ -82,61 +85,6 @@ export function findsEntryInText(languageId: string): boolean {
 }
 
 /**
- * The interpreter a script asked for, by name.
- *
- * Taken from the shebang rather than assumed to be bash. A `#!/bin/zsh` script
- * run under bash is a different language with similar syntax, and the ways it
- * differs -- arrays indexed from one, word splitting, `setopt` -- are exactly
- * the ways a script breaks quietly rather than loudly.
- */
-export function interpreterOf(text: string): string | undefined {
-  return /^#!.*?\b(bash|dash|ksh|zsh|sh)\b/.exec(text)?.[1];
-}
-
-/**
- * How to run a file from a shell, per language, run from the file's directory.
- *
- * Four, and the list is short on purpose. C, C++, Java and C# have entry
- * points this file already finds, and running one means compiling first --
- * with flags, an output path and a toolchain poly would have to have opinions
- * about. They get `debug` only, which is the honest answer: the extension that
- * knows how to build them is the one that should.
- *
- * `go run .` and `cargo run` take the directory rather than the file, because
- * a main package is rarely one file and `go run main.go` fails on the first
- * symbol defined next door. cargo searches upward for the manifest, so the
- * file's own directory is enough for both.
- */
-type RunLine = (file: string, text: string, windows: boolean) => string;
-
-const RUN_LINES: ReadonlyMap<string, RunLine> = new Map<string, RunLine>([
-  ["go", () => "go run ."],
-  ["rust", () => "cargo run"],
-  // python3 is the name that means python 3 everywhere except Windows,
-  // where the installer writes `python` and `python3` is a Store stub that
-  // opens the Store.
-  ["python", (file, _text, windows) => `${windows ? "python" : "python3"} "${file}"`],
-  ["shellscript", (file, text) => `${interpreterOf(text) ?? "sh"} "${file}"`],
-]);
-
-/**
- * The command line for running `fileName`, or nothing if poly does not know.
- *
- * `fileName` is the base name, not the path: the caller runs this in the
- * file's own directory, which keeps the line short enough to read in a
- * terminal and sidesteps most of what quoting a full path would involve. It is
- * still quoted, because a base name can contain a space.
- */
-export function runLine(
-  languageId: string,
-  fileName: string,
-  text: string,
-  windows: boolean,
-): string | undefined {
-  return RUN_LINES.get(languageId)?.(fileName, text, windows);
-}
-
-/**
  * The line the entry point is on, for a language that has no declaration for it.
  *
  * Zero-based, and `undefined` when the file has no entry point -- which is most
@@ -152,6 +100,39 @@ export function entryLine(languageId: string, text: string): number | undefined 
   // The index counts characters, and a lens wants a line. Everything before
   // the match, split -- the last piece is the matched line itself.
   return text.slice(0, found.index).split("\n").length - 1;
+}
+
+/**
+ * Whether a file's declarations can hold its program's entry point at all.
+ *
+ * Go is where the name alone lies: `func main` in any package but `main` is an
+ * ordinary function -- `go run` refuses the file as "not a main package", and
+ * delve with it -- so a button there is an offer the file cannot keep.
+ */
+export function canHoldEntry(languageId: string, text: string): boolean {
+  return languageId !== "go" || goPackage(text) === "main";
+}
+
+/** Comments and white space: all Go allows before the package clause. */
+const GO_SKIP = /\s+|\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/y;
+const GO_PACKAGE = /package\s+(\w+)/y;
+
+/**
+ * A Go file's package name, from its package clause.
+ *
+ * Scanned past the comments rather than searched for: a build constraint or a
+ * licence header comes first, and `package main` quoted in a comment's prose
+ * is not the clause.
+ */
+function goPackage(text: string): string | undefined {
+  let at = 0;
+  for (;;) {
+    GO_SKIP.lastIndex = at;
+    if (!GO_SKIP.exec(text) || GO_SKIP.lastIndex === at) break;
+    at = GO_SKIP.lastIndex;
+  }
+  GO_PACKAGE.lastIndex = at;
+  return GO_PACKAGE.exec(text)?.[1];
 }
 
 /**

@@ -32,9 +32,9 @@ CARGO_PROFILE_RELEASE_CODEGEN_UNITS ?= 16
 export CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 .DEFAULT_GOAL := help
-.PHONY: help build test lint notices pins config dogfood smoke probe e2e gates \
+.PHONY: help build test lint notices pins config dogfood smoke e2e gates \
 	version grammars tokdeps grammar-diff grammar-fuzz grammar-corpus grammar-real editor-diff ext-diff mermaid-diff engine-diff \
-	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz gutter-cache bump control clean syntax
+	lsp-fmt-diff ref-lens lens-probe toc-fuzz list-fuzz gutter-cache git-embed bump control clean syntax
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -85,15 +85,7 @@ dogfood: build ## poly formats and lints its own repo
 smoke: build ## LSP handshake, formatting and a memory soak over stdio
 	python3 tools/lsp-smoke.py $(POLY)
 
-# Skips a language whose server is not installed and says so. CI installs five
-# of the six and asserts they are present, because a check that only ever skips
-# is a check nobody is running.
-probe: build ## Language server proxy, against whichever servers are installed
-	python3 tools/lsp-proxy-probe.py $(POLY)
-
-# Its own target rather than more of `probe`: this one is about gofumpt and
-# golangci-lint, which is `poly check`'s side of Go and not the proxy's, and it
-# needs a Go toolchain rather than a language server.
+# gofumpt and golangci-lint, `poly check`'s side of Go; it needs a Go toolchain.
 go: build ## poly's Go support end to end: gofumpt, golangci-lint, editor vs CI
 	python3 tools/go-acceptance.py $(POLY)
 
@@ -143,12 +135,14 @@ syntax: ## Typecheck, build and package poly-syntax-highlight
 # has. The protobuf and shell sections have no offline server to ask, so they
 # supply providers shaped like what `make lens-probe` measured; that pins poly's
 # wiring, and `lens-probe` is what says the real servers still behave that way.
+# GraphQL, nginx, Makefile and shell are answered by poly's own daemon, hence
+# the build.
 #
 # It exists because `make editor`'s unit tests could not see the defect that
 # put a count over every parameter and local: they assert against a symbol tree
 # written by the same hand as the rule, and the rule was wrong about what a
 # real server reports. Every lens added since is checked here for that reason.
-ref-lens: ## Where poly's code lenses land, in a real extension host
+ref-lens: build ## Where poly's code lenses land, in a real extension host
 	node tools/ref-lens-check/run.js
 
 # The table of contents command's anchors against the ones the preview writes,
@@ -186,6 +180,14 @@ list-fuzz: build ## List keystrokes against the formatter that has to accept the
 # visible lines".
 gutter-cache: ## The image gutter cache stays the size of what is on screen
 	node tools/gutter-cache-check.js
+
+# Where there is no git, Git History hands its questions to `poly git`. Every
+# view, details pane, comparison and tag it reads, through each, compared on the
+# fixtures git-graph-diff builds (exactly) and on this checkout's own history
+# (up to git's rename and line-split heuristics; see the script). Name more
+# repositories to check them instead: `node tools/git-embed-check.js <repo>...`.
+git-embed: ## Git History reads the same through poly git as through git
+	node tools/git-embed-check.js
 
 # The offline half of ci.yml's grammars job. The other half re-fetches every
 # pinned grammar, which needs the network and a token; what stays here is
@@ -324,11 +326,10 @@ ext-diff: build ## poly against the extensions it replaced, with screenshots (do
 # nothing about whether they still say it.
 #
 # It was an audit, on the grounds that CI has neither gopls nor buf. Both halves
-# of that were wrong: ci.yml installs a pinned gopls for `probe` in the same
-# job, and buf is poly's to download. So it is a gate that skips when the Go
-# toolchain is absent, and CI passes `--require` to say that skipping there is
-# a failure -- the same contract `probe` already has.
-lens-probe: build ## What gopls and buf still offer the lenses poly routes to
+# of that were wrong: ci.yml installs a pinned gopls, and buf is poly's to
+# download. So it is a gate that skips when the Go toolchain is absent, and CI
+# passes `--require` to say that skipping there is a failure.
+lens-probe: build ## What gopls and buf still offer the lenses poly asks for
 	python3 tools/lens-probe.py $(POLY)
 
 # The one differential whose reference ships inside the editor rather than
@@ -340,6 +341,14 @@ lens-probe: build ## What gopls and buf still offer the lenses poly routes to
 # extensions/lsp/.vscode-test, which `make e2e` downloads.
 mermaid-diff: ## poly's mermaid rendering against VSCode's built-in
 	node tools/mermaid-diff/run.js
+
+# The preview's other additions against what they replace: GitHub styling
+# against bierner.markdown-preview-github-styles installed in a second host,
+# the diagram fences against MarkNote's own library calls. Downloads bierner's
+# VSIX and reads a MarkNote checkout (MARKNOTE=, default ~/git/MarkNote), so it
+# is an audit and not a gate. Writes screenshots beside its report.
+preview-diff: ## poly's preview styling and diagram fences against what they replace
+	node tools/preview-diff/run.js
 
 # The third differential, and the only one where poly does not replace the
 # upstream so much as swallow it: `poly fmt` and `poly check` link their
@@ -386,7 +395,7 @@ version: build ## Check every version string agrees, binary included
 # grammars, then extensions. CI runs them in parallel and a developer cannot, so
 # this is the serial reading of the same list rather than the same order; what
 # still holds is that a failure here lands on the gate CI would name.
-gates: lint test notices pins config nls smoke dogfood version probe lens-probe go tf rust deadcode grammars e2e editor syntax ref-lens gutter-cache toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
+gates: lint test notices pins config nls smoke dogfood version lens-probe go tf rust deadcode grammars e2e editor syntax ref-lens gutter-cache git-embed toc-fuzz list-fuzz ## Everything above, grouped as CI's jobs are
 	@echo "all gates passed"
 
 # make bump VERSION=0.8.0
@@ -408,7 +417,7 @@ bump: ## Move every version string to VERSION=x.y.z
 #
 # A behaviour change is only proven by a binary that fails the new check, so
 # this builds one from any ref into its own worktree. Kept as a target because
-# every round of proxy work has needed it and the worktree dance is easy to get
+# every round of daemon work has needed it and the worktree dance is easy to get
 # wrong -- a control built in the working tree is not a control.
 control: ## Build a comparison binary from REF=<git-ref> into /tmp
 	@test -n "$(REF)" || { echo "usage: make control REF=<git-ref>" >&2; exit 1; }
